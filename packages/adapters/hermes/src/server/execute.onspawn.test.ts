@@ -119,6 +119,18 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(opts.onSpawn).toBeDefined();
   });
 
+  it("omits the auto model when an explicit provider is selected", async () => {
+    const { ctx } = makeCtx({ provider: "openai-codex" });
+
+    await execute(ctx as any);
+
+    const mocked = vi.mocked(serverUtils.runChildProcess);
+    const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
+    const args = lastCall[2] as string[];
+    expect(args).toContain("openai-codex");
+    expect(args).not.toContain("auto");
+  });
+
   it("preserves a specific stderr diagnostic for a nonzero exit", async () => {
     vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
       exitCode: 1,

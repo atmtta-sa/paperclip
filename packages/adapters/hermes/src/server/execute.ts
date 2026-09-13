@@ -444,7 +444,10 @@ export async function execute(
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
-  if (model) {
+  // An explicit provider must not be paired with `-m auto`: Hermes resolves
+  // that model through the user's configured default and can override the
+  // requested provider. Keep `auto` only when Hermes owns both decisions.
+  if (model !== DEFAULT_MODEL || resolvedProvider === "auto") {
     args.push("-m", model);
   }
 

@@ -208,6 +208,20 @@ A third scheduler-disabled disposable runtime exercised the native provider adap
 
 Safe artifacts remain outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-provider-canaries-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase5-provider-canaries-final.json`, `.hermes/artifacts/paperclip-agent-office/phase5-codex-canary-retry-run.json`, and `.hermes/artifacts/paperclip-agent-office/phase5-hermes-openai-codex-canary-run.json`. No credentials are retained in this document.
 
+### Hermes provider-routing acceptance — 2026-09-13
+
+A focused RED/GREEN adapter fix removed the conflicting `-m auto` argument whenever an explicit Hermes provider is selected. A fresh scheduler-disabled disposable runtime then closed the Hermes acceptance row:
+
+- native `hermes_local` run `7fdb58df-725f-4ff6-94a1-6a80d0230c82` used `openai-codex`, succeeded with exit code `0`, and reported exact byte verification for `HERMES_CANARY.txt` containing `HERMES_PHASE5_CANARY_OK` plus one newline;
+- Hermes removed its isolated worktree after completion, so the temporary output file was intentionally not retained;
+- Paperclip recorded no Hermes usage or cost for this run;
+- because the local runtime lacked an agent JWT, Hermes could not update the issue directly and Paperclip queued automation run `99ed8796-d015-4778-9eb2-5fee3718d164`; it was cancelled by pausing the agent and recorded no usage or cost;
+- the board reconciled the synthetic issue to `done`, and final API readback showed exactly five paused agents with zero recorded spend;
+- ORP, Whattsi, Commander, and Paperclip source remained unchanged by runtime execution;
+- the runtime, embedded database, worktrees, and five disposable repositories were removed, with ports `3120`, `54329`, and `54330` free and no matching process remaining.
+
+Safe final evidence is outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-bootstrap.json`, `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-run.json`, `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-events.json`, and `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-final.json`.
+
 Record these results without secrets:
 
 | Evidence | Required result |
