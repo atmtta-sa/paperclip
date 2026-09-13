@@ -56,7 +56,8 @@ export function AgentOfficeRenderer({ rooms }: AgentOfficeRendererProps) {
         {rooms.map((room) => (
           <div key={room.id} className="rounded border px-2 py-1">
             <strong className="block text-foreground">{room.label}</strong>
-            <span>{room.taskTitle ?? room.state}</span>
+            <span className="block">{room.state}</span>
+            {room.taskTitle ? <span className="block">{room.taskTitle}</span> : null}
           </div>
         ))}
       </figcaption>

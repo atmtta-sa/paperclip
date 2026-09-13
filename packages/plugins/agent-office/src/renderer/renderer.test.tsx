@@ -27,6 +27,8 @@ describe("Agent Office renderer boundary", () => {
     expect(html).toContain("Loading upstream office assets");
     expect(html).toContain("ORP Developer");
     expect(html).toContain("Codex Agent");
+    expect(html).toContain(">executing</span>");
+    expect(html).toContain(">Build API</span>");
     expect(html).not.toContain("/cc/rooms");
     expect(html).not.toContain("button");
   });

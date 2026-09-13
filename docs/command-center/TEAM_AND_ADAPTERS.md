@@ -222,6 +222,22 @@ A focused RED/GREEN adapter fix removed the conflicting `-m auto` argument whene
 
 Safe final evidence is outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-bootstrap.json`, `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-run.json`, `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-events.json`, and `.hermes/artifacts/paperclip-agent-office/phase5-hermes-fixed-canary-final.json`.
 
+### Phase 6 non-spending approval projection — 2026-09-13
+
+A private scheduler-disabled disposable runtime proved the genuine Paperclip approval-to-Office waiting boundary without invoking a provider:
+
+- Paperclip served the Phase 6 branch on loopback with an isolated embedded PostgreSQL database and telemetry disabled;
+- Agent Office installed from the local package with its original read-only capabilities unchanged;
+- exactly five disposable Git repositories backed five paused agents, with no protected checkout bound to a worker;
+- synthetic company `31e55034-03db-4743-b034-313baaf3b61a`, project `2fc603cf-ac41-415b-abb7-d0757cdb0b9e`, issue `33f3e478-9ea2-431b-a853-bea14843ea02`, Hermes agent `e8b80813-47c7-4ce9-8830-2be7f7caffe7`, and pending approval `add1f365-fb71-41d6-966a-7b538bc574ab` reconciled through Paperclip APIs;
+- Agent Office rendered one Three.js canvas and all five cards; Hermes visibly showed `waiting` and the exact synthetic task title while the other four agents remained `idle`;
+- browser inspection found no JavaScript errors or horizontal overflow;
+- API readback showed five paused agents, one linked pending approval, zero heartbeat runs, zero live runs, and zero recorded spend;
+- ORP, Whattsi, and Commander remained clean at their recorded baseline commits;
+- all agents were paused again before shutdown, and the runtime, database, worktrees, and repositories were removed; ports `3120`, `54329`, and `54330` are free with no matching descendant process.
+
+Safe evidence remains outside Git at `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-bootstrap.json`, `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-fixture.json`, and `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-final.json`. Phase 6 provider-backed Hermes and Codex lifecycle reconciliation remains separately approval-sensitive and was not performed in this checkpoint.
+
 Record these results without secrets:
 
 | Evidence | Required result |
