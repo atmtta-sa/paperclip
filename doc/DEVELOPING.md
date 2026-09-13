@@ -352,6 +352,19 @@ These browser suites are intended for targeted local verification and CI, not th
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
+### Task search evaluation
+
+The task search relevance rubric and regression corpus are documented in
+[SEARCH.md](SEARCH.md). Run the real PostgreSQL relevance suite with:
+
+```sh
+pnpm exec vitest run server/src/__tests__/task-search-quality.test.ts
+```
+
+Set `SEARCH_EVAL_SCALE=1` to additionally measure a disposable 10,000-task,
+30,000-comment dataset. `SEARCH_EVAL_REPORT=/tmp/search-quality.json` saves
+per-query results and latency measurements; scale measurements are opt-in.
+
 ### Recent task ordering
 
 The streamlined sidebar keeps five recent tasks per company and account in browser
@@ -592,6 +605,8 @@ When effective run config changes, Paperclip may intentionally skip a saved adap
 Paperclip applies one process-wide scheduler to expensive host-side workspace Git enumeration, including changed-file browsing, runtime/finalization cleanliness guards, and adapter sandbox-sync snapshots. The scheduler defaults to two active scans and a bounded queue of 32. Identical scans of the same canonical worktree share one subprocess, while successful changed-file listings are cached for 10 seconds. Correctness-sensitive runtime guards bypass the result cache.
 
 The cache intentionally trades up to a few seconds of changed-file freshness for stable server latency. The file browser retains an explicit refresh action, does not start its query while the panel or browser tab is hidden, and presents overloads as retryable failures rather than an empty workspace. A full queue returns `503` with code `workspace_git_scan_saturated`; a scan exceeding its wall-clock limit returns `504` with code `workspace_git_scan_timeout`. Both responses include `Retry-After: 1`.
+
+Sandbox Git sync treats only the selected repository root as a clone source. A selected subfolder uses directory sync within that folder, applies the enclosing repository's ignore rules, and does not transfer parent files or Git history.
 
 Environment overrides:
 
@@ -976,6 +991,8 @@ that classification finishes.
   group. It seals the old authority for normal epoch rotation and preserves the
   Codex thread and goal state. Empty retry directories do not prevent recovery;
   conflicting histories, changed profiles, and live or unverifiable owners do.
+
+A resumed sandbox lease can contain a workspace whose provider never started. A new attempt may create its exact session directory only when durable control-plane evidence proves zero connections, zero events, and untouched bootstrap commands, and no backup or remote session directory exists. Directory creation is atomic; partial state or uncertain ownership remains blocked.
 
 Run the credential-free real-process restart suite with:
 

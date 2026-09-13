@@ -1278,9 +1278,11 @@ type IssueDetailChatTabProps = {
   onReviewConversation: () => Promise<void>;
   onImageUpload: (file: File) => Promise<string>;
   onAttachImage: (file: File) => Promise<IssueAttachment | void>;
-  onInterruptQueued: (runId: string) => Promise<void>;
+  onInterruptQueued: (runId: string | null) => Promise<void>;
   onDeleteComment?: (commentId: string) => Promise<void> | void;
   onPauseWorkRun?: (runId: string, feedback?: "composer") => Promise<void>;
+  onStopResponse?: (runId: string) => Promise<void>;
+  stopResponsePending?: boolean;
   pauseWorkPending?: boolean;
   pauseWorkScope?: "leaf" | "subtree";
   runFinalizationActions?: readonly IssueChatRunFinalizationAction[];
@@ -1395,6 +1397,8 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   onInterruptQueued,
   onDeleteComment,
   onPauseWorkRun,
+  onStopResponse,
+  stopResponsePending,
   pauseWorkPending,
   pauseWorkScope,
   runFinalizationActions,
@@ -2124,16 +2128,6 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         throw new Error(
           "The queued message no longer has an active run target.",
         );
-      const anchorAt = new Date().toISOString();
-      setLocalSteeringPlacements((current) => {
-        const next = new Map(current);
-        const sequence = [...current.values()].filter(
-          (placement) => placement.targetRunId === targetRunId,
-        ).length;
-        next.set(commentId, { targetRunId, anchorAt, sequence });
-        return next;
-      });
-      setConsumedQueuedCommentIds((current) => new Set(current).add(commentId));
       try {
         const nextQueue = await issuesApi.steerQueuedComment(
           issueId,
@@ -2144,6 +2138,18 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
             revision,
           },
         );
+        // Keep the queue component mounted until the server accepts steering:
+        // its pending/error state must survive a rejected last-row action.
+        const anchorAt = new Date().toISOString();
+        setLocalSteeringPlacements((current) => {
+          const next = new Map(current);
+          const sequence = [...current.values()].filter(
+            (placement) => placement.targetRunId === targetRunId,
+          ).length;
+          next.set(commentId, { targetRunId, anchorAt, sequence });
+          return next;
+        });
+        setConsumedQueuedCommentIds((current) => new Set(current).add(commentId));
         // The local steering placement already promoted the message into the
         // active turn. Refresh its durable acknowledgement before publishing
         // the returned queue so the local and server anchors hand off without a
@@ -2442,13 +2448,10 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
             onSubmitInteractionVerdicts={onSubmitInteractionVerdicts}
             issueWorkMode={issueWorkMode}
             onWorkModeChange={onWorkModeChange}
-            stopPending={pauseWorkPending}
-            stopScope={pauseWorkScope}
+            stopPending={stopResponsePending}
             onCancelRun={
-              interruptibleIssueRun && onPauseWorkRun
-                ? async () => {
-                    await onPauseWorkRun(interruptibleIssueRun.id, "composer");
-                  }
+              interruptibleIssueRun && onStopResponse
+                ? () => onStopResponse(interruptibleIssueRun.id)
                 : undefined
             }
             onImageClick={onImageClick}
@@ -4175,6 +4178,16 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       }
     },
   });
+  const stopResponse = useMutation({
+    mutationFn: async (runId: string) => {
+      await heartbeatsApi.cancel(runId);
+      await waitForStoppedRuns([runId]);
+    },
+    onSettled: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId!) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.runs(issueId!) }),
+    ]),
+  });
   const stopAndFinalizeRun = useMutation({
     mutationFn: async ({
       runId,
@@ -4772,15 +4785,18 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       interrupt,
       reassignment,
       attachmentIds,
+      clientRequestId,
     }: {
       body: string;
       reopen?: boolean;
       interrupt?: boolean;
       reassignment: CommentReassignment;
       attachmentIds?: string[];
+      clientRequestId?: string;
     }) =>
       issuesApi.update(issueId!, {
         comment: body,
+        commentClientRequestId: clientRequestId,
         ...(attachmentIds?.length ? { attachmentIds } : {}),
         assigneeAgentId: reassignment.assigneeAgentId,
         assigneeUserId: reassignment.assigneeUserId,
@@ -4951,21 +4967,13 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   });
 
   const interruptQueuedComment = useMutation({
-    mutationFn: async (runId: string) => {
-      const queue = await issuesApi.getQueuedComments(issueId!);
-      if (!queue.queueId || queue.targetRunId !== runId) {
-        throw new Error("The queued messages changed. Refresh and try again.");
-      }
-      return issuesApi.interruptQueuedComments(issueId!, {
-        queueId: queue.queueId, revision: queue.revision, targetRunId: runId,
-      });
-    },
+    mutationFn: (runId: string | null) => issuesApi.interruptLatestQueuedComments(issueId!, runId),
     onSuccess: () => {
       invalidateIssueDetail();
       invalidateIssueRunState();
       pushToast({
         title: "Interrupt requested",
-        body: "The active run is stopping so queued comments can continue next.",
+        body: "Queued messages will be sent when the previous run has stopped.",
         tone: "success",
       });
     },
@@ -6133,6 +6141,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           reopen,
           reassignment,
           attachmentIds,
+          clientRequestId,
         });
         return;
       }
@@ -6154,7 +6163,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     [uploadAttachment],
   );
   const handleInterruptQueuedRun = useCallback(
-    async (runId: string) => {
+    async (runId: string | null) => {
       await interruptQueuedComment.mutateAsync(runId);
     },
     [interruptQueuedComment],
@@ -7788,6 +7797,10 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                       .mutateAsync({ commentId })
                       .then(() => undefined)
                   }
+                  onStopResponse={canManageTreeControl
+                    ? (runId) => stopResponse.mutateAsync(runId)
+                    : undefined}
+                  stopResponsePending={stopResponse.isPending}
                   pauseWorkPending={
                     executeTreeControl.isPending &&
                     executeTreeControl.variables?.mode === "pause"

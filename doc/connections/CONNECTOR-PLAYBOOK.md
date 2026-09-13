@@ -35,6 +35,13 @@ Paperclip resolves short-lived tokens at invocation time. Before writing a
 connector, read [Identity vs. connections](./README.md#identity-vs-connections)
 for the P1/P2/P3 boundary and the D7 standing rule.
 
+AI provider credentials use the same vault, applications, grants, installations,
+and delegation model with `connectionPurpose: ai` and `transport: runtime_auth`.
+They authenticate provider execution and never enter MCP discovery or tool/channel
+execution. Extend the provider's existing catalog entry with typed AI methods;
+reuse the existing login controllers. See [AI Connections](./AI-CONNECTIONS.md)
+for compatibility, personal defaults, resolver isolation, and legacy adoption.
+
 ## Contents
 
 - [Mental model and support matrix](#mental-model-five-independent-axes)
@@ -138,6 +145,14 @@ These axes produce combinations such as:
 `api_key` in a method means an authentication mode; it does not mean the
 transport is a REST API. Most current API-key catalog entries authenticate a
 remote MCP server.
+
+Anthropic accounts use the `runtime_auth` AI connection methods. Its obsolete
+`api-key` REST tool method is no longer offered. Existing unsupported REST tool
+connections fail health and catalog checks with HTTP 422 and
+`tool_connection_transport_unsupported`; they never use local stdio templates
+or report a successful MCP probe. Add the provider through its supported account
+flow, then remove the obsolete connection. This does not transfer credentials
+or grants automatically.
 
 For `mcp_remote`, header credentials and secret-bearing generated URLs have the
 complete generic runtime path. The schema also names `query`, `body_json`, and
