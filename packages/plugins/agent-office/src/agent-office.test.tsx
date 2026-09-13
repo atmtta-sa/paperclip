@@ -41,6 +41,7 @@ describe("Agent Office plugin shell", () => {
     expect(html).toContain("Agent Office");
     expect(html).toContain("Paperclip is the authoritative operational system");
     expect(html).toContain("company-123");
+    expect(html).toContain('data-office-renderer="agent-office-upstream"');
     expect(html).not.toContain("<button");
   });
 });
