@@ -176,6 +176,23 @@ A uniquely isolated loopback runtime was exercised and removed:
 
 Safe artifacts are outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-paused-team-runtime.log` and `.hermes/artifacts/paperclip-agent-office/phase5-paused-team-bootstrap.json`. The disposable database and repositories were intentionally removed.
 
+### Agent Office reconciliation checkpoint — 2026-09-13
+
+A second scheduler-disabled disposable runtime reconciled Agent Office against live Paperclip records:
+
+- the runtime served branch commit `d6c87fa6c` in `local_trusted` and `private` mode;
+- Agent Office `0.1.0` installed from the repository package and reported `ready`;
+- its page and sidebar contributions resolved through installed plugin UUID `ba877993-3ba5-42c9-82d5-705c64417093`;
+- the plugin projected the exact IDs of the five paused Paperclip agents, all as `idle`;
+- API readback remained at zero issues, zero live runs, zero heartbeat runs, and zero spend;
+- the bundle, Agent Office MIT notice, and required GLTF texture routes returned HTTP `200`;
+- desktop browser verification showed one upstream renderer canvas, all five roles, no JavaScript errors, and no horizontal overflow;
+- fresh `390×844` mobile verification showed the 3D office and all five readable status cards with no overlap or horizontal overflow;
+- no agent was resumed and no worker, heartbeat, provider, or model was invoked;
+- the runtime directory, embedded database, and five repositories were removed; ports `3120` and `54330` are free and no matching process remains.
+
+Evidence is outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-office-reconciliation-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase5-office-reconciliation-bootstrap.json`, and `.hermes/artifacts/paperclip-agent-office/phase5-office-mobile-390x844.png`.
+
 Record these results without secrets:
 
 | Evidence | Required result |
