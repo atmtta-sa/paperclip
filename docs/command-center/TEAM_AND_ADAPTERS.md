@@ -193,6 +193,21 @@ A second scheduler-disabled disposable runtime reconciled Agent Office against l
 
 Evidence is outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-office-reconciliation-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase5-office-reconciliation-bootstrap.json`, and `.hermes/artifacts/paperclip-agent-office/phase5-office-mobile-390x844.png`.
 
+### Provider canary checkpoint — 2026-09-13
+
+A third scheduler-disabled disposable runtime exercised the native provider adapters without binding any protected repository:
+
+- ORP, Whattsi, Commander, and Paperclip source were clean before and after the canaries;
+- the native `codex_local` ACP canary succeeded in run `935538ef-000e-4336-9b43-5bff23030c62`, with exit code `0` and exact fixed-file output in its isolated issue worktree;
+- Codex reported subscription-included usage of 536 input, 68 output, and 40,064 cached-input tokens, with no metered cost recorded;
+- an earlier Codex setup attempt failed before provider invocation because its synthetic issue lacked a project workspace; adding a disposable Paperclip project with a primary workspace corrected the fixture without weakening the canary;
+- the native `hermes_local` canary reached Hermes, but the configured automatic model selected DeepSeek and failed with HTTP `402 Insufficient Balance`;
+- one separately approved retry persisted `provider: openai-codex` only on the disposable Hermes record, but Hermes still selected the configured DeepSeek model and returned the same `402`; no Hermes output, usage, or cost was recorded;
+- all five agents were paused after execution, the successful Codex issue was reconciled to `done`, and the Hermes issue was left `blocked` with the provider-boundary reason;
+- the disposable runtime, embedded database, worktrees, and repositories were removed; ports `3120` and `54330` are free and no matching process remains.
+
+Safe artifacts remain outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-provider-canaries-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase5-provider-canaries-final.json`, `.hermes/artifacts/paperclip-agent-office/phase5-codex-canary-retry-run.json`, and `.hermes/artifacts/paperclip-agent-office/phase5-hermes-openai-codex-canary-run.json`. No credentials are retained in this document.
+
 Record these results without secrets:
 
 | Evidence | Required result |
