@@ -160,6 +160,22 @@ A successful local CLI probe is not a substitute for this Paperclip-attributed c
 
 ## Phase 5 acceptance record
 
+### Scheduler-disabled runtime checkpoint — 2026-09-13
+
+A uniquely isolated loopback runtime was exercised and removed:
+
+- runtime API `127.0.0.1:3120`; embedded PostgreSQL `127.0.0.1:54330`;
+- heartbeat scheduler and telemetry disabled;
+- five disposable Git repositories, with no product checkout binding;
+- exact five-agent hierarchy created and read back with stable IDs;
+- all agents manually paused with heartbeat disabled, zero budget, zero spend, and no last heartbeat;
+- zero issues and zero heartbeat runs;
+- source checkout, Commander, and all five disposable repositories remained unchanged;
+- Agent Office was not installed in this fresh instance, so Office reconciliation remains unproven at this checkpoint;
+- runtime directory removed, both listeners absent, and no matching descendant process remained.
+
+Safe artifacts are outside Git at `.hermes/artifacts/paperclip-agent-office/phase5-paused-team-runtime.log` and `.hermes/artifacts/paperclip-agent-office/phase5-paused-team-bootstrap.json`. The disposable database and repositories were intentionally removed.
+
 Record these results without secrets:
 
 | Evidence | Required result |

@@ -3,6 +3,7 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
+import { verifyDisposableGitWorkspaces } from "./phase5-workspace-guards.mjs";
 
 const LEAD_NAME = "Team Lead";
 const TEAM = [
@@ -147,6 +148,14 @@ async function requestJson(fetchImpl, url, { method = "GET", body, apiKey } = {}
   return payload;
 }
 
+function objectContains(actual, expected) {
+  if (expected === null || typeof expected !== "object" || Array.isArray(expected)) {
+    return isDeepStrictEqual(actual, expected);
+  }
+  if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
+  return Object.entries(expected).every(([key, value]) => objectContains(actual[key], value));
+}
+
 function assertExistingAgent(agent, expected, reportsTo) {
   if (
     agent.role !== expected.role ||
@@ -155,7 +164,7 @@ function assertExistingAgent(agent, expected, reportsTo) {
     agent.adapterType !== expected.adapterType ||
     (agent.reportsTo ?? null) !== reportsTo ||
     agent.budgetMonthlyCents !== expected.budgetMonthlyCents ||
-    !isDeepStrictEqual(agent.adapterConfig ?? {}, expected.adapterConfig)
+    !objectContains(agent.adapterConfig ?? {}, expected.adapterConfig)
   ) {
     throw new Error(`existing agent ${expected.name} does not match the governed team specification`);
   }
@@ -192,11 +201,13 @@ export async function provisionTeam({
   schedulerDisabled,
   fetchImpl = globalThis.fetch,
   apiKey,
+  verifyWorkspaces = verifyDisposableGitWorkspaces,
 }) {
   if (allowApply !== true) throw new Error("explicit apply approval is required");
   if (schedulerDisabled !== true) throw new Error("heartbeat scheduler must be disabled");
   ensureDisposableCompanyName(companyName);
   const plan = buildTeamPlan({ workspaces, disposableRoot });
+  verifyWorkspaces(workspaces, disposableRoot);
   const root = apiRoot(baseUrl);
   const call = (pathname, options) => requestJson(fetchImpl, `${root}${pathname}`, { ...options, apiKey });
 

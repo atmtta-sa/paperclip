@@ -13,6 +13,7 @@ const workspaces = {
   codex: "/tmp/paperclip-phase5/codex",
   hermes: "/tmp/paperclip-phase5/hermes",
 };
+const verifyWorkspaces = () => workspaces;
 
 function response(body, status = 200) {
   return {
@@ -91,6 +92,7 @@ test("requires both explicit apply and disabled-scheduler evidence", async () =>
       allowApply: false,
       schedulerDisabled: true,
       fetchImpl,
+      verifyWorkspaces,
     }),
     /explicit apply/,
   );
@@ -103,6 +105,7 @@ test("requires both explicit apply and disabled-scheduler evidence", async () =>
       allowApply: true,
       schedulerDisabled: false,
       fetchImpl,
+      verifyWorkspaces,
     }),
     /scheduler.*disabled/i,
   );
@@ -120,6 +123,7 @@ test("rejects a non-loopback Paperclip API before any network request", async ()
       disposableRoot: "/tmp/paperclip-phase5",
       allowApply: true,
       schedulerDisabled: true,
+      verifyWorkspaces,
       fetchImpl: async () => {
         calls += 1;
         return response({});
@@ -147,7 +151,17 @@ test("creates or reuses exactly five agents and pauses each before continuing", 
       return response(createdAgents);
     }
     if (url.endsWith("/api/companies/company-1/agents") && method === "POST") {
-      const agent = { ...body, id: `agent-${nextAgent++}`, companyId: "company-1", status: "idle" };
+      const agent = {
+        ...body,
+        id: `agent-${nextAgent++}`,
+        companyId: "company-1",
+        status: "idle",
+        adapterConfig: {
+          ...body.adapterConfig,
+          instructionsFilePath: `/tmp/paperclip-phase5/instructions/${nextAgent}/AGENTS.md`,
+          instructionsBundleMode: "managed",
+        },
+      };
       createdAgents.push(agent);
       return response(agent, 201);
     }
@@ -171,6 +185,7 @@ test("creates or reuses exactly five agents and pauses each before continuing", 
     allowApply: true,
     schedulerDisabled: true,
     fetchImpl,
+    verifyWorkspaces,
   });
 
   assert.equal(result.agents.length, 5);
@@ -212,6 +227,7 @@ test("fails closed when an existing named agent has a different adapter", async 
       allowApply: true,
       schedulerDisabled: true,
       fetchImpl,
+      verifyWorkspaces,
     }),
     /existing agent Team Lead does not match/,
   );
@@ -253,6 +269,7 @@ test("fails closed when an existing agent points at a different workspace", asyn
       allowApply: true,
       schedulerDisabled: true,
       fetchImpl,
+      verifyWorkspaces,
     }),
     /existing agent Team Lead does not match/,
   );
