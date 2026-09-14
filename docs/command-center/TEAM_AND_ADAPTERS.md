@@ -129,6 +129,28 @@ The helper never prints the API key. It reuses only an exact synthetic company/n
 
 If any create or pause operation fails, keep the scheduler disabled, record created IDs, and reconcile only those synthetic records. Do not retry blindly.
 
+## Team Lead governance
+
+`scripts/command-center/team-lead/AGENTS.md` is the standing Team Lead contract. The five-agent bootstrap sets it as Team Lead's `instructionsFilePath`; worker agents do not inherit it.
+
+Each imported project must have a parent issue with a task watchdog assigned to Team Lead using `buildProjectWatchdogRequest` from `scripts/command-center/team-lead-governance.mjs`. On each stopped subtree, Team Lead must honor valid waits, return incomplete slices or failed evidence to the same developer, and release the next task only after deterministic acceptance gates pass.
+
+At project completion, the developer supplies the test URL, prerequisites, numbered test steps, expected results, and limitations. Team Lead independently verifies that handoff, then waits for Naz's explicit `testing_successful` approval before releasing another project.
+
+Protected-repository binding, provider calls or spend, push/merge/deploy, and production activation fail closed without an exact bounded approval for the requested action and scope.
+
+### Synthetic watchdog checkpoint — 2026-09-14
+
+A loopback-only disposable preview with scheduler and telemetry disabled verified the control-plane lifecycle and one provider-backed Team Lead continuation:
+
+- watched issue `COM-1` was assigned to ORP Developer and intentionally left incomplete;
+- Paperclip created reusable watchdog review `COM-2` with origin `task_watchdog`, assigned to canonical Team Lead (`cto`);
+- Team Lead honored a manual pause, requested Board confirmation, then resumed only after that confirmation was accepted;
+- the authenticated continuation posted exact correction criteria to `COM-1`, restored the same developer's execution path, and closed `COM-2`;
+- the developer wake reached its configured provider and failed safely on insufficient provider balance; Paperclip surfaced `COM-1` as blocked rather than claiming completion;
+- the bounded supervisor passed all seven assertions: one Team Lead run, successful exit, authenticated comment, same-developer wake, watchdog closure, both agents paused, and no live runs;
+- protected repositories remained unchanged and the Team Lead incurred no recorded control-plane spend.
+
 ## Non-spending readiness gate
 
 Before a provider-backed canary:

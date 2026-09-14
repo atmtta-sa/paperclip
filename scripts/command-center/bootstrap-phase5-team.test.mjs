@@ -43,7 +43,19 @@ test("dry-run plan defines the governed five-agent hierarchy without network acc
     "engineer",
   ]);
   assert.equal(plan.agents[0].reportsTo, null);
+  assert.match(
+    plan.agents[0].adapterConfig.instructionsFilePath,
+    /scripts\/command-center\/team-lead\/AGENTS\.md$/,
+  );
+  assert.deepEqual(plan.agents[0].adapterConfig.paperclipSkillSync, {
+    desiredSkills: [
+      "paperclipai/paperclip/paperclip",
+      "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+    ],
+  });
   assert.ok(plan.agents.slice(1).every((agent) => agent.reportsTo === "$TEAM_LEAD_ID"));
+  assert.ok(plan.agents.slice(1).every((agent) => agent.adapterConfig.instructionsFilePath === undefined));
+  assert.ok(plan.agents.slice(1).every((agent) => agent.adapterConfig.paperclipSkillSync === undefined));
   assert.deepEqual(plan.agents.map((agent) => agent.adapterType), [
     "hermes_local",
     "hermes_local",
@@ -158,7 +170,8 @@ test("creates or reuses exactly five agents and pauses each before continuing", 
         status: "idle",
         adapterConfig: {
           ...body.adapterConfig,
-          instructionsFilePath: `/tmp/paperclip-phase5/instructions/${nextAgent}/AGENTS.md`,
+          instructionsFilePath: body.adapterConfig.instructionsFilePath ??
+            `/tmp/paperclip-phase5/instructions/${nextAgent}/AGENTS.md`,
           instructionsBundleMode: "managed",
         },
       };
