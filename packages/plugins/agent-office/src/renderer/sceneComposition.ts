@@ -86,6 +86,14 @@ function addChannelHalo(agent: THREE.Object3D, room: OfficeRoom): void {
   agent.add(halo);
 }
 
+function addActivityBubbleAnchor(agent: THREE.Object3D, room: OfficeRoom): void {
+  const anchor = new THREE.Group();
+  anchor.name = "office-activity-bubble-anchor";
+  anchor.position.set(0, 1.3, 0);
+  anchor.userData = { generated: true, state: room.state, activity: "stationary" };
+  agent.add(anchor);
+}
+
 function cloneModel(
   models: OfficeModelMap,
   name: OfficeModelName,
@@ -190,6 +198,7 @@ function buildRoom(
     agent.position.set(0, 0.46, -2.5);
     agent.rotation.y = Math.PI;
     addChannelHalo(agent, room);
+    addActivityBubbleAnchor(agent, room);
     group.add(agent);
   }
 

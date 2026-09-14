@@ -5,11 +5,26 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import type { OfficeRoom } from "../projection.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
-import { createOfficeEnvironmentController } from "./sceneRuntime.js";
+import {
+  createOfficeEnvironmentController,
+  ROOM_LABEL_BACKGROUND,
+  ROOM_LABEL_PLACEMENT,
+} from "./sceneRuntime.js";
 
 const sourcePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "sceneRuntime.ts");
 
 describe("Agent Office Three.js runtime compatibility", () => {
+  it("keeps room labels lightly translucent behind their text", () => {
+    expect(ROOM_LABEL_BACKGROUND).toBe("rgba(15, 23, 42, 0.55)");
+  });
+
+  it("mounts room labels vertically above the north wall", () => {
+    expect(ROOM_LABEL_PLACEMENT).toEqual({ x: 1.35, y: 1.62, z: -4.28, rotationX: 0 });
+    const source = readFileSync(sourcePath, "utf8");
+    expect(source).toContain("new THREE.PlaneGeometry(5.2, 0.92)");
+    expect(source).not.toContain("new THREE.Sprite(material)");
+  });
+
   it("avoids removed or deprecated Three.js timing and shadow APIs", () => {
     const source = readFileSync(sourcePath, "utf8");
 
@@ -75,6 +90,7 @@ describe("Agent Office Three.js runtime compatibility", () => {
 
     controller.updateAnimations(45);
     expect(actor.userData.officeMotion).toBe("walking");
+    expect(actor.getObjectByName("office-activity-bubble-anchor")?.userData.activity).toBe("coffee-break");
     controller.updateAnimations(60);
     const lounge = new THREE.Vector3();
     actor.getWorldPosition(lounge);
@@ -89,6 +105,7 @@ describe("Agent Office Three.js runtime compatibility", () => {
     expect(returned.x).toBeCloseTo(home.x);
     expect(returned.z).toBeCloseTo(home.z);
     expect(actor.userData.officeMotion).toBe("stationary");
+    expect(actor.getObjectByName("office-activity-bubble-anchor")?.userData.activity).toBe("stationary");
     controller.dispose();
   });
 

@@ -1,19 +1,28 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { OfficeRoom } from "../projection.js";
+import { updateActivityBubble, type OfficeActivity } from "./activityBubble.js";
 import { createAmbientActorMotion } from "./ambientMotion.js";
 import { createCoffeeBreakMotion, projectCoffeeSpot } from "./coffeeBreak.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
 import { buildOfficeEnvironment } from "./sceneComposition.js";
 import { resolveAnimationClip, type StatusLightProfile } from "./visualState.js";
 
-function createRoomLabel(label: string): THREE.Sprite {
+export const ROOM_LABEL_BACKGROUND = "rgba(15, 23, 42, 0.55)";
+export const ROOM_LABEL_PLACEMENT = {
+  x: 1.35,
+  y: 1.62,
+  z: -4.28,
+  rotationX: 0,
+} as const;
+
+function createRoomLabel(label: string): THREE.Mesh {
   const canvas = document.createElement("canvas");
   canvas.width = 640;
   canvas.height = 112;
   const context = canvas.getContext("2d");
   if (context) {
-    context.fillStyle = "rgba(15, 23, 42, 0.82)";
+    context.fillStyle = ROOM_LABEL_BACKGROUND;
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = "#f8fafc";
     context.font = "bold 42px system-ui, sans-serif";
@@ -23,12 +32,20 @@ function createRoomLabel(label: string): THREE.Sprite {
   }
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-  const sprite = new THREE.Sprite(material);
-  sprite.scale.set(5.2, 0.92, 1);
-  sprite.position.set(0, 2.35, 0);
-  sprite.userData.generated = true;
-  return sprite;
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  const decal = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 0.92), material);
+  decal.name = "office-room-label";
+  decal.position.set(ROOM_LABEL_PLACEMENT.x, ROOM_LABEL_PLACEMENT.y, ROOM_LABEL_PLACEMENT.z);
+  decal.rotation.x = ROOM_LABEL_PLACEMENT.rotationX;
+  decal.userData.generated = true;
+  return decal;
 }
 
 function addRoomLabels(environment: THREE.Group, rooms: OfficeRoom[]): void {
@@ -68,6 +85,11 @@ function createActorRuntimes(environment: THREE.Group, random: () => number): Ac
     const walkingAction = walkClip ? mixer.clipAction(walkClip) : null;
     restingAction.play();
     object.userData.officeMotion = "stationary";
+    const bubbleAnchor = object.getObjectByName("office-activity-bubble-anchor");
+    const setActivity = (activity: OfficeActivity) => {
+      if (bubbleAnchor && state) updateActivityBubble(bubbleAnchor, state, activity);
+    };
+    setActivity("stationary");
     const setWalking = (walking: boolean) => {
       object.userData.officeMotion = walking ? "walking" : "stationary";
       const current = walking ? walkingAction : restingAction;
@@ -96,8 +118,10 @@ function createActorRuntimes(environment: THREE.Group, random: () => number): Ac
         if (!wasOnBreak && isOnBreak) {
           ambient?.reset();
           setWalking(true);
+          setActivity("coffee-break");
         } else if (wasOnBreak && !isOnBreak) {
           ambient?.reset();
+          setActivity("stationary");
         } else if (!isOnBreak) {
           ambient?.update(delta);
         }
@@ -138,7 +162,9 @@ function disposeGenerated(root: THREE.Object3D): void {
     if (object instanceof THREE.Mesh || object instanceof THREE.Sprite) {
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       materials.forEach((material) => {
-        if (material instanceof THREE.SpriteMaterial) material.map?.dispose();
+        if (material instanceof THREE.SpriteMaterial || material instanceof THREE.MeshBasicMaterial) {
+          material.map?.dispose();
+        }
         material.dispose();
       });
     }

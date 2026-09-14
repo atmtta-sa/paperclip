@@ -37,6 +37,9 @@ describe("Agent Office scene composition", () => {
     expect(environment.children.filter((child) => child.name.startsWith("office-room:"))).toHaveLength(5);
     expect(environment.getObjectsByProperty("name", "office-workstation")).toHaveLength(25);
     expect(environment.getObjectsByProperty("name", "office-agent")).toHaveLength(5);
+    const bubbleAnchors = environment.getObjectsByProperty("name", "office-activity-bubble-anchor");
+    expect(bubbleAnchors).toHaveLength(5);
+    bubbleAnchors.forEach((anchor) => expect(anchor.position.y).toBeLessThanOrEqual(1.3));
     expect(environment.getObjectsByProperty("name", "office-status-light")).toHaveLength(5);
   });
 
