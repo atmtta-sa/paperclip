@@ -30,6 +30,8 @@ describe("Agent Office renderer boundary", () => {
     expect(html).toContain(">executing</span>");
     expect(html).toContain(">Build API</span>");
     expect(html).not.toContain("/cc/rooms");
-    expect(html).not.toContain("button");
+    expect(html).toContain('data-office-expanded="false"');
+    expect(html).toContain('aria-label="Expand Agent Office"');
+    expect(html).toContain(">Expand Office</button>");
   });
 });

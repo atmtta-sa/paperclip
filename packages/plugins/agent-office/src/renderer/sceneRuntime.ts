@@ -60,8 +60,8 @@ function createMixers(environment: THREE.Group): THREE.AnimationMixer[] {
   return mixers;
 }
 
-function disposeGenerated(scene: THREE.Scene): void {
-  scene.traverse((object) => {
+function disposeGenerated(root: THREE.Object3D): void {
+  root.traverse((object) => {
     if (!object.userData.generated) return;
     if (object instanceof THREE.Mesh) object.geometry.dispose();
     if (object instanceof THREE.Mesh || object instanceof THREE.Sprite) {
@@ -74,11 +74,55 @@ function disposeGenerated(scene: THREE.Scene): void {
   });
 }
 
+export interface OfficeEnvironmentController {
+  updateRooms: (rooms: OfficeRoom[]) => void;
+  updateAnimations: (delta: number) => void;
+  dispose: () => void;
+}
+
+export interface OfficeSceneController {
+  updateRooms: (rooms: OfficeRoom[]) => void;
+  dispose: () => void;
+}
+
+export function createOfficeEnvironmentController(
+  scene: THREE.Scene,
+  initialRooms: OfficeRoom[],
+  models: OfficeModelMap,
+  decorateEnvironment: (environment: THREE.Group, rooms: OfficeRoom[]) => void = addRoomLabels,
+): OfficeEnvironmentController {
+  let environment: THREE.Group;
+  let mixers: THREE.AnimationMixer[] = [];
+
+  const replaceEnvironment = (rooms: OfficeRoom[]) => {
+    if (environment) {
+      mixers.forEach((mixer) => mixer.stopAllAction());
+      scene.remove(environment);
+      disposeGenerated(environment);
+    }
+    environment = buildOfficeEnvironment(rooms, models);
+    decorateEnvironment(environment, rooms);
+    scene.add(environment);
+    mixers = createMixers(environment);
+  };
+
+  replaceEnvironment(initialRooms);
+  return {
+    updateRooms: replaceEnvironment,
+    updateAnimations: (delta) => mixers.forEach((mixer) => mixer.update(delta)),
+    dispose: () => {
+      mixers.forEach((mixer) => mixer.stopAllAction());
+      scene.remove(environment);
+      disposeGenerated(environment);
+    },
+  };
+}
+
 export function createOfficeScene(
   canvas: HTMLCanvasElement,
   rooms: OfficeRoom[],
   models: OfficeModelMap,
-): () => void {
+): OfficeSceneController {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
@@ -90,9 +134,7 @@ export function createOfficeScene(
   scene.background = new THREE.Color(0xdbeafe);
   addLighting(scene);
 
-  const environment = buildOfficeEnvironment(rooms, models);
-  addRoomLabels(environment, rooms);
-  scene.add(environment);
+  const environmentController = createOfficeEnvironmentController(scene, rooms, models);
 
   const camera = new THREE.OrthographicCamera(-18, 18, 18, -18, 0.1, 200);
   camera.position.set(60, 49.2, 60);
@@ -105,7 +147,6 @@ export function createOfficeScene(
   controls.maxZoom = 2.6;
   controls.target.set(0, 0.4, 0);
 
-  const mixers = createMixers(environment);
   let previousFrameTime = performance.now();
   let frameId = 0;
   const render = () => {
@@ -121,18 +162,20 @@ export function createOfficeScene(
     const frameTime = performance.now();
     const delta = Math.min((frameTime - previousFrameTime) / 1000, 0.05);
     previousFrameTime = frameTime;
-    mixers.forEach((mixer) => mixer.update(delta));
+    environmentController.updateAnimations(delta);
     controls.update();
     renderer.render(scene, camera);
     frameId = window.requestAnimationFrame(render);
   };
   render();
 
-  return () => {
-    window.cancelAnimationFrame(frameId);
-    controls.dispose();
-    mixers.forEach((mixer) => mixer.stopAllAction());
-    disposeGenerated(scene);
-    renderer.dispose();
+  return {
+    updateRooms: environmentController.updateRooms,
+    dispose: () => {
+      window.cancelAnimationFrame(frameId);
+      controls.dispose();
+      environmentController.dispose();
+      renderer.dispose();
+    },
   };
 }
