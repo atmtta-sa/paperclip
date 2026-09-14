@@ -236,7 +236,24 @@ A private scheduler-disabled disposable runtime proved the genuine Paperclip app
 - ORP, Whattsi, and Commander remained clean at their recorded baseline commits;
 - all agents were paused again before shutdown, and the runtime, database, worktrees, and repositories were removed; ports `3120`, `54329`, and `54330` are free with no matching descendant process.
 
-Safe evidence remains outside Git at `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-bootstrap.json`, `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-fixture.json`, and `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-final.json`. Phase 6 provider-backed Hermes and Codex lifecycle reconciliation remains separately approval-sensitive and was not performed in this checkpoint.
+Safe evidence remains outside Git at `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-bootstrap.json`, `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-fixture.json`, and `.hermes/artifacts/paperclip-agent-office/phase6-nonspending-final.json`.
+
+### Phase 6 provider-backed lifecycle reconciliation — 2026-09-13/14
+
+Separately approved, sequential native-adapter runs completed the disposable provider-backed boundary:
+
+- Hermes issue `12e4155d-c617-40b0-b089-1442feac05d5` ran through `hermes_local` with the agent-scoped `openai-codex` provider as run `ce07ed6a-a985-4184-b53c-3139fe5cddb0`; it succeeded with exit code `0` and created only `HERMES_PHASE6_E2E.txt`;
+- the Hermes output was independently verified from commit `edd08f93cf692d04d693b03bb1f0ca146421a1cf` as exactly 21 bytes (`HERMES_PHASE6_E2E_OK\n`), SHA-256 `34524916db69e664f6aef97893d7c55b55104aaa70b9dcc585f20ce349a54528`;
+- Paperclip generated one automatic Hermes successful-run handoff, `03ee673d-1468-43b7-aa41-e78afd34f24e`; the agent was paused and the follow-up was cancelled before usage or cost was recorded;
+- the disposable runtime did not inject an agent JWT, so Hermes' authenticated issue update returned `401`; the board explicitly reconciled the issue and this is not represented as an agent-attributed control-plane update;
+- the first Codex attempt, run `b0b896dc-e1dd-4c9a-af0b-7cfd48e79281`, failed before provider execution because its isolated managed Codex home had no authentication; it produced no output, usage, or cost and consumed that approved attempt;
+- a separate non-provider preflight proved the supported remedy: start Paperclip with the authenticated host `CODEX_HOME`, configure the synthetic agent's managed home, and let startup reconciliation create a temporary symlink to the host `auth.json`; the symlink target retained mode `0600`, no credential value was printed or persisted in Git, all agents stayed paused, and no provider ran;
+- after fresh approval, replacement Codex run `cf75acbd-c04b-4831-b589-3d9b1f0a20c4` succeeded with exit code `0` and independently verified `CODEX_PHASE6_E2E.txt` as exactly 20 bytes (`CODEX_PHASE6_E2E_OK\n`), SHA-256 `2cd7e1cc4e4f00d446a94f22db06229b6510ef016eec613bfecd4718583ec5da`;
+- the replacement Codex run was the only run in its fresh company, reached issue status `done`, and recorded 1,198 input, 49 output, and 32,000 cached-input tokens as `subscription_included` / `unpriced`, with Paperclip spend remaining zero;
+- every runtime ended with all five agents paused; the isolated databases, managed credential symlinks, repositories, and worktrees were removed; ports `3120`, `54329`, and `54330` were free and no matching descendant remained;
+- ORP, Whattsi, Commander, and the Paperclip source checkout retained their recorded commits and clean working trees.
+
+Safe evidence remains outside Git under `.hermes/artifacts/paperclip-agent-office/phase6-provider-*.json`, `.hermes/artifacts/paperclip-agent-office/phase6-provider-runtime.log`, `.hermes/artifacts/paperclip-agent-office/phase6-codex-auth-preflight-*.json`, and `.hermes/artifacts/paperclip-agent-office/phase6-codex-replacement-*.json`/`.log`. No credential content is retained in these artifacts.
 
 Record these results without secrets:
 
