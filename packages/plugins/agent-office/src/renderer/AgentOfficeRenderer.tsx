@@ -66,9 +66,10 @@ export function AgentOfficeRenderer({ rooms }: AgentOfficeRendererProps) {
     <figure
       className={
         expanded
-          ? "fixed inset-0 z-[100] flex h-screen w-screen flex-col gap-3 bg-background p-4"
+          ? "fixed inset-0 z-[100] flex h-screen w-screen flex-col gap-3 overflow-y-auto bg-background p-4"
           : "space-y-3"
       }
+      style={expanded ? { zIndex: 2147483647 } : undefined}
       data-office-expanded={String(expanded)}
       data-office-renderer="agent-office-upstream"
     >

@@ -3,6 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { OfficeRoom } from "../projection.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
 import { buildOfficeEnvironment } from "./sceneComposition.js";
+import { resolveAnimationClip, type StatusLightProfile } from "./visualState.js";
 
 function createRoomLabel(label: string): THREE.Sprite {
   const canvas = document.createElement("canvas");
@@ -51,13 +52,27 @@ function createMixers(environment: THREE.Group): THREE.AnimationMixer[] {
   environment.traverse((object) => {
     if (object.name !== "office-agent") return;
     const clips = object.userData.animations as THREE.AnimationClip[] | undefined;
-    const clip = clips?.find((candidate) => candidate.name.toLowerCase() === "sit") ?? clips?.[0];
+    const state = object.userData.officeState as OfficeRoom["state"] | undefined;
+    const clip = state && clips ? resolveAnimationClip(state, clips) : clips?.[0];
     if (!clip) return;
     const mixer = new THREE.AnimationMixer(object);
     mixer.clipAction(clip).play();
     mixers.push(mixer);
   });
   return mixers;
+}
+
+function updateStatusLights(environment: THREE.Group, elapsed: number): void {
+  environment.getObjectsByProperty("name", "office-status-light").forEach((object) => {
+    if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshBasicMaterial)) return;
+    const profile = object.userData.pulseProfile as StatusLightProfile | undefined;
+    if (!profile) return;
+    const phase = Number(object.userData.pulsePhase) || 0;
+    const progress = profile.speed === 0 ? 0 : (Math.sin(elapsed * profile.speed * Math.PI * 2 + phase) + 1) / 2;
+    const intensity = profile.minIntensity + (profile.maxIntensity - profile.minIntensity) * progress;
+    object.scale.setScalar(intensity);
+    object.material.opacity = Math.min(intensity, 1);
+  });
 }
 
 function disposeGenerated(root: THREE.Object3D): void {
@@ -93,6 +108,7 @@ export function createOfficeEnvironmentController(
 ): OfficeEnvironmentController {
   let environment: THREE.Group;
   let mixers: THREE.AnimationMixer[] = [];
+  let elapsed = 0;
 
   const replaceEnvironment = (rooms: OfficeRoom[]) => {
     if (environment) {
@@ -109,7 +125,11 @@ export function createOfficeEnvironmentController(
   replaceEnvironment(initialRooms);
   return {
     updateRooms: replaceEnvironment,
-    updateAnimations: (delta) => mixers.forEach((mixer) => mixer.update(delta)),
+    updateAnimations: (delta) => {
+      elapsed += delta;
+      mixers.forEach((mixer) => mixer.update(delta));
+      updateStatusLights(environment, elapsed);
+    },
     dispose: () => {
       mixers.forEach((mixer) => mixer.stopAllAction());
       scene.remove(environment);

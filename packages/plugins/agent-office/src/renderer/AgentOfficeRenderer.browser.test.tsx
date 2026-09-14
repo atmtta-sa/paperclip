@@ -35,6 +35,8 @@ describe("Agent Office expanded view", () => {
     flushSync(() => expand!.click());
     const renderer = container.querySelector<HTMLElement>('[data-office-renderer="agent-office-upstream"]');
     expect(renderer?.dataset.officeExpanded).toBe("true");
+    expect(renderer?.style.zIndex).toBe("2147483647");
+    expect(renderer?.className).toContain("overflow-y-auto");
     expect(container.querySelector('[aria-label="Exit expanded Agent Office"]')).not.toBeNull();
 
     flushSync(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));

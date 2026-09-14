@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
 import type { OfficeRoom } from "../projection.js";
 import {
@@ -14,6 +15,7 @@ import {
   type FurniturePlacement,
 } from "./sceneBlueprint.js";
 import { officeCellPosition } from "./upstreamScene.js";
+import { channelHaloColor, statusLightProfile } from "./visualState.js";
 
 export interface LoadedOfficeModel {
   object: THREE.Object3D;
@@ -32,18 +34,56 @@ const STATE_COLORS: Record<OfficeRoom["state"], number> = {
   error: 0xe0503a,
 };
 
-function box(
+function roundedBox(
   width: number,
   height: number,
   depth: number,
   color: number,
+  roughness = 0.74,
 ): THREE.Mesh {
   const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(width, height, depth),
-    new THREE.MeshStandardMaterial({ color, roughness: 0.86 }),
+    new RoundedBoxGeometry(width, height, depth, 2, 0.06),
+    new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.04 }),
   );
   mesh.userData.generated = true;
   return mesh;
+}
+
+function addMonitorGlow(screen: THREE.Object3D): void {
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.34, 0.22),
+    new THREE.MeshStandardMaterial({
+      color: 0x7dd3fc,
+      emissive: 0x38bdf8,
+      emissiveIntensity: 1.35,
+      roughness: 0.35,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  );
+  glow.name = "office-monitor-glow";
+  glow.position.set(0, 0.15, 0.015);
+  glow.userData.generated = true;
+  screen.add(glow);
+}
+
+function addChannelHalo(agent: THREE.Object3D, room: OfficeRoom): void {
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(0.62, 0.82, 32),
+    new THREE.MeshBasicMaterial({
+      color: channelHaloColor(room.channel),
+      opacity: 0.76,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  );
+  halo.name = "office-channel-halo";
+  halo.position.set(0, -0.05, 0);
+  halo.rotation.x = -Math.PI / 2;
+  halo.userData = { generated: true, channel: room.channel };
+  agent.add(halo);
 }
 
 function cloneModel(
@@ -104,6 +144,7 @@ function buildWorkstation(
     const screen = cloneModel(models, "computerScreen", 1.15);
     if (!screen) continue;
     screen.position.set((index - (station.screens - 1) / 2) * 0.66, 0.72, -1.15);
+    addMonitorGlow(screen);
     group.add(screen);
   }
   return group;
@@ -118,15 +159,23 @@ function buildRoom(
   group.name = `office-room:${room.id}`;
   group.userData = { roomId: room.id, label: room.label, state: room.state };
 
-  const floor = box(OFFICE_ROOM_SIZE, 0.16, OFFICE_ROOM_SIZE, ROOM_ACCENTS[index % ROOM_ACCENTS.length]);
+  const floor = roundedBox(
+    OFFICE_ROOM_SIZE,
+    0.16,
+    OFFICE_ROOM_SIZE,
+    ROOM_ACCENTS[index % ROOM_ACCENTS.length],
+  );
+  floor.name = "office-room-floor";
   floor.position.y = 0.08;
   group.add(floor);
 
   const wallHeight = 1.05;
-  const northWall = box(OFFICE_ROOM_SIZE, wallHeight, 0.12, 0xfbf7ef);
+  const northWall = roundedBox(OFFICE_ROOM_SIZE, wallHeight, 0.12, 0xfbf7ef, 0.7);
+  northWall.name = "office-room-wall";
   northWall.position.set(0, wallHeight / 2 + 0.16, -OFFICE_ROOM_SIZE / 2 + 0.06);
   group.add(northWall);
-  const westWall = box(0.12, wallHeight, OFFICE_ROOM_SIZE, 0xfbf7ef);
+  const westWall = roundedBox(0.12, wallHeight, OFFICE_ROOM_SIZE, 0xfbf7ef, 0.7);
+  westWall.name = "office-room-wall";
   westWall.position.set(-OFFICE_ROOM_SIZE / 2 + 0.06, wallHeight / 2 + 0.16, 0);
   group.add(westWall);
 
@@ -137,17 +186,30 @@ function buildRoom(
   const agent = cloneModel(models, characterName, 0.9);
   if (agent) {
     agent.name = "office-agent";
+    agent.userData.officeState = room.state;
     agent.position.set(0, 0.46, -2.5);
     agent.rotation.y = Math.PI;
+    addChannelHalo(agent, room);
     group.add(agent);
   }
 
   const statusLight = new THREE.Mesh(
     new THREE.SphereGeometry(0.18, 16, 12),
-    new THREE.MeshBasicMaterial({ color: STATE_COLORS[room.state] }),
+    new THREE.MeshBasicMaterial({
+      color: STATE_COLORS[room.state],
+      opacity: 0.9,
+      transparent: true,
+      toneMapped: false,
+    }),
   );
   statusLight.name = "office-status-light";
-  statusLight.userData.generated = true;
+  statusLight.userData = {
+    generated: true,
+    state: room.state,
+    baseColor: STATE_COLORS[room.state],
+    pulseProfile: statusLightProfile(room.state),
+    pulsePhase: index * 0.7,
+  };
   statusLight.position.set(0, 1.6, -2.5);
   group.add(statusLight);
 
@@ -160,7 +222,7 @@ function buildRoom(
 function buildAtrium(models: OfficeModelMap): THREE.Group {
   const atrium = new THREE.Group();
   atrium.name = "agent-office-atrium";
-  const floor = box(OFFICE_ROOM_SIZE, 0.16, OFFICE_ROOM_SIZE, 0xe8c98f);
+  const floor = roundedBox(OFFICE_ROOM_SIZE, 0.16, OFFICE_ROOM_SIZE, 0xe8c98f);
   floor.position.y = 0.08;
   atrium.add(floor);
   ATRIUM_FURNITURE.forEach((placement) => placeFurniture(atrium, models, placement));
