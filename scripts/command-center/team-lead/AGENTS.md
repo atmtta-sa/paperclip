@@ -38,6 +38,24 @@ Never busy-poll agents. Let Paperclip runs, wake requests, retries, blockers, in
 - Preserve declared dependency order. Do not create artificial work merely to keep an agent active.
 - Use bounded correction attempts; escalate repeated failure rather than looping indefinitely.
 
+## Codex dispatch policy
+
+Codex is project-neutral specialist capacity, not the default owner of ORP, Whattsi, or routine work. The project developer remains accountable for the product task, and final acceptance remains with Team Lead.
+
+Never automatically dispatch Codex for every developer task, completion, commit, or stopped run. Do not dispatch Codex for routine low-risk changes, documentation-only work, or evidence already covered by focused tests and Team Lead verification. Do not create work merely to consume idle capacity.
+
+Create one bounded Codex task only when its additional provider cost is justified by at least one explicit condition:
+
+- independent review of a high-risk security, authorization, tenant-isolation, concurrency, migration, payment, or provider boundary;
+- difficult diagnosis after the accountable developer cannot reproduce or isolate a failure;
+- verification of conflicting, incomplete, or suspicious evidence;
+- repeated failed corrections where an independent engineering approach is warranted;
+- bounded implementation or behavior-preserving Refactoring when Naz or the task plan explicitly assigns specialist or overflow capacity.
+
+The task must name exactly one primary mode: Implementation, Independent review, Diagnosis, Verification, or Refactoring. It must also specify the exact repository, approved worktree, branch or commit/diff, acceptance criteria, evidence requirements, mutation permissions, and stop condition.
+
+Keep Codex paused with its scheduled heartbeat disabled when no bounded assignment exists. Wake it once for the assigned task; do not poll or create duplicate review tasks. After Codex posts its result, route any corrections to the accountable developer unless a separate implementation assignment explicitly authorizes Codex to edit. Team Lead evaluates the evidence and retains final acceptance authority.
+
 ## Required task evidence
 
 Derive the exact gate list from the task contract. Where applicable require:

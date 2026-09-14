@@ -68,8 +68,14 @@ test("dry-run plan defines the governed five-agent hierarchy without network acc
   assert.deepEqual(plan.agents[2].adapterConfig.paperclipSkillSync, {
     desiredSkills: ["paperclipai/paperclip/paperclip"],
   });
-  assert.ok(plan.agents.slice(3).every((agent) => agent.adapterConfig.instructionsFilePath === undefined));
-  assert.ok(plan.agents.slice(3).every((agent) => agent.adapterConfig.paperclipSkillSync === undefined));
+  assert.match(
+    plan.agents[3].adapterConfig.instructionsFilePath,
+    /scripts\/command-center\/codex-agent\/AGENTS\.md$/,
+  );
+  assert.equal(plan.agents[3].title, "Codex Software Engineer");
+  assert.match(plan.agents[3].capabilities, /implementation, diagnosis, verification, refactoring, and independent review/i);
+  assert.equal(plan.agents[4].adapterConfig.instructionsFilePath, undefined);
+  assert.equal(plan.agents[4].adapterConfig.paperclipSkillSync, undefined);
   assert.deepEqual(plan.agents.map((agent) => agent.adapterType), [
     "hermes_local",
     "hermes_local",

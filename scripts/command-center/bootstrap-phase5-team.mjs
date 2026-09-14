@@ -21,6 +21,9 @@ const WHATTSI_DEVELOPER_INSTRUCTIONS_PATH = fileURLToPath(
   new URL("./whattsi-developer/AGENTS.md", import.meta.url),
 );
 const WHATTSI_DEVELOPER_SKILLS = ["paperclipai/paperclip/paperclip"];
+const CODEX_AGENT_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./codex-agent/AGENTS.md", import.meta.url),
+);
 const HERMES_PERSONAS = {
   lead: {
     instructionsFilePath: TEAM_LEAD_INSTRUCTIONS_PATH,
@@ -64,9 +67,9 @@ const TEAM = [
     key: "codex",
     name: "Codex Agent",
     role: "engineer",
-    title: "Codex Coding and Review Agent",
+    title: "Codex Software Engineer",
     adapterType: "codex_local",
-    capabilities: "Explicitly assigned coding and review tasks",
+    capabilities: "Explicitly assigned implementation, diagnosis, verification, refactoring, and independent review",
   },
   {
     key: "hermes",
@@ -122,7 +125,7 @@ function hermesConfig(cwd, persona) {
   };
 }
 
-function codexConfig(cwd) {
+function codexConfig(cwd, instructionsFilePath) {
   return {
     cwd,
     engine: "acp",
@@ -131,6 +134,7 @@ function codexConfig(cwd) {
     warmHandleIdleMs: 0,
     dangerouslyBypassApprovalsAndSandbox: false,
     workspaceStrategy: { type: "git_worktree" },
+    instructionsFilePath,
   };
 }
 
@@ -147,7 +151,7 @@ export function buildTeamPlan({ workspaces, disposableRoot }) {
       capabilities: member.capabilities,
       adapterType: member.adapterType,
       adapterConfig: member.adapterType === "codex_local"
-        ? codexConfig(safeWorkspaces[member.key])
+        ? codexConfig(safeWorkspaces[member.key], CODEX_AGENT_INSTRUCTIONS_PATH)
         : hermesConfig(
           safeWorkspaces[member.key],
           HERMES_PERSONAS[member.key],

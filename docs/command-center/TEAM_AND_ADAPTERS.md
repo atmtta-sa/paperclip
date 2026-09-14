@@ -20,7 +20,7 @@ OpenClaw is disabled. Use it only after a separate decision identifies a concret
 | Team Lead | `cto` | none | `hermes_local` | Coordination and review; no automatic merge, deploy, migration, or provider-configuration authority |
 | ORP Developer | `engineer` | Team Lead | `hermes_local` | ORP checkout only |
 | Whattsi Developer | `engineer` | Team Lead | `hermes_local` | Whattsi checkout only |
-| Codex Agent | `engineer` | Team Lead | `codex_local` | Explicitly assigned coding or review work in a disposable or approved workspace |
+| Codex Agent | `engineer` | Team Lead | `codex_local` | Project-neutral software engineering in one explicitly assigned mode and approved workspace |
 | Hermes Agent | `engineer` | Team Lead | `hermes_local` | Explicitly assigned coding or review work in a disposable or approved workspace |
 
 `manager` is not a valid Paperclip role. `cto` is the valid supervisory role for Team Lead; the visible title remains “Team Lead / Supervisor.”
@@ -150,6 +150,14 @@ The contract requires task-scoped checkout, same-heartbeat execution, ORP archit
 `scripts/command-center/whattsi-developer/AGENTS.md` is the standing Whattsi Developer contract. The bootstrap assigns it only to Whattsi Developer together with the core Paperclip skill; other workers do not inherit Whattsi-specific laws.
 
 The contract requires task-scoped checkout, same-heartbeat execution, FastAPI/PostgreSQL responsibility boundaries, tenant and principal isolation, test-first evidence, isolated disposable database safety, bilingual and RTL behavior, and explicit public-launch evidence states. Installing this persona does not authorize binding or accessing the real Whattsi checkout, activating the agent, sending Meta WhatsApp messages, changing Cloudflare or payment-provider configuration, or mutating project data; each requires its own approved task and boundary.
+
+## Codex Software Engineer persona
+
+`scripts/command-center/codex-agent/AGENTS.md` is the standing project-neutral Codex contract. The bootstrap assigns it only to Codex Agent. Its primary mode is selected per task: implementation, independent review, diagnosis, verification, or behavior-preserving refactoring.
+
+Project developers remain the default implementers and accountable owners of ORP and Whattsi tasks. Codex has no standing project ownership and does not run automatically for commits, completions, routine changes, or idle capacity. Team Lead may create one bounded Codex task only when high-risk work, difficult diagnosis, conflicting evidence, repeated failed corrections, or explicitly approved specialist/overflow implementation justifies the additional provider run.
+
+Every Codex assignment names the exact repository, approved worktree, branch or diff, acceptance criteria, mutation permission, evidence requirements, primary mode, and stop condition. Codex cannot accept its own implementation, take over another developer's issue, or exercise commit, push, merge, deploy, provider, spending, production, or live-data authority without the corresponding separate approval.
 
 ### Synthetic watchdog checkpoint — 2026-09-14
 

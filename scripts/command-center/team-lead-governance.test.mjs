@@ -201,3 +201,27 @@ test("Team Lead instructions encode event, worker, UAT, and safety governance", 
   ];
   for (const term of requiredTerms) assert.match(teamLeadInstructions, new RegExp(term, "i"));
 });
+
+test("Team Lead dispatches Codex only for bounded exceptional engineering work", () => {
+  for (const term of [
+    "Codex dispatch policy",
+    "project developer remains accountable",
+    "Implementation",
+    "Independent review",
+    "Diagnosis",
+    "Verification",
+    "Refactoring",
+    "high-risk",
+    "repeated failed corrections",
+    "exact repository",
+    "approved worktree",
+    "paused",
+    "scheduled heartbeat",
+  ]) {
+    assert.match(teamLeadInstructions, new RegExp(term, "i"));
+  }
+  assert.match(teamLeadInstructions, /do not dispatch Codex.*routine/i);
+  assert.match(teamLeadInstructions, /never.*automatically.*every.*task/i);
+  assert.match(teamLeadInstructions, /one bounded Codex task/i);
+  assert.match(teamLeadInstructions, /final acceptance.*Team Lead/is);
+});
