@@ -145,6 +145,12 @@ Protected-repository binding, provider calls or spend, push/merge/deploy, and pr
 
 The contract requires task-scoped checkout, same-heartbeat execution, ORP architecture and localization boundaries, test-first evidence, disposable PostgreSQL safety, and explicit Team Lead reporting. Installing this persona does not authorize binding or accessing the real ORP checkout, activating the agent, making provider calls, or mutating project data; each requires its own approved task and boundary.
 
+## Whattsi Developer persona
+
+`scripts/command-center/whattsi-developer/AGENTS.md` is the standing Whattsi Developer contract. The bootstrap assigns it only to Whattsi Developer together with the core Paperclip skill; other workers do not inherit Whattsi-specific laws.
+
+The contract requires task-scoped checkout, same-heartbeat execution, FastAPI/PostgreSQL responsibility boundaries, tenant and principal isolation, test-first evidence, isolated disposable database safety, bilingual and RTL behavior, and explicit public-launch evidence states. Installing this persona does not authorize binding or accessing the real Whattsi checkout, activating the agent, sending Meta WhatsApp messages, changing Cloudflare or payment-provider configuration, or mutating project data; each requires its own approved task and boundary.
+
 ### Synthetic watchdog checkpoint — 2026-09-14
 
 A loopback-only disposable preview with scheduler and telemetry disabled verified the control-plane lifecycle and one provider-backed Team Lead continuation:

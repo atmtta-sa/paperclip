@@ -17,6 +17,10 @@ const ORP_DEVELOPER_INSTRUCTIONS_PATH = fileURLToPath(
   new URL("./orp-developer/AGENTS.md", import.meta.url),
 );
 const ORP_DEVELOPER_SKILLS = ["paperclipai/paperclip/paperclip"];
+const WHATTSI_DEVELOPER_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./whattsi-developer/AGENTS.md", import.meta.url),
+);
+const WHATTSI_DEVELOPER_SKILLS = ["paperclipai/paperclip/paperclip"];
 const HERMES_PERSONAS = {
   lead: {
     instructionsFilePath: TEAM_LEAD_INSTRUCTIONS_PATH,
@@ -25,6 +29,10 @@ const HERMES_PERSONAS = {
   orp: {
     instructionsFilePath: ORP_DEVELOPER_INSTRUCTIONS_PATH,
     desiredSkills: ORP_DEVELOPER_SKILLS,
+  },
+  whattsi: {
+    instructionsFilePath: WHATTSI_DEVELOPER_INSTRUCTIONS_PATH,
+    desiredSkills: WHATTSI_DEVELOPER_SKILLS,
   },
 };
 const TEAM = [
