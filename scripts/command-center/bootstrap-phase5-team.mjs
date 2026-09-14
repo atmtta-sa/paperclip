@@ -2,10 +2,17 @@
 
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { verifyDisposableGitWorkspaces } from "./phase5-workspace-guards.mjs";
 
 const LEAD_NAME = "Team Lead";
+const TEAM_LEAD_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./team-lead/AGENTS.md", import.meta.url),
+);
+const TEAM_LEAD_SKILLS = [
+  "paperclipai/paperclip/paperclip",
+  "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+];
 const TEAM = [
   {
     key: "lead",
@@ -74,7 +81,7 @@ function ensureDisposableWorkspaces(workspaces, disposableRoot) {
   return Object.fromEntries(resolved);
 }
 
-function hermesConfig(cwd) {
+function hermesConfig(cwd, instructionsFilePath) {
   return {
     cwd,
     provider: "auto",
@@ -86,6 +93,10 @@ function hermesConfig(cwd) {
     graceSec: 10,
     maxTurnsPerRun: 20,
     toolsets: "terminal,file",
+    ...(instructionsFilePath ? {
+      instructionsFilePath,
+      paperclipSkillSync: { desiredSkills: TEAM_LEAD_SKILLS },
+    } : {}),
   };
 }
 
@@ -115,7 +126,10 @@ export function buildTeamPlan({ workspaces, disposableRoot }) {
       adapterType: member.adapterType,
       adapterConfig: member.adapterType === "codex_local"
         ? codexConfig(safeWorkspaces[member.key])
-        : hermesConfig(safeWorkspaces[member.key]),
+        : hermesConfig(
+          safeWorkspaces[member.key],
+          member.key === "lead" ? TEAM_LEAD_INSTRUCTIONS_PATH : undefined,
+        ),
       budgetMonthlyCents: 0,
     })),
   };
