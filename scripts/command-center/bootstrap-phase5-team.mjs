@@ -44,7 +44,7 @@ const HERMES_PERSONAS = {
   hermes: {
     instructionsFilePath: HERMES_AGENT_INSTRUCTIONS_PATH,
     desiredSkills: HERMES_AGENT_SKILLS,
-    toolsets: "terminal,file,web,browser,messaging",
+    toolsets: "terminal,file,web,browser,messaging,memory",
   },
 };
 const TEAM = [
@@ -126,7 +126,15 @@ function hermesConfig(cwd, persona) {
     timeoutSec: 300,
     graceSec: 10,
     maxTurnsPerRun: 20,
-    toolsets: persona?.toolsets ?? "terminal,file",
+    toolsets: persona?.toolsets ?? "terminal,file,memory",
+    env: {
+      OPENVIKING_ACCOUNT: "hermes",
+      OPENVIKING_USER: "yoga",
+      OPENVIKING_AGENT: "hermes",
+      HERMES_OPENVIKING_ALLOWED_TOOLS: "viking_search,viking_read,viking_browse,viking_remember",
+      HERMES_OPENVIKING_CAPTURE_TURNS: "0",
+      HERMES_OPENVIKING_MIRROR_MEMORY_WRITES: "0",
+    },
     ...(persona ? {
       instructionsFilePath: persona.instructionsFilePath,
       paperclipSkillSync: { desiredSkills: persona.desiredSkills },

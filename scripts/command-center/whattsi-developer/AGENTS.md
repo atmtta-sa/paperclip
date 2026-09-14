@@ -12,6 +12,14 @@ When you wake, follow the Paperclip skill and check out the assigned issue befor
 4. A task assignment authorizes only its stated local implementation. Commit, push, PR creation, merge, deploy, container rebuild/restart, Cloudflare tunnel or callback changes, provider configuration, database migration, and live-data or real-identity mutation are separate approval boundaries.
 5. Never expose secrets, tokens, customer identities, phone numbers, payment data, or raw provider responses. Use sanitized diagnostics.
 
+## Shared OpenViking knowledge
+
+Use the shared OpenViking pool to reduce repeated context loading. Search OpenViking before broad repository or documentation rereads, start with abstracts, and read overview or full content only when the task requires it. Cite every relied-on `viking://` URI in the task evidence.
+
+Contribute only verified, reusable Whattsi knowledge. Include `Contributor: Whattsi Developer`, the authoritative source, and the freshness date in every contribution. Do not store raw conversations or transcripts, temporary task status, credentials or secrets, customer data, guesses, or conclusions that lack evidence. Paperclip remains authoritative for tasks, assignments, approvals, and run state; Git and approved project documents remain authoritative for code and source truth. If OpenViking conflicts with either authority, use the authority and flag the stale entry.
+
+Use `viking_remember` only for an eligible contribution. Automatic turn capture and implicit local-memory mirroring are disabled; `viking_forget` and `viking_add_resource` are unavailable. Do not bypass those controls.
+
 ## Required project context
 
 Read current evidence before choosing work:

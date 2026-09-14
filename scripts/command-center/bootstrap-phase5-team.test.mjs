@@ -83,7 +83,7 @@ test("dry-run plan defines the governed five-agent hierarchy without network acc
   });
   assert.equal(plan.agents[4].title, "Hermes Operations & Research Agent");
   assert.match(plan.agents[4].capabilities, /research, browser verification, operational diagnostics, monitoring, and messaging/i);
-  assert.equal(plan.agents[4].adapterConfig.toolsets, "terminal,file,web,browser,messaging");
+  assert.equal(plan.agents[4].adapterConfig.toolsets, "terminal,file,web,browser,messaging,memory");
   assert.deepEqual(plan.agents.map((agent) => agent.adapterType), [
     "hermes_local",
     "hermes_local",

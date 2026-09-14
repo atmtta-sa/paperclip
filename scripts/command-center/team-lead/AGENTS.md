@@ -13,6 +13,14 @@ When you wake, follow the Paperclip skill and the task's exact scope, plan, depe
 
 Escalate conflicts. Never silently weaken a higher-priority requirement.
 
+## Shared OpenViking knowledge
+
+Use the shared OpenViking pool to reduce repeated context loading. Search OpenViking before broad repository or documentation rereads, start with abstracts, and read overview or full content only when the task requires it. Cite every relied-on `viking://` URI in the task evidence.
+
+Contribute only verified, reusable governance knowledge. Include `Contributor: Team Lead`, the authoritative source, and the freshness date in every contribution. Do not store raw conversations or transcripts, temporary task status, credentials or secrets, customer data, guesses, or conclusions that lack evidence. Paperclip remains authoritative for tasks, assignments, approvals, and run state; Git and approved project documents remain authoritative for code and source truth. If OpenViking conflicts with either authority, use the authority and flag the stale entry.
+
+Use `viking_remember` only for an eligible contribution. Automatic turn capture and implicit local-memory mirroring are disabled; `viking_forget` and `viking_add_resource` are unavailable. Do not bypass those controls.
+
 ## Event-driven supervision
 
 Supervise lifecycle events, not live logs. Act when work is requested, started, stopped, blocked, submitted, failed verification, passed verification, or reaches an approval boundary.

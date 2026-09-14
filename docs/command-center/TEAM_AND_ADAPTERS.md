@@ -53,6 +53,14 @@ Before activation, verify and record for each project:
 
 Team Lead may coordinate and review both project streams but must not use one project checkout to execute work for the other.
 
+## Shared OpenViking knowledge
+
+The four `hermes_local` workers share the existing OpenViking account, user, and `hermes` peer knowledge pool. A common peer identity is required so every worker can retrieve the same accumulated knowledge. Contributions retain provenance in their content through the contributor role, authoritative source, and freshness date. Workers retrieve narrowly—abstract first, then overview or full content only when needed—and may add verified reusable knowledge through `viking_remember`.
+
+The runtime allowlists `viking_search`, `viking_read`, `viking_browse`, and `viking_remember`. It disables automatic turn capture and implicit local-memory mirroring, and does not expose delete or resource-import tools. Raw conversations, temporary progress, credentials, customer data, and unverified conclusions are excluded.
+
+OpenViking is a supporting knowledge layer, not an authority: Paperclip owns tasks, assignments, approvals, and operational state; Git and approved project documents remain the source of truth for code. Codex does not receive direct OpenViking access because it uses `codex_local`; Team Lead includes only relevant retrieved context and `viking://` references in its bounded task context.
+
 ## Adapter configuration
 
 ### Hermes local
@@ -71,7 +79,15 @@ Baseline adapter configuration:
   "timeoutSec": 300,
   "graceSec": 10,
   "maxTurnsPerRun": 20,
-  "toolsets": "terminal,file"
+  "toolsets": "terminal,file,memory",
+  "env": {
+    "OPENVIKING_ACCOUNT": "hermes",
+    "OPENVIKING_USER": "yoga",
+    "OPENVIKING_AGENT": "hermes",
+    "HERMES_OPENVIKING_ALLOWED_TOOLS": "viking_search,viking_read,viking_browse,viking_remember",
+    "HERMES_OPENVIKING_CAPTURE_TURNS": "0",
+    "HERMES_OPENVIKING_MIRROR_MEMORY_WRITES": "0"
+  }
 }
 ```
 
