@@ -139,6 +139,12 @@ At project completion, the developer supplies the test URL, prerequisites, numbe
 
 Protected-repository binding, provider calls or spend, push/merge/deploy, and production activation fail closed without an exact bounded approval for the requested action and scope.
 
+## ORP Developer persona
+
+`scripts/command-center/orp-developer/AGENTS.md` is the standing ORP Developer contract. The bootstrap assigns it only to ORP Developer together with the core Paperclip skill; other workers do not inherit ORP-specific laws.
+
+The contract requires task-scoped checkout, same-heartbeat execution, ORP architecture and localization boundaries, test-first evidence, disposable PostgreSQL safety, and explicit Team Lead reporting. Installing this persona does not authorize binding or accessing the real ORP checkout, activating the agent, making provider calls, or mutating project data; each requires its own approved task and boundary.
+
 ### Synthetic watchdog checkpoint — 2026-09-14
 
 A loopback-only disposable preview with scheduler and telemetry disabled verified the control-plane lifecycle and one provider-backed Team Lead continuation:

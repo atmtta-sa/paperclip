@@ -13,6 +13,20 @@ const TEAM_LEAD_SKILLS = [
   "paperclipai/paperclip/paperclip",
   "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
 ];
+const ORP_DEVELOPER_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./orp-developer/AGENTS.md", import.meta.url),
+);
+const ORP_DEVELOPER_SKILLS = ["paperclipai/paperclip/paperclip"];
+const HERMES_PERSONAS = {
+  lead: {
+    instructionsFilePath: TEAM_LEAD_INSTRUCTIONS_PATH,
+    desiredSkills: TEAM_LEAD_SKILLS,
+  },
+  orp: {
+    instructionsFilePath: ORP_DEVELOPER_INSTRUCTIONS_PATH,
+    desiredSkills: ORP_DEVELOPER_SKILLS,
+  },
+};
 const TEAM = [
   {
     key: "lead",
@@ -81,7 +95,7 @@ function ensureDisposableWorkspaces(workspaces, disposableRoot) {
   return Object.fromEntries(resolved);
 }
 
-function hermesConfig(cwd, instructionsFilePath) {
+function hermesConfig(cwd, persona) {
   return {
     cwd,
     provider: "auto",
@@ -93,9 +107,9 @@ function hermesConfig(cwd, instructionsFilePath) {
     graceSec: 10,
     maxTurnsPerRun: 20,
     toolsets: "terminal,file",
-    ...(instructionsFilePath ? {
-      instructionsFilePath,
-      paperclipSkillSync: { desiredSkills: TEAM_LEAD_SKILLS },
+    ...(persona ? {
+      instructionsFilePath: persona.instructionsFilePath,
+      paperclipSkillSync: { desiredSkills: persona.desiredSkills },
     } : {}),
   };
 }
@@ -128,7 +142,7 @@ export function buildTeamPlan({ workspaces, disposableRoot }) {
         ? codexConfig(safeWorkspaces[member.key])
         : hermesConfig(
           safeWorkspaces[member.key],
-          member.key === "lead" ? TEAM_LEAD_INSTRUCTIONS_PATH : undefined,
+          HERMES_PERSONAS[member.key],
         ),
       budgetMonthlyCents: 0,
     })),

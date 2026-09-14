@@ -54,8 +54,15 @@ test("dry-run plan defines the governed five-agent hierarchy without network acc
     ],
   });
   assert.ok(plan.agents.slice(1).every((agent) => agent.reportsTo === "$TEAM_LEAD_ID"));
-  assert.ok(plan.agents.slice(1).every((agent) => agent.adapterConfig.instructionsFilePath === undefined));
-  assert.ok(plan.agents.slice(1).every((agent) => agent.adapterConfig.paperclipSkillSync === undefined));
+  assert.match(
+    plan.agents[1].adapterConfig.instructionsFilePath,
+    /scripts\/command-center\/orp-developer\/AGENTS\.md$/,
+  );
+  assert.deepEqual(plan.agents[1].adapterConfig.paperclipSkillSync, {
+    desiredSkills: ["paperclipai/paperclip/paperclip"],
+  });
+  assert.ok(plan.agents.slice(2).every((agent) => agent.adapterConfig.instructionsFilePath === undefined));
+  assert.ok(plan.agents.slice(2).every((agent) => agent.adapterConfig.paperclipSkillSync === undefined));
   assert.deepEqual(plan.agents.map((agent) => agent.adapterType), [
     "hermes_local",
     "hermes_local",
