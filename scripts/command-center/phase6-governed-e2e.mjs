@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { buildTeamPlan } from "./bootstrap-phase5-team.mjs";
 import { verifyDisposableGitWorkspaces } from "./phase5-workspace-guards.mjs";
 
-const ACTIVE_AGENT_STATUSES = new Set(["idle", "running"]);
+const ACTIVE_AGENT_STATUSES = new Set(["active", "idle", "running"]);
 
 function apiRoot(baseUrl) {
   const parsed = new URL(baseUrl);

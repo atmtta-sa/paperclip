@@ -91,6 +91,10 @@ test("only the selected agent may be active", () => {
     { id: "hermes", status: "running" },
     { id: "codex", status: "idle" },
   ], "hermes"), /unexpected active agent codex/);
+  assert.throws(() => assertSingleActiveAgent([
+    { id: "hermes", status: "running" },
+    { id: "codex", status: "active" },
+  ], "hermes"), /unexpected active agent codex/);
 });
 
 test("unexpected extra runs fail closed", () => {
