@@ -6,6 +6,7 @@ import { createAmbientActorMotion } from "./ambientMotion.js";
 import { createCoffeeBreakMotion, projectCoffeeSpot } from "./coffeeBreak.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
 import { buildOfficeEnvironment } from "./sceneComposition.js";
+import { updateRoomAmbience } from "./roomAmbience.js";
 import { resolveAnimationClip, type StatusLightProfile } from "./visualState.js";
 
 export const ROOM_LABEL_BACKGROUND = "rgba(15, 23, 42, 0.55)";
@@ -218,6 +219,7 @@ export function createOfficeEnvironmentController(
         mixer.update(delta);
       });
       updateStatusLights(environment, elapsed);
+      updateRoomAmbience(environment, elapsed);
     },
     dispose: () => {
       actorRuntimes.forEach(({ mixer }) => mixer.stopAllAction());

@@ -61,6 +61,36 @@ describe("Agent Office scene composition", () => {
     });
   });
 
+  it("adds one four-sided state-reactive ambience edge to every room", () => {
+    const models = new Map<OfficeModelName, LoadedOfficeModel>();
+    [...FURNITURE_MODELS, ...CHARACTER_MODELS].forEach((name) => models.set(name, model(name)));
+
+    const environment = buildOfficeEnvironment(rooms, models);
+    const ambienceGroups = environment.getObjectsByProperty("name", "office-room-ambience");
+    const ambienceEdges = environment.getObjectsByProperty("name", "office-room-ambience-edge") as THREE.Mesh[];
+
+    expect(ambienceGroups).toHaveLength(rooms.length);
+    expect(ambienceEdges).toHaveLength(rooms.length * 4);
+    ambienceGroups.forEach((ambience, index) => {
+      expect(ambience.userData.state).toBe(rooms[index]?.state);
+      expect(ambience.userData.profile).toEqual(expect.objectContaining({
+        speed: expect.any(Number),
+        minOpacity: expect.any(Number),
+        maxOpacity: expect.any(Number),
+      }));
+    });
+    ambienceEdges.forEach((edge) => {
+      expect(edge.material).toBeInstanceOf(THREE.MeshStandardMaterial);
+      const material = edge.material as THREE.MeshStandardMaterial;
+      expect(material.emissiveIntensity).toBeGreaterThanOrEqual(1.5);
+      expect(material.emissive.getHex()).toBe(material.color.getHex());
+      expect(edge.geometry).toBeInstanceOf(THREE.BoxGeometry);
+      const geometry = edge.geometry as THREE.BoxGeometry;
+      expect(geometry.parameters.height).toBeGreaterThanOrEqual(0.04);
+      expect(edge.position.y).toBeGreaterThan(0.16);
+    });
+  });
+
   it("adds one emissive glow surface for every workstation monitor", () => {
     const models = new Map<OfficeModelName, LoadedOfficeModel>();
     [...FURNITURE_MODELS, ...CHARACTER_MODELS].forEach((name) => models.set(name, model(name)));

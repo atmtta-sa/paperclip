@@ -34,6 +34,28 @@ describe("Agent Office Three.js runtime compatibility", () => {
     expect(source).toContain("THREE.PCFShadowMap");
   });
 
+  it("pulses active room ambience while keeping idle ambience static", () => {
+    const scene = new THREE.Scene();
+    const rooms: OfficeRoom[] = [
+      { id: "active", label: "Active Agent", state: "executing", taskTitle: "Build", channel: "paperclip" },
+      { id: "idle", label: "Idle Agent", state: "idle", taskTitle: null, channel: "paperclip" },
+    ];
+    const controller = createOfficeEnvironmentController(scene, rooms, new Map(), () => undefined);
+    const ambience = scene.getObjectsByProperty("name", "office-room-ambience");
+    const opacity = (object: THREE.Object3D) => {
+      const edge = object.getObjectByName("office-room-ambience-edge") as THREE.Mesh;
+      return (edge.material as THREE.MeshBasicMaterial).opacity;
+    };
+    const activeBefore = opacity(ambience[0]!);
+    const idleBefore = opacity(ambience[1]!);
+
+    controller.updateAnimations(0.25);
+
+    expect(opacity(ambience[0]!)).not.toBe(activeBefore);
+    expect(opacity(ambience[1]!)).toBe(idleBefore);
+    controller.dispose();
+  });
+
   it("preserves ambient schedules when a refresh does not change scene state", () => {
     const scene = new THREE.Scene();
     const rooms: OfficeRoom[] = [
