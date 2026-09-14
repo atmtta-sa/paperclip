@@ -7,6 +7,7 @@ import {
   type FurnitureModelName,
   type OfficeModelName,
 } from "./assets.js";
+import { addLoungeDetails } from "./loungeDetails.js";
 import {
   ATRIUM_FURNITURE,
   OFFICE_ROOM_SIZE,
@@ -273,6 +274,7 @@ function buildAtrium(models: OfficeModelMap): THREE.Group {
   floor.position.y = 0.08;
   atrium.add(floor);
   ATRIUM_FURNITURE.forEach((placement) => placeFurniture(atrium, models, placement));
+  addLoungeDetails(atrium);
   return atrium;
 }
 

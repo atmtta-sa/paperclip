@@ -91,6 +91,26 @@ describe("Agent Office scene composition", () => {
     });
   });
 
+  it("adds restrained coffee details and warm light to the atrium", () => {
+    const models = new Map<OfficeModelName, LoadedOfficeModel>();
+    [...FURNITURE_MODELS, ...CHARACTER_MODELS].forEach((name) => models.set(name, model(name)));
+
+    const environment = buildOfficeEnvironment(rooms, models);
+    const atrium = environment.getObjectByName("agent-office-atrium");
+    const cups = atrium?.getObjectsByProperty("name", "office-lounge-coffee-cup") as THREE.Group[];
+    const lights = atrium?.getObjectsByProperty("name", "office-lounge-warm-light") as THREE.PointLight[];
+
+    expect(cups).toHaveLength(3);
+    cups.forEach((cup) => {
+      expect(cup.userData.generated).toBe(true);
+      expect(cup.position.y).toBeGreaterThan(0.5);
+    });
+    expect(lights).toHaveLength(1);
+    expect(lights[0]?.color.getHex()).toBe(0xffc36a);
+    expect(lights[0]?.intensity).toBeLessThanOrEqual(0.8);
+    expect(lights[0]?.distance).toBeLessThanOrEqual(5);
+  });
+
   it("adds one emissive glow surface for every workstation monitor", () => {
     const models = new Map<OfficeModelName, LoadedOfficeModel>();
     [...FURNITURE_MODELS, ...CHARACTER_MODELS].forEach((name) => models.set(name, model(name)));
