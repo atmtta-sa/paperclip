@@ -21,7 +21,7 @@ OpenClaw is disabled. Use it only after a separate decision identifies a concret
 | ORP Developer | `engineer` | Team Lead | `hermes_local` | ORP checkout only |
 | Whattsi Developer | `engineer` | Team Lead | `hermes_local` | Whattsi checkout only |
 | Codex Agent | `engineer` | Team Lead | `codex_local` | Project-neutral software engineering in one explicitly assigned mode and approved workspace |
-| Hermes Agent | `engineer` | Team Lead | `hermes_local` | Explicitly assigned coding or review work in a disposable or approved workspace |
+| Hermes Agent | `engineer` | Team Lead | `hermes_local` | Research, browser verification, operational diagnostics, bounded monitoring, messaging, and evidence collection |
 
 `manager` is not a valid Paperclip role. `cto` is the valid supervisory role for Team Lead; the visible title remains “Team Lead / Supervisor.”
 
@@ -158,6 +158,14 @@ The contract requires task-scoped checkout, same-heartbeat execution, FastAPI/Po
 Project developers remain the default implementers and accountable owners of ORP and Whattsi tasks. Codex has no standing project ownership and does not run automatically for commits, completions, routine changes, or idle capacity. Team Lead may create one bounded Codex task only when high-risk work, difficult diagnosis, conflicting evidence, repeated failed corrections, or explicitly approved specialist/overflow implementation justifies the additional provider run.
 
 Every Codex assignment names the exact repository, approved worktree, branch or diff, acceptance criteria, mutation permission, evidence requirements, primary mode, and stop condition. Codex cannot accept its own implementation, take over another developer's issue, or exercise commit, push, merge, deploy, provider, spending, production, or live-data authority without the corresponding separate approval.
+
+## Hermes Operations & Research persona
+
+`scripts/command-center/hermes-agent/AGENTS.md` is the standing project-neutral operations and research contract. Hermes is the runtime that provides the LLM, tools, skills, memory, browser, terminal, and execution loop; the Paperclip identity, managed instructions, and assigned task define this worker's persona and authority.
+
+The bootstrap assigns this contract and the core Paperclip skill only to Hermes Agent, with web, browser, messaging, terminal, and file toolsets. Hermes performs source-grounded research, browser verification, operational diagnostics, bounded monitoring, messaging, and evidence collection. It does not own product implementation, software-engineering specialist work, worker governance, or final acceptance.
+
+Hermes does not run automatically for every task or status change. Team Lead creates one bounded task only when the requested evidence needs Hermes-specific tools or isolation. Each assignment defines authoritative sources or the approved environment, permitted tools, mutation permissions, evidence requirements, output destination, and stop condition. External messages, provider calls, spending, production changes, live data, deployment, and service or configuration mutations remain separate approval boundaries.
 
 ### Synthetic watchdog checkpoint — 2026-09-14
 

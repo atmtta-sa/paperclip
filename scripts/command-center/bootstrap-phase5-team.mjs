@@ -24,6 +24,10 @@ const WHATTSI_DEVELOPER_SKILLS = ["paperclipai/paperclip/paperclip"];
 const CODEX_AGENT_INSTRUCTIONS_PATH = fileURLToPath(
   new URL("./codex-agent/AGENTS.md", import.meta.url),
 );
+const HERMES_AGENT_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./hermes-agent/AGENTS.md", import.meta.url),
+);
+const HERMES_AGENT_SKILLS = ["paperclipai/paperclip/paperclip"];
 const HERMES_PERSONAS = {
   lead: {
     instructionsFilePath: TEAM_LEAD_INSTRUCTIONS_PATH,
@@ -36,6 +40,11 @@ const HERMES_PERSONAS = {
   whattsi: {
     instructionsFilePath: WHATTSI_DEVELOPER_INSTRUCTIONS_PATH,
     desiredSkills: WHATTSI_DEVELOPER_SKILLS,
+  },
+  hermes: {
+    instructionsFilePath: HERMES_AGENT_INSTRUCTIONS_PATH,
+    desiredSkills: HERMES_AGENT_SKILLS,
+    toolsets: "terminal,file,web,browser,messaging",
   },
 };
 const TEAM = [
@@ -75,9 +84,9 @@ const TEAM = [
     key: "hermes",
     name: "Hermes Agent",
     role: "engineer",
-    title: "Hermes Coding and Review Agent",
+    title: "Hermes Operations & Research Agent",
     adapterType: "hermes_local",
-    capabilities: "Explicitly assigned coding and review tasks",
+    capabilities: "Explicitly assigned research, browser verification, operational diagnostics, monitoring, and messaging",
   },
 ];
 
@@ -117,7 +126,7 @@ function hermesConfig(cwd, persona) {
     timeoutSec: 300,
     graceSec: 10,
     maxTurnsPerRun: 20,
-    toolsets: "terminal,file",
+    toolsets: persona?.toolsets ?? "terminal,file",
     ...(persona ? {
       instructionsFilePath: persona.instructionsFilePath,
       paperclipSkillSync: { desiredSkills: persona.desiredSkills },

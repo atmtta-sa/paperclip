@@ -56,6 +56,16 @@ The task must name exactly one primary mode: Implementation, Independent review,
 
 Keep Codex paused with its scheduled heartbeat disabled when no bounded assignment exists. Wake it once for the assigned task; do not poll or create duplicate review tasks. After Codex posts its result, route any corrections to the accountable developer unless a separate implementation assignment explicitly authorizes Codex to edit. Team Lead evaluates the evidence and retains final acceptance authority.
 
+## Hermes dispatch policy
+
+Hermes is project-neutral operations and research capacity. Use it for source-grounded research, browser verification, operational diagnostics, bounded monitoring, messaging, and evidence collection. The project developer remains accountable for implementation, Codex handles explicitly assigned software-engineering specialist work, and final acceptance remains with Team Lead.
+
+Never automatically dispatch Hermes for every task, status check, or completion. Do not dispatch Hermes for product implementation, code refactoring, worker governance, or evidence already available from authoritative sources and existing checks. Do not create monitoring or research merely to consume idle capacity.
+
+Create one bounded Hermes task only when the requested output needs Hermes-specific tools or isolation. The task must specify the exact scope, authoritative sources or approved environment, permitted tools, evidence requirements, mutation permissions, output destination, and stop condition. Messaging tasks must identify the approved platform, recipient, and content. Monitoring tasks must use a first-class issue monitor, routine, webhook, or explicit recheck—not a busy loop.
+
+Keep Hermes paused with its scheduled heartbeat disabled when no bounded assignment exists. Wake it once for the assigned task and do not poll or duplicate the task. Hermes reports evidence; it does not remediate product code, govern workers, or approve delivery. Route resulting engineering work to the accountable developer or Codex as appropriate. Team Lead evaluates the evidence and retains final acceptance authority.
+
 ## Required task evidence
 
 Derive the exact gate list from the task contract. Where applicable require:

@@ -74,8 +74,16 @@ test("dry-run plan defines the governed five-agent hierarchy without network acc
   );
   assert.equal(plan.agents[3].title, "Codex Software Engineer");
   assert.match(plan.agents[3].capabilities, /implementation, diagnosis, verification, refactoring, and independent review/i);
-  assert.equal(plan.agents[4].adapterConfig.instructionsFilePath, undefined);
-  assert.equal(plan.agents[4].adapterConfig.paperclipSkillSync, undefined);
+  assert.match(
+    plan.agents[4].adapterConfig.instructionsFilePath,
+    /scripts\/command-center\/hermes-agent\/AGENTS\.md$/,
+  );
+  assert.deepEqual(plan.agents[4].adapterConfig.paperclipSkillSync, {
+    desiredSkills: ["paperclipai/paperclip/paperclip"],
+  });
+  assert.equal(plan.agents[4].title, "Hermes Operations & Research Agent");
+  assert.match(plan.agents[4].capabilities, /research, browser verification, operational diagnostics, monitoring, and messaging/i);
+  assert.equal(plan.agents[4].adapterConfig.toolsets, "terminal,file,web,browser,messaging");
   assert.deepEqual(plan.agents.map((agent) => agent.adapterType), [
     "hermes_local",
     "hermes_local",
