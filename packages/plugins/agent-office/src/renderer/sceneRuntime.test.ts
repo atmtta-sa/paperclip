@@ -55,13 +55,50 @@ describe("Agent Office Three.js runtime compatibility", () => {
     controller.dispose();
   });
 
+  it("takes an idle actor to its lounge slot and returns it home", () => {
+    const character = new THREE.Group();
+    const clips = ["idle", "walk"].map((name) => new THREE.AnimationClip(name, 1));
+    const models: OfficeModelMap = new Map([
+      ["character-male-a", { object: character, animations: clips, size: new THREE.Vector3(1, 1, 1) }],
+    ]);
+    const scene = new THREE.Scene();
+    const controller = createOfficeEnvironmentController(
+      scene,
+      [{ id: "idle", label: "Idle Agent", state: "idle", taskTitle: null, channel: "paperclip" }],
+      models,
+      () => undefined,
+      () => 0,
+    );
+    const actor = scene.getObjectByName("office-agent")!;
+    const home = new THREE.Vector3();
+    actor.getWorldPosition(home);
+
+    controller.updateAnimations(45);
+    expect(actor.userData.officeMotion).toBe("walking");
+    controller.updateAnimations(60);
+    const lounge = new THREE.Vector3();
+    actor.getWorldPosition(lounge);
+    expect(lounge.x).toBeCloseTo(-1.6);
+    expect(lounge.z).toBeCloseTo(-1.35);
+    expect(actor.getObjectByName("office-channel-halo")).not.toBeNull();
+
+    controller.updateAnimations(6);
+    controller.updateAnimations(60);
+    const returned = new THREE.Vector3();
+    actor.getWorldPosition(returned);
+    expect(returned.x).toBeCloseTo(home.x);
+    expect(returned.z).toBeCloseTo(home.z);
+    expect(actor.userData.officeMotion).toBe("stationary");
+    controller.dispose();
+  });
+
   it("wanders only idle actors and restores their idle presentation after movement", () => {
     const character = new THREE.Group();
     const clips = ["idle", "sit", "walk"].map((name) => new THREE.AnimationClip(name, 1));
     const models: OfficeModelMap = new Map([
       ["character-male-a", { object: character, animations: clips, size: new THREE.Vector3(1, 1, 1) }],
     ]);
-    const values = [0, 1, 1, 0];
+    const values = [0, 1, 1, 1, 0];
     const scene = new THREE.Scene();
     const idleRoom: OfficeRoom = {
       id: "idle",

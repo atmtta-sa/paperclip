@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { OfficeRoom } from "../projection.js";
-import { createAmbientActorMotion, type AmbientActorMotion } from "./ambientMotion.js";
+import { createAmbientActorMotion } from "./ambientMotion.js";
+import { createCoffeeBreakMotion, projectCoffeeSpot } from "./coffeeBreak.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
 import { buildOfficeEnvironment } from "./sceneComposition.js";
 import { resolveAnimationClip, type StatusLightProfile } from "./visualState.js";
@@ -50,13 +51,13 @@ function addLighting(scene: THREE.Scene): void {
 
 interface ActorRuntime {
   mixer: THREE.AnimationMixer;
-  motion: AmbientActorMotion | null;
+  motion: { update: (delta: number) => void } | null;
 }
 
 function createActorRuntimes(environment: THREE.Group, random: () => number): ActorRuntime[] {
   const runtimes: ActorRuntime[] = [];
-  environment.traverse((object) => {
-    if (object.name !== "office-agent") return;
+  environment.updateMatrixWorld(true);
+  environment.getObjectsByProperty("name", "office-agent").forEach((object, index) => {
     const clips = object.userData.animations as THREE.AnimationClip[] | undefined;
     const state = object.userData.officeState as OfficeRoom["state"] | undefined;
     const clip = state && clips ? resolveAnimationClip(state, clips) : clips?.[0];
@@ -67,15 +68,41 @@ function createActorRuntimes(environment: THREE.Group, random: () => number): Ac
     const walkingAction = walkClip ? mixer.clipAction(walkClip) : null;
     restingAction.play();
     object.userData.officeMotion = "stationary";
-    const motion = state && walkingAction
-      ? createAmbientActorMotion(object, state, random, (walking) => {
-        object.userData.officeMotion = walking ? "walking" : "stationary";
-        const current = walking ? walkingAction : restingAction;
-        const previous = walking ? restingAction : walkingAction;
-        previous.stop();
-        current.reset().play();
-      })
+    const setWalking = (walking: boolean) => {
+      object.userData.officeMotion = walking ? "walking" : "stationary";
+      const current = walking ? walkingAction : restingAction;
+      const previous = walking ? restingAction : walkingAction;
+      previous?.stop();
+      current?.reset().play();
+    };
+    const ambient = state && walkingAction
+      ? createAmbientActorMotion(object, state, random, setWalking)
       : null;
+    const spot = projectCoffeeSpot(index);
+    const worldSpot = environment.localToWorld(new THREE.Vector3(spot.x, object.position.y, spot.z));
+    const loungeSpot = object.parent?.worldToLocal(worldSpot) ?? worldSpot;
+    const coffee = state && walkingAction
+      ? createCoffeeBreakMotion(object, state, [
+        new THREE.Vector3(3, object.position.y, -2.5),
+        new THREE.Vector3(3, object.position.y, 4.8),
+        loungeSpot,
+      ], random, setWalking)
+      : null;
+    const motion = ambient || coffee ? {
+      update: (delta: number) => {
+        const wasOnBreak = coffee?.isActive() ?? false;
+        coffee?.update(delta);
+        const isOnBreak = coffee?.isActive() ?? false;
+        if (!wasOnBreak && isOnBreak) {
+          ambient?.reset();
+          setWalking(true);
+        } else if (wasOnBreak && !isOnBreak) {
+          ambient?.reset();
+        } else if (!isOnBreak) {
+          ambient?.update(delta);
+        }
+      },
+    } : null;
     runtimes.push({ mixer, motion });
   });
   return runtimes;

@@ -62,6 +62,21 @@ describe("Agent Office ambient actor motion", () => {
     expect(setWalking).toHaveBeenLastCalledWith(false);
   });
 
+  it("resets an interrupted wander without moving the actor", () => {
+    const actor = new THREE.Group();
+    actor.position.set(0, 0.46, -2.5);
+    const setWalking = vi.fn();
+    const motion = createAmbientActorMotion(actor, "idle", () => 0, setWalking)!;
+
+    motion.update(8);
+    expect(setWalking).toHaveBeenLastCalledWith(true);
+    motion.reset();
+    expect(setWalking).toHaveBeenLastCalledWith(false);
+    const resetPosition = actor.position.clone();
+    motion.update(7.9);
+    expect(actor.position).toEqual(resetPosition);
+  });
+
   it("does not create ambient motion for non-idle actors", () => {
     const actor = new THREE.Group();
     expect(createAmbientActorMotion(actor, "executing", () => 0, vi.fn())).toBeNull();

@@ -42,6 +42,7 @@ export function projectAmbientDelay(random: number): number {
 
 export interface AmbientActorMotion {
   update: (delta: number) => void;
+  reset: () => void;
 }
 
 export function createAmbientActorMotion(
@@ -62,6 +63,11 @@ export function createAmbientActorMotion(
   const target = new THREE.Vector3();
 
   return {
+    reset: () => {
+      moving = false;
+      setWalking(false);
+      nextMoveAt = elapsed + projectAmbientDelay(random());
+    },
     update: (delta) => {
       elapsed += delta;
       if (!moving && elapsed >= nextMoveAt) {
