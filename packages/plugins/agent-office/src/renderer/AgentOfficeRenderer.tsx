@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { OfficeRoom } from "../projection.js";
 import { loadOfficeModels, resolveInstalledPluginId } from "./modelLoader.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
-import { createOfficeScene } from "./sceneRuntime.js";
+import { createOfficeScene, type OfficeSceneController } from "./sceneRuntime.js";
 
 interface AgentOfficeRendererProps {
   rooms: OfficeRoom[];
@@ -17,18 +17,25 @@ function getOfficeModels(): Promise<OfficeModelMap> {
 
 export function AgentOfficeRenderer({ rooms }: AgentOfficeRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const roomsRef = useRef(rooms);
+  const sceneRef = useRef<OfficeSceneController | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    roomsRef.current = rooms;
+    sceneRef.current?.updateRooms(rooms);
+  }, [rooms]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
     const canvas = canvasRef.current;
     let cancelled = false;
-    let disposeScene: (() => void) | undefined;
     setStatus("loading");
     void getOfficeModels()
       .then((models) => {
         if (cancelled) return;
-        disposeScene = createOfficeScene(canvas, rooms, models);
+        sceneRef.current = createOfficeScene(canvas, roomsRef.current, models);
         setStatus("ready");
       })
       .catch(() => {
@@ -36,16 +43,53 @@ export function AgentOfficeRenderer({ rooms }: AgentOfficeRendererProps) {
       });
     return () => {
       cancelled = true;
-      disposeScene?.();
+      sceneRef.current?.dispose();
+      sceneRef.current = null;
     };
-  }, [rooms]);
+  }, []);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const previousOverflow = document.body.style.overflow;
+    const exitOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", exitOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", exitOnEscape);
+    };
+  }, [expanded]);
 
   return (
-    <figure className="space-y-3" data-office-renderer="agent-office-upstream">
+    <figure
+      className={
+        expanded
+          ? "fixed inset-0 z-[100] flex h-screen w-screen flex-col gap-3 bg-background p-4"
+          : "space-y-3"
+      }
+      data-office-expanded={String(expanded)}
+      data-office-renderer="agent-office-upstream"
+    >
+      <div className="flex justify-end">
+        <button
+          type="button"
+          aria-label={expanded ? "Exit expanded Agent Office" : "Expand Agent Office"}
+          className="rounded border bg-background px-3 py-1.5 text-sm font-medium shadow-sm hover:bg-accent"
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Exit expanded view" : "Expand Office"}
+        </button>
+      </div>
       <canvas
         ref={canvasRef}
         aria-label="Read-only 3D Agent Office"
-        className="h-[32rem] w-full rounded-lg border bg-slate-950"
+        className={
+          expanded
+            ? "min-h-0 flex-1 w-full rounded-lg border bg-slate-950"
+            : "h-[32rem] w-full rounded-lg border bg-slate-950"
+        }
       />
       <p className="text-xs text-muted-foreground" aria-live="polite">
         {status === "loading" ? "Loading upstream office assets…" : null}

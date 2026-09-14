@@ -24,7 +24,7 @@ describe("Agent Office plugin shell", () => {
     ]);
   });
 
-  it("renders Paperclip authority and company scope without controls", () => {
+  it("renders Paperclip authority and company scope without mutation controls", () => {
     const html = renderToStaticMarkup(
       <AgentOfficePage
         context={{
@@ -42,6 +42,7 @@ describe("Agent Office plugin shell", () => {
     expect(html).toContain("Paperclip is the authoritative operational system");
     expect(html).toContain("company-123");
     expect(html).toContain('data-office-renderer="agent-office-upstream"');
-    expect(html).not.toContain("<button");
+    expect(html).toContain('aria-label="Expand Agent Office"');
+    expect(html).not.toMatch(/>(Resume|Pause|Assign|Approve|Run)<\/button>/);
   });
 });
