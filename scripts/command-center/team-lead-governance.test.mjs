@@ -201,3 +201,50 @@ test("Team Lead instructions encode event, worker, UAT, and safety governance", 
   ];
   for (const term of requiredTerms) assert.match(teamLeadInstructions, new RegExp(term, "i"));
 });
+
+test("Team Lead dispatches Codex only for bounded exceptional engineering work", () => {
+  for (const term of [
+    "Codex dispatch policy",
+    "project developer remains accountable",
+    "Implementation",
+    "Independent review",
+    "Diagnosis",
+    "Verification",
+    "Refactoring",
+    "high-risk",
+    "repeated failed corrections",
+    "exact repository",
+    "approved worktree",
+    "paused",
+    "scheduled heartbeat",
+  ]) {
+    assert.match(teamLeadInstructions, new RegExp(term, "i"));
+  }
+  assert.match(teamLeadInstructions, /do not dispatch Codex.*routine/i);
+  assert.match(teamLeadInstructions, /never.*automatically.*every.*task/i);
+  assert.match(teamLeadInstructions, /one bounded Codex task/i);
+  assert.match(teamLeadInstructions, /final acceptance.*Team Lead/is);
+});
+
+test("Team Lead dispatches Hermes for bounded operations and research without role overlap", () => {
+  for (const term of [
+    "Hermes dispatch policy",
+    "source-grounded research",
+    "browser verification",
+    "operational diagnostics",
+    "monitoring",
+    "messaging",
+    "project developer remains accountable",
+    "Codex",
+    "exact scope",
+    "authoritative sources",
+    "paused",
+    "scheduled heartbeat",
+  ]) {
+    assert.match(teamLeadInstructions, new RegExp(term, "i"));
+  }
+  assert.match(teamLeadInstructions, /do not dispatch Hermes.*product implementation/i);
+  assert.match(teamLeadInstructions, /never.*automatically.*every.*task/i);
+  assert.match(teamLeadInstructions, /one bounded Hermes task/i);
+  assert.match(teamLeadInstructions, /final acceptance.*Team Lead/is);
+});

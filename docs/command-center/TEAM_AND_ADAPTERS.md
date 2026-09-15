@@ -20,8 +20,8 @@ OpenClaw is disabled. Use it only after a separate decision identifies a concret
 | Team Lead | `cto` | none | `hermes_local` | Coordination and review; no automatic merge, deploy, migration, or provider-configuration authority |
 | ORP Developer | `engineer` | Team Lead | `hermes_local` | ORP checkout only |
 | Whattsi Developer | `engineer` | Team Lead | `hermes_local` | Whattsi checkout only |
-| Codex Agent | `engineer` | Team Lead | `codex_local` | Explicitly assigned coding or review work in a disposable or approved workspace |
-| Hermes Agent | `engineer` | Team Lead | `hermes_local` | Explicitly assigned coding or review work in a disposable or approved workspace |
+| Codex Agent | `engineer` | Team Lead | `codex_local` | Project-neutral software engineering in one explicitly assigned mode and approved workspace |
+| Hermes Agent | `engineer` | Team Lead | `hermes_local` | Research, browser verification, operational diagnostics, bounded monitoring, messaging, and evidence collection |
 
 `manager` is not a valid Paperclip role. `cto` is the valid supervisory role for Team Lead; the visible title remains “Team Lead / Supervisor.”
 
@@ -53,6 +53,14 @@ Before activation, verify and record for each project:
 
 Team Lead may coordinate and review both project streams but must not use one project checkout to execute work for the other.
 
+## Shared OpenViking knowledge
+
+The four `hermes_local` workers share the existing OpenViking account, user, and `hermes` peer knowledge pool. A common peer identity is required so every worker can retrieve the same accumulated knowledge. Contributions retain provenance in their content through the contributor role, authoritative source, and freshness date. Workers retrieve narrowly—abstract first, then overview or full content only when needed—and may add verified reusable knowledge through `viking_remember`.
+
+The runtime allowlists `viking_search`, `viking_read`, `viking_browse`, and `viking_remember`. It disables automatic turn capture and implicit local-memory mirroring, and does not expose delete or resource-import tools. Raw conversations, temporary progress, credentials, customer data, and unverified conclusions are excluded.
+
+OpenViking is a supporting knowledge layer, not an authority: Paperclip owns tasks, assignments, approvals, and operational state; Git and approved project documents remain the source of truth for code. Codex does not receive direct OpenViking access because it uses `codex_local`; Team Lead includes only relevant retrieved context and `viking://` references in its bounded task context.
+
 ## Adapter configuration
 
 ### Hermes local
@@ -71,7 +79,15 @@ Baseline adapter configuration:
   "timeoutSec": 300,
   "graceSec": 10,
   "maxTurnsPerRun": 20,
-  "toolsets": "terminal,file"
+  "toolsets": "terminal,file,memory",
+  "env": {
+    "OPENVIKING_ACCOUNT": "hermes",
+    "OPENVIKING_USER": "yoga",
+    "OPENVIKING_AGENT": "hermes",
+    "HERMES_OPENVIKING_ALLOWED_TOOLS": "viking_search,viking_read,viking_browse,viking_remember",
+    "HERMES_OPENVIKING_CAPTURE_TURNS": "0",
+    "HERMES_OPENVIKING_MIRROR_MEMORY_WRITES": "0"
+  }
 }
 ```
 
@@ -144,6 +160,28 @@ Protected-repository binding, provider calls or spend, push/merge/deploy, and pr
 `scripts/command-center/orp-developer/AGENTS.md` is the standing ORP Developer contract. The bootstrap assigns it only to ORP Developer together with the core Paperclip skill; other workers do not inherit ORP-specific laws.
 
 The contract requires task-scoped checkout, same-heartbeat execution, ORP architecture and localization boundaries, test-first evidence, disposable PostgreSQL safety, and explicit Team Lead reporting. Installing this persona does not authorize binding or accessing the real ORP checkout, activating the agent, making provider calls, or mutating project data; each requires its own approved task and boundary.
+
+## Whattsi Developer persona
+
+`scripts/command-center/whattsi-developer/AGENTS.md` is the standing Whattsi Developer contract. The bootstrap assigns it only to Whattsi Developer together with the core Paperclip skill; other workers do not inherit Whattsi-specific laws.
+
+The contract requires task-scoped checkout, same-heartbeat execution, FastAPI/PostgreSQL responsibility boundaries, tenant and principal isolation, test-first evidence, isolated disposable database safety, bilingual and RTL behavior, and explicit public-launch evidence states. Installing this persona does not authorize binding or accessing the real Whattsi checkout, activating the agent, sending Meta WhatsApp messages, changing Cloudflare or payment-provider configuration, or mutating project data; each requires its own approved task and boundary.
+
+## Codex Software Engineer persona
+
+`scripts/command-center/codex-agent/AGENTS.md` is the standing project-neutral Codex contract. The bootstrap assigns it only to Codex Agent. Its primary mode is selected per task: implementation, independent review, diagnosis, verification, or behavior-preserving refactoring.
+
+Project developers remain the default implementers and accountable owners of ORP and Whattsi tasks. Codex has no standing project ownership and does not run automatically for commits, completions, routine changes, or idle capacity. Team Lead may create one bounded Codex task only when high-risk work, difficult diagnosis, conflicting evidence, repeated failed corrections, or explicitly approved specialist/overflow implementation justifies the additional provider run.
+
+Every Codex assignment names the exact repository, approved worktree, branch or diff, acceptance criteria, mutation permission, evidence requirements, primary mode, and stop condition. Codex cannot accept its own implementation, take over another developer's issue, or exercise commit, push, merge, deploy, provider, spending, production, or live-data authority without the corresponding separate approval.
+
+## Hermes Operations & Research persona
+
+`scripts/command-center/hermes-agent/AGENTS.md` is the standing project-neutral operations and research contract. Hermes is the runtime that provides the LLM, tools, skills, memory, browser, terminal, and execution loop; the Paperclip identity, managed instructions, and assigned task define this worker's persona and authority.
+
+The bootstrap assigns this contract and the core Paperclip skill only to Hermes Agent, with web, browser, messaging, terminal, and file toolsets. Hermes performs source-grounded research, browser verification, operational diagnostics, bounded monitoring, messaging, and evidence collection. It does not own product implementation, software-engineering specialist work, worker governance, or final acceptance.
+
+Hermes does not run automatically for every task or status change. Team Lead creates one bounded task only when the requested evidence needs Hermes-specific tools or isolation. Each assignment defines authoritative sources or the approved environment, permitted tools, mutation permissions, evidence requirements, output destination, and stop condition. External messages, provider calls, spending, production changes, live data, deployment, and service or configuration mutations remain separate approval boundaries.
 
 ### Synthetic watchdog checkpoint — 2026-09-14
 

@@ -17,6 +17,17 @@ const ORP_DEVELOPER_INSTRUCTIONS_PATH = fileURLToPath(
   new URL("./orp-developer/AGENTS.md", import.meta.url),
 );
 const ORP_DEVELOPER_SKILLS = ["paperclipai/paperclip/paperclip"];
+const WHATTSI_DEVELOPER_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./whattsi-developer/AGENTS.md", import.meta.url),
+);
+const WHATTSI_DEVELOPER_SKILLS = ["paperclipai/paperclip/paperclip"];
+const CODEX_AGENT_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./codex-agent/AGENTS.md", import.meta.url),
+);
+const HERMES_AGENT_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./hermes-agent/AGENTS.md", import.meta.url),
+);
+const HERMES_AGENT_SKILLS = ["paperclipai/paperclip/paperclip"];
 const HERMES_PERSONAS = {
   lead: {
     instructionsFilePath: TEAM_LEAD_INSTRUCTIONS_PATH,
@@ -25,6 +36,15 @@ const HERMES_PERSONAS = {
   orp: {
     instructionsFilePath: ORP_DEVELOPER_INSTRUCTIONS_PATH,
     desiredSkills: ORP_DEVELOPER_SKILLS,
+  },
+  whattsi: {
+    instructionsFilePath: WHATTSI_DEVELOPER_INSTRUCTIONS_PATH,
+    desiredSkills: WHATTSI_DEVELOPER_SKILLS,
+  },
+  hermes: {
+    instructionsFilePath: HERMES_AGENT_INSTRUCTIONS_PATH,
+    desiredSkills: HERMES_AGENT_SKILLS,
+    toolsets: "terminal,file,web,browser,messaging,memory",
   },
 };
 const TEAM = [
@@ -56,17 +76,17 @@ const TEAM = [
     key: "codex",
     name: "Codex Agent",
     role: "engineer",
-    title: "Codex Coding and Review Agent",
+    title: "Codex Software Engineer",
     adapterType: "codex_local",
-    capabilities: "Explicitly assigned coding and review tasks",
+    capabilities: "Explicitly assigned implementation, diagnosis, verification, refactoring, and independent review",
   },
   {
     key: "hermes",
     name: "Hermes Agent",
     role: "engineer",
-    title: "Hermes Coding and Review Agent",
+    title: "Hermes Operations & Research Agent",
     adapterType: "hermes_local",
-    capabilities: "Explicitly assigned coding and review tasks",
+    capabilities: "Explicitly assigned research, browser verification, operational diagnostics, monitoring, and messaging",
   },
 ];
 
@@ -106,7 +126,15 @@ function hermesConfig(cwd, persona) {
     timeoutSec: 300,
     graceSec: 10,
     maxTurnsPerRun: 20,
-    toolsets: "terminal,file",
+    toolsets: persona?.toolsets ?? "terminal,file,memory",
+    env: {
+      OPENVIKING_ACCOUNT: "hermes",
+      OPENVIKING_USER: "yoga",
+      OPENVIKING_AGENT: "hermes",
+      HERMES_OPENVIKING_ALLOWED_TOOLS: "viking_search,viking_read,viking_browse,viking_remember",
+      HERMES_OPENVIKING_CAPTURE_TURNS: "0",
+      HERMES_OPENVIKING_MIRROR_MEMORY_WRITES: "0",
+    },
     ...(persona ? {
       instructionsFilePath: persona.instructionsFilePath,
       paperclipSkillSync: { desiredSkills: persona.desiredSkills },
@@ -114,7 +142,7 @@ function hermesConfig(cwd, persona) {
   };
 }
 
-function codexConfig(cwd) {
+function codexConfig(cwd, instructionsFilePath) {
   return {
     cwd,
     engine: "acp",
@@ -123,6 +151,7 @@ function codexConfig(cwd) {
     warmHandleIdleMs: 0,
     dangerouslyBypassApprovalsAndSandbox: false,
     workspaceStrategy: { type: "git_worktree" },
+    instructionsFilePath,
   };
 }
 
@@ -139,7 +168,7 @@ export function buildTeamPlan({ workspaces, disposableRoot }) {
       capabilities: member.capabilities,
       adapterType: member.adapterType,
       adapterConfig: member.adapterType === "codex_local"
-        ? codexConfig(safeWorkspaces[member.key])
+        ? codexConfig(safeWorkspaces[member.key], CODEX_AGENT_INSTRUCTIONS_PATH)
         : hermesConfig(
           safeWorkspaces[member.key],
           HERMES_PERSONAS[member.key],

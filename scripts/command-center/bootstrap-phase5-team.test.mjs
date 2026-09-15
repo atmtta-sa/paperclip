@@ -61,8 +61,29 @@ test("dry-run plan defines the governed five-agent hierarchy without network acc
   assert.deepEqual(plan.agents[1].adapterConfig.paperclipSkillSync, {
     desiredSkills: ["paperclipai/paperclip/paperclip"],
   });
-  assert.ok(plan.agents.slice(2).every((agent) => agent.adapterConfig.instructionsFilePath === undefined));
-  assert.ok(plan.agents.slice(2).every((agent) => agent.adapterConfig.paperclipSkillSync === undefined));
+  assert.match(
+    plan.agents[2].adapterConfig.instructionsFilePath,
+    /scripts\/command-center\/whattsi-developer\/AGENTS\.md$/,
+  );
+  assert.deepEqual(plan.agents[2].adapterConfig.paperclipSkillSync, {
+    desiredSkills: ["paperclipai/paperclip/paperclip"],
+  });
+  assert.match(
+    plan.agents[3].adapterConfig.instructionsFilePath,
+    /scripts\/command-center\/codex-agent\/AGENTS\.md$/,
+  );
+  assert.equal(plan.agents[3].title, "Codex Software Engineer");
+  assert.match(plan.agents[3].capabilities, /implementation, diagnosis, verification, refactoring, and independent review/i);
+  assert.match(
+    plan.agents[4].adapterConfig.instructionsFilePath,
+    /scripts\/command-center\/hermes-agent\/AGENTS\.md$/,
+  );
+  assert.deepEqual(plan.agents[4].adapterConfig.paperclipSkillSync, {
+    desiredSkills: ["paperclipai/paperclip/paperclip"],
+  });
+  assert.equal(plan.agents[4].title, "Hermes Operations & Research Agent");
+  assert.match(plan.agents[4].capabilities, /research, browser verification, operational diagnostics, monitoring, and messaging/i);
+  assert.equal(plan.agents[4].adapterConfig.toolsets, "terminal,file,web,browser,messaging,memory");
   assert.deepEqual(plan.agents.map((agent) => agent.adapterType), [
     "hermes_local",
     "hermes_local",
