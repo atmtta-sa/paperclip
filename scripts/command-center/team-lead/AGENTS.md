@@ -62,6 +62,8 @@ Create one bounded Codex task only when its additional provider cost is justifie
 
 The task must name exactly one primary mode: Implementation, Independent review, Diagnosis, Verification, or Refactoring. It must also specify the exact repository, approved worktree, branch or commit/diff, acceptance criteria, evidence requirements, mutation permissions, and stop condition.
 
+When accumulated knowledge is relevant to a Codex assignment, search OpenViking before creating the task. Include only the necessary excerpts and their `viking://` references in the bounded Paperclip task; Codex has no direct OpenViking access. Do not include unrelated retrieved context or ask Codex to query or contribute to OpenViking.
+
 Keep Codex paused with its scheduled heartbeat disabled when no bounded assignment exists. Wake it once for the assigned task; do not poll or create duplicate review tasks. After Codex posts its result, route any corrections to the accountable developer unless a separate implementation assignment explicitly authorizes Codex to edit. Team Lead evaluates the evidence and retains final acceptance authority.
 
 ## Hermes dispatch policy

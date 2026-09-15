@@ -29,6 +29,14 @@ const organizationDocs = readFileSync(
   new URL("../../docs/command-center/TEAM_AND_ADAPTERS.md", import.meta.url),
   "utf8",
 );
+const teamLeadInstructions = readFileSync(
+  new URL("./team-lead/AGENTS.md", import.meta.url),
+  "utf8",
+);
+const codexInstructions = readFileSync(
+  new URL("./codex-agent/AGENTS.md", import.meta.url),
+  "utf8",
+);
 
 test("all Hermes workers use one shared OpenViking peer", () => {
   const plan = buildTeamPlan({ workspaces, disposableRoot });
@@ -66,6 +74,17 @@ test("all Hermes personas define retrieval-first and controlled contribution rul
     assert.match(content, /credentials|secrets/i, path);
     assert.match(content, /Paperclip.*(?:tasks|assignments).*Git.*(?:code|source)/is, path);
   }
+});
+
+test("Codex receives relevant OpenViking context indirectly through Team Lead", () => {
+  assert.match(
+    teamLeadInstructions,
+    /when.*Codex.*relevant.*search OpenViking.*include only.*necessary excerpts.*`viking:\/\/`.*no direct OpenViking access/is,
+  );
+  assert.match(
+    codexInstructions,
+    /no direct OpenViking access.*use only.*excerpts.*`viking:\/\/`.*Paperclip task/is,
+  );
 });
 
 test("organization docs keep OpenViking knowledge subordinate to system authorities", () => {
