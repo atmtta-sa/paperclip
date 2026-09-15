@@ -26,5 +26,11 @@ describe("Agent Office browser bundle", () => {
     expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney-blocky/robot.glb"))).toBe(true);
     expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney-blocky/Textures/texture-d.png"))).toBe(true);
     expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney-blocky/LICENSE.txt"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/tiny-treats/baked-goods/gltf/croissant.gltf"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/tiny-treats/baked-goods/gltf/croissant.bin"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/tiny-treats/baked-goods/LICENSE.txt"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/tiny-treats/charming-kitchen/gltf/fridge.gltf"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/tiny-treats/charming-kitchen/gltf/fridge.bin"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/tiny-treats/charming-kitchen/LICENSE.txt"))).toBe(true);
   });
 });

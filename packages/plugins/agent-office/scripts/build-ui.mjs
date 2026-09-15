@@ -32,6 +32,11 @@ const builtMonsterAssets = path.join(packageRoot, "dist/ui/assets/kenney-blocky"
 await mkdir(builtMonsterAssets, { recursive: true });
 await cp(sourceMonsterAssets, builtMonsterAssets, { recursive: true, force: true });
 
+const sourceTinyTreatsAssets = path.join(packageRoot, "assets/upstream/tiny-treats");
+const builtTinyTreatsAssets = path.join(packageRoot, "dist/ui/assets/tiny-treats");
+await mkdir(builtTinyTreatsAssets, { recursive: true });
+await cp(sourceTinyTreatsAssets, builtTinyTreatsAssets, { recursive: true, force: true });
+
 const sourceLicense = path.join(packageRoot, "assets/upstream/AGENT_OFFICE_LICENSE.txt");
 const builtLicense = path.join(packageRoot, "dist/ui/assets/licenses/Agent-Office-MIT.txt");
 await mkdir(path.dirname(builtLicense), { recursive: true });

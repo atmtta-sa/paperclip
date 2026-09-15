@@ -27,3 +27,12 @@ Paperclip remains authoritative for companies, agents, tasks, runs, approvals, a
 ## Imported renderer asset inventory
 
 The plugin packages the bounded renderer set used by this integration: 18 furniture models, 12 character models, the shared Kenney texture, the two applicable Kenney CC0 license files, and the upstream Agent Office MIT license. No upstream backend or operational state is copied.
+
+## Tiny Treats asset library
+
+The separately namespaced `assets/upstream/tiny-treats/` library contains two complete FREE CC0 catalogs supplied for future visual composition. Importing these catalogs does not assign any model to the live office scene.
+
+- **Tiny Treats – Baked Goods 1.0** — 32 GLTF models, matching binary buffers, shared texture, overview image, and original CC0 license. Created and distributed by Isa Lousberg (<https://www.isalousberg.com>).
+- **Tiny Treats – Charming Kitchen 1.1** — 118 GLTF models, matching binary buffers, shared texture, original and v1.1 overview images, and original CC0 license. Created and distributed by Isa Lousberg (<https://www.isalousberg.com>).
+
+Each GLTF retains its exact relative `.bin` and `tiny_treats_texture_1.png` dependencies. The build copies the complete bounded library to `dist/ui/assets/tiny-treats/`; scene selection and placement remain separate, presentation-only work.
