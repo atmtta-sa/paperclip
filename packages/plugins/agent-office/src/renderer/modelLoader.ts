@@ -2,6 +2,8 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import {
   CHARACTER_MODELS,
+  ERROR_MONSTER_MODEL,
+  errorMonsterAssetUrl,
   FURNITURE_MODELS,
   modelAssetUrl,
   type OfficeModelName,
@@ -55,9 +57,13 @@ export async function loadOfficeModels(
   pluginId: string,
   readModel: OfficeModelReader = defaultModelReader,
 ): Promise<OfficeModelMap> {
-  const names: OfficeModelName[] = [...FURNITURE_MODELS, ...CHARACTER_MODELS];
+  const names = [...FURNITURE_MODELS, ...CHARACTER_MODELS];
   const loaded = await Promise.all(
     names.map(async (name) => [name, normalizeModel(await readModel(modelAssetUrl(pluginId, name)))] as const),
   );
-  return new Map(loaded);
+  const errorMonster = normalizeModel(await readModel(errorMonsterAssetUrl(pluginId)));
+  return new Map<OfficeModelName, LoadedOfficeModel>([
+    ...loaded,
+    [ERROR_MONSTER_MODEL, errorMonster],
+  ]);
 }

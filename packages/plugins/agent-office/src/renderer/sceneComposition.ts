@@ -4,9 +4,11 @@ import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
 import type { OfficeRoom } from "../projection.js";
 import {
   CHARACTER_MODELS,
+  ERROR_MONSTER_MODEL,
   type FurnitureModelName,
   type OfficeModelName,
 } from "./assets.js";
+import { createErrorMonster } from "./errorMonster.js";
 import { addLoungeDetails } from "./loungeDetails.js";
 import {
   ATRIUM_FURNITURE,
@@ -240,6 +242,7 @@ function buildRoom(
     addActivityBubbleAnchor(agent, room);
     group.add(agent);
   }
+  if (room.state === "error") group.add(createErrorMonster(models.get(ERROR_MONSTER_MODEL)));
 
   const statusLight = new THREE.Mesh(
     new THREE.SphereGeometry(0.18, 16, 12),

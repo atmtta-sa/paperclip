@@ -23,5 +23,8 @@ describe("Agent Office browser bundle", () => {
     expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney/Textures/colormap.png"))).toBe(true);
     expect(existsSync(path.join(packageRoot, "dist/ui/assets/licenses/Agent-Office-MIT.txt"))).toBe(true);
     expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney/licenses/Furniture-Kit-License.txt"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney-blocky/robot.glb"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney-blocky/Textures/texture-d.png"))).toBe(true);
+    expect(existsSync(path.join(packageRoot, "dist/ui/assets/kenney-blocky/LICENSE.txt"))).toBe(true);
   });
 });

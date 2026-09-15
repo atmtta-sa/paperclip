@@ -56,6 +56,31 @@ describe("Agent Office Three.js runtime compatibility", () => {
     controller.dispose();
   });
 
+  it("animates and removes the visual error monster with authoritative state", () => {
+    const scene = new THREE.Scene();
+    const errorRoom: OfficeRoom = {
+      id: "error",
+      label: "Error Agent",
+      state: "error",
+      taskTitle: "Failed task",
+      channel: "paperclip",
+    };
+    const controller = createOfficeEnvironmentController(scene, [errorRoom], new Map(), () => undefined);
+    const monster = scene.getObjectByName("office-error-monster")!;
+    const robot = monster.getObjectByName("office-error-monster-robot")!;
+    const disc = monster.getObjectByName("office-error-monster-warning-disc") as THREE.Mesh;
+    const initialRotation = robot.rotation.y;
+    const initialOpacity = (disc.material as THREE.MeshBasicMaterial).opacity;
+
+    controller.updateAnimations(0.25);
+
+    expect(robot.rotation.y).not.toBe(initialRotation);
+    expect((disc.material as THREE.MeshBasicMaterial).opacity).not.toBe(initialOpacity);
+    controller.updateRooms([{ ...errorRoom, state: "idle" }]);
+    expect(scene.getObjectByName("office-error-monster")).toBeUndefined();
+    controller.dispose();
+  });
+
   it("preserves ambient schedules when a refresh does not change scene state", () => {
     const scene = new THREE.Scene();
     const rooms: OfficeRoom[] = [

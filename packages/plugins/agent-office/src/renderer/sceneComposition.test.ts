@@ -2,7 +2,12 @@ import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { describe, expect, it } from "vitest";
 import type { OfficeRoom } from "../projection.js";
-import { CHARACTER_MODELS, FURNITURE_MODELS, type OfficeModelName } from "./assets.js";
+import {
+  CHARACTER_MODELS,
+  ERROR_MONSTER_MODEL,
+  FURNITURE_MODELS,
+  type OfficeModelName,
+} from "./assets.js";
 import { buildOfficeEnvironment, type LoadedOfficeModel } from "./sceneComposition.js";
 
 const rooms: OfficeRoom[] = [
@@ -89,6 +94,27 @@ describe("Agent Office scene composition", () => {
       expect(geometry.parameters.height).toBeGreaterThanOrEqual(0.04);
       expect(edge.position.y).toBeGreaterThan(0.16);
     });
+  });
+
+  it("adds a separate error monster without replacing the authoritative worker", () => {
+    const models = new Map<OfficeModelName, LoadedOfficeModel>();
+    [...FURNITURE_MODELS, ...CHARACTER_MODELS, ERROR_MONSTER_MODEL]
+      .forEach((name) => models.set(name, model(name)));
+    const errorRooms = rooms.map((room, index) => ({
+      ...room,
+      state: index === 0 ? "error" as const : "idle" as const,
+    }));
+
+    const environment = buildOfficeEnvironment(errorRooms, models);
+    const monsters = environment.getObjectsByProperty("name", "office-error-monster");
+
+    expect(environment.getObjectsByProperty("name", "office-agent")).toHaveLength(errorRooms.length);
+    expect(monsters).toHaveLength(1);
+    expect(monsters[0]?.parent?.name).toBe("office-room:0");
+    expect(monsters[0]?.getObjectByName("office-error-monster-robot")).toBeDefined();
+    expect(monsters[0]?.getObjectByName("office-error-monster-warning-disc")).toBeDefined();
+    expect(monsters[0]?.getObjectsByProperty("name", "office-error-monster-smoke")).toHaveLength(7);
+    expect(monsters[0]?.getObjectsByProperty("name", "office-error-monster-spark")).toHaveLength(10);
   });
 
   it("adds restrained coffee details and warm light to the atrium", () => {

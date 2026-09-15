@@ -4,6 +4,7 @@ import type { OfficeRoom } from "../projection.js";
 import { updateActivityBubble, type OfficeActivity } from "./activityBubble.js";
 import { createAmbientActorMotion } from "./ambientMotion.js";
 import { createCoffeeBreakMotion, projectCoffeeSpot } from "./coffeeBreak.js";
+import { updateErrorMonsters } from "./errorMonster.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
 import { buildOfficeEnvironment } from "./sceneComposition.js";
 import { updateRoomAmbience } from "./roomAmbience.js";
@@ -220,6 +221,7 @@ export function createOfficeEnvironmentController(
       });
       updateStatusLights(environment, elapsed);
       updateRoomAmbience(environment, elapsed);
+      updateErrorMonsters(environment, elapsed);
     },
     dispose: () => {
       actorRuntimes.forEach(({ mixer }) => mixer.stopAllAction());
