@@ -13,6 +13,7 @@ import {
   companyMemberships,
   toolConnectionInstalls,
   issueComments,
+  connectionGrantDelegations,
   connectionGrants,
   createDb,
   heartbeatRuns,
@@ -196,6 +197,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await db.delete(issues);
     await db.delete(projects);
     await db.delete(agents);
+    await db.delete(companyMemberships);
     await db.delete(companies);
   });
 
@@ -1485,6 +1487,107 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
       .rejects.toMatchObject({ reasonCode: "grant_owner_membership_inactive" });
     expect(resolvedGrants).toHaveLength(3);
+  });
+
+  it("resolves an already-qualified API-key path for a delegated personal grant", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.update(heartbeatRuns)
+      .set({ invocationSource: "automation" })
+      .where(eq(heartbeatRuns.id, run.id));
+    const { connection } = await createRemoteMcpToolFixture(db, company.id);
+    const ownerUserId = "cloudflare-owner";
+    const secrets = secretService(db);
+    const definition = await secrets.createUserSecretDefinition(company.id, {
+      key: `gateway_cloudflare_${randomUUID()}`,
+      name: "Cloudflare API key",
+      provider: "local_encrypted",
+    });
+    const apiKey = await secrets.createCurrentUserSecretValue(company.id, ownerUserId, {
+      definitionId: definition.id,
+      value: "cloudflare-api-key",
+    });
+    await secrets.syncUserSecretDeclarationsForTarget(
+      company.id,
+      { targetType: "tool_connection", targetId: connection.id, pathPrefix: "credentials" },
+      [{
+        definitionKey: definition.key,
+        configPath: "credentials.authorization",
+        envKey: "Authorization",
+        versionSelector: "latest",
+        required: true,
+      }],
+    );
+    await db.update(toolConnections).set({
+      credentialPolicy: "per_user",
+      credentialSource: "paperclip_vault",
+      credentialRefs: [{
+        name: "credentials.authorization",
+        placement: "header",
+        key: "Authorization",
+        prefix: "Bearer ",
+        secretId: apiKey.id,
+        versionSelector: "latest",
+      }],
+    }).where(eq(toolConnections.id, connection.id));
+    await db.delete(connectionGrants).where(eq(connectionGrants.connectionId, connection.id));
+    const [grant] = await db.insert(connectionGrants).values({
+      companyId: company.id,
+      connectionId: connection.id,
+      kind: "user",
+      subjectUserId: ownerUserId,
+      status: "active",
+      credentialSecretRefs: [{
+        secretId: apiKey.id,
+        versionSelector: "latest",
+        configPath: "credentials.authorization",
+        required: true,
+        label: "API key",
+      }],
+    }).returning();
+    await db.insert(companyMemberships).values({
+      companyId: company.id,
+      principalType: "user",
+      principalId: ownerUserId,
+      status: "active",
+      membershipRole: "member",
+    });
+    await db.insert(connectionGrantDelegations).values({
+      companyId: company.id,
+      grantId: grant!.id,
+      agentId: agent.id,
+      createdByUserId: ownerUserId,
+    });
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Allow delegated API-key reads",
+      policyType: "allow",
+      selectors: { riskLevel: "read" },
+    });
+
+    const authorizationHeaders: string[] = [];
+    const gateway = createTestToolGatewayService(db, {
+      remoteHttpRequest: async (_url, init) => {
+        authorizationHeaders.push(new Headers(init.headers).get("authorization") ?? "");
+        const requestBody = JSON.parse(String(init.body)) as { id: string };
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestBody.id,
+          result: { content: [{ type: "text", text: "cloudflare result" }] },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const tool = (await gateway.listToolsForSession(session.token))
+      .find((candidate) => candidate.providerType === "mcp_remote_http");
+
+    const result = await gateway.executeTool({
+      sessionToken: session.token,
+      tool: tool!.name,
+      parameters: {},
+    });
+
+    expect(result.status).toBe("completed");
+    expect(authorizationHeaders).toEqual(["Bearer cloudflare-api-key"]);
   });
 
   it.each([false, true])("reselects a duplicate only before GitHub dispatch (upstream failure: %s)", async (upstreamFailure) => {

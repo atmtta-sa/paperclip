@@ -3462,6 +3462,12 @@ export function createToolGatewayService(
     );
   }
 
+  function credentialRefConfigPath(ref: McpConnectionCredentialRef): string {
+    return ref.name.startsWith("credentials.")
+      ? ref.name
+      : `credentials.${ref.name}`;
+  }
+
   async function resolveGrantSecretValue(
     session: ToolGatewaySession,
     connection: typeof toolConnections.$inferSelect,
@@ -4036,7 +4042,7 @@ export function createToolGatewayService(
           // the personal secret declaration created by the OAuth callback.
           grantRef.configPath.startsWith("oauth.")
             ? grantRef.configPath
-            : `credentials.${ref.name}`,
+            : credentialRefConfigPath(ref),
         );
         headers[ref.key] = `${ref.prefix ?? ""}${value}`;
       } catch {
