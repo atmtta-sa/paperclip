@@ -4,9 +4,12 @@ import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
 import type { OfficeRoom } from "../projection.js";
 import {
   CHARACTER_MODELS,
+  ERROR_MONSTER_MODEL,
   type FurnitureModelName,
   type OfficeModelName,
 } from "./assets.js";
+import { createErrorMonster } from "./errorMonster.js";
+import { addLoungeDetails } from "./loungeDetails.js";
 import {
   ATRIUM_FURNITURE,
   OFFICE_ROOM_SIZE,
@@ -15,6 +18,7 @@ import {
   type FurniturePlacement,
 } from "./sceneBlueprint.js";
 import { officeCellPosition } from "./upstreamScene.js";
+import { roomAmbiencePresentation } from "./roomAmbience.js";
 import { channelHaloColor, statusLightProfile } from "./visualState.js";
 
 export interface LoadedOfficeModel {
@@ -84,6 +88,50 @@ function addChannelHalo(agent: THREE.Object3D, room: OfficeRoom): void {
   halo.rotation.x = -Math.PI / 2;
   halo.userData = { generated: true, channel: room.channel };
   agent.add(halo);
+}
+
+function addActivityBubbleAnchor(agent: THREE.Object3D, room: OfficeRoom): void {
+  const anchor = new THREE.Group();
+  anchor.name = "office-activity-bubble-anchor";
+  anchor.position.set(0, 1.3, 0);
+  anchor.userData = { generated: true, state: room.state, activity: "stationary" };
+  agent.add(anchor);
+}
+
+function addRoomAmbience(group: THREE.Group, room: OfficeRoom, index: number): void {
+  const profile = roomAmbiencePresentation(room.state);
+  const ambience = new THREE.Group();
+  ambience.name = "office-room-ambience";
+  ambience.userData = { generated: true, state: room.state, profile, pulsePhase: index * 0.8 };
+  const edgeLength = OFFICE_ROOM_SIZE - 0.24;
+  const edgeOffset = OFFICE_ROOM_SIZE / 2 - 0.14;
+  const placements = [
+    { width: edgeLength, depth: 0.2, x: 0, z: -edgeOffset },
+    { width: edgeLength, depth: 0.2, x: 0, z: edgeOffset },
+    { width: 0.2, depth: edgeLength, x: -edgeOffset, z: 0 },
+    { width: 0.2, depth: edgeLength, x: edgeOffset, z: 0 },
+  ];
+  placements.forEach(({ width, depth, x, z }) => {
+    const edge = new THREE.Mesh(
+      new THREE.BoxGeometry(width, 0.05, depth),
+      new THREE.MeshStandardMaterial({
+        color: profile.color,
+        emissive: profile.color,
+        emissiveIntensity: 1.8,
+        opacity: profile.minOpacity,
+        transparent: true,
+        depthWrite: false,
+        roughness: 0.3,
+        metalness: 0.05,
+        toneMapped: false,
+      }),
+    );
+    edge.name = "office-room-ambience-edge";
+    edge.position.set(x, 0.195, z);
+    edge.userData.generated = true;
+    ambience.add(edge);
+  });
+  group.add(ambience);
 }
 
 function cloneModel(
@@ -168,6 +216,7 @@ function buildRoom(
   floor.name = "office-room-floor";
   floor.position.y = 0.08;
   group.add(floor);
+  addRoomAmbience(group, room, index);
 
   const wallHeight = 1.05;
   const northWall = roundedBox(OFFICE_ROOM_SIZE, wallHeight, 0.12, 0xfbf7ef, 0.7);
@@ -190,8 +239,10 @@ function buildRoom(
     agent.position.set(0, 0.46, -2.5);
     agent.rotation.y = Math.PI;
     addChannelHalo(agent, room);
+    addActivityBubbleAnchor(agent, room);
     group.add(agent);
   }
+  if (room.state === "error") group.add(createErrorMonster(models.get(ERROR_MONSTER_MODEL)));
 
   const statusLight = new THREE.Mesh(
     new THREE.SphereGeometry(0.18, 16, 12),
@@ -226,6 +277,7 @@ function buildAtrium(models: OfficeModelMap): THREE.Group {
   floor.position.y = 0.08;
   atrium.add(floor);
   ATRIUM_FURNITURE.forEach((placement) => placeFurniture(atrium, models, placement));
+  addLoungeDetails(atrium);
   return atrium;
 }
 

@@ -35,10 +35,18 @@ export const CHARACTER_MODELS = [
   "character-female-f",
 ] as const;
 
+export const ERROR_MONSTER_MODEL = "error-robot" as const;
+
 export type FurnitureModelName = (typeof FURNITURE_MODELS)[number];
 export type CharacterModelName = (typeof CHARACTER_MODELS)[number];
-export type OfficeModelName = FurnitureModelName | CharacterModelName;
+export type ErrorMonsterModelName = typeof ERROR_MONSTER_MODEL;
+export type KenneyModelName = FurnitureModelName | CharacterModelName;
+export type OfficeModelName = KenneyModelName | ErrorMonsterModelName;
 
-export function modelAssetUrl(pluginId: string, name: OfficeModelName): string {
+export function modelAssetUrl(pluginId: string, name: KenneyModelName): string {
   return `/_plugins/${encodeURIComponent(pluginId)}/ui/assets/kenney/${name}.glb`;
+}
+
+export function errorMonsterAssetUrl(pluginId: string): string {
+  return `/_plugins/${encodeURIComponent(pluginId)}/ui/assets/kenney-blocky/robot.glb`;
 }

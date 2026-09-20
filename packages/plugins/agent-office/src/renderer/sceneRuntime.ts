@@ -1,17 +1,30 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { OfficeRoom } from "../projection.js";
+import { updateActivityBubble, type OfficeActivity } from "./activityBubble.js";
+import { createAmbientActorMotion } from "./ambientMotion.js";
+import { createCoffeeBreakMotion, projectCoffeeSpot } from "./coffeeBreak.js";
+import { updateErrorMonsters } from "./errorMonster.js";
 import type { OfficeModelMap } from "./sceneComposition.js";
 import { buildOfficeEnvironment } from "./sceneComposition.js";
+import { updateRoomAmbience } from "./roomAmbience.js";
 import { resolveAnimationClip, type StatusLightProfile } from "./visualState.js";
 
-function createRoomLabel(label: string): THREE.Sprite {
+export const ROOM_LABEL_BACKGROUND = "rgba(15, 23, 42, 0.55)";
+export const ROOM_LABEL_PLACEMENT = {
+  x: 1.35,
+  y: 1.62,
+  z: -4.28,
+  rotationX: 0,
+} as const;
+
+function createRoomLabel(label: string): THREE.Mesh {
   const canvas = document.createElement("canvas");
   canvas.width = 640;
   canvas.height = 112;
   const context = canvas.getContext("2d");
   if (context) {
-    context.fillStyle = "rgba(15, 23, 42, 0.82)";
+    context.fillStyle = ROOM_LABEL_BACKGROUND;
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = "#f8fafc";
     context.font = "bold 42px system-ui, sans-serif";
@@ -21,12 +34,20 @@ function createRoomLabel(label: string): THREE.Sprite {
   }
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-  const sprite = new THREE.Sprite(material);
-  sprite.scale.set(5.2, 0.92, 1);
-  sprite.position.set(0, 2.35, 0);
-  sprite.userData.generated = true;
-  return sprite;
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  const decal = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 0.92), material);
+  decal.name = "office-room-label";
+  decal.position.set(ROOM_LABEL_PLACEMENT.x, ROOM_LABEL_PLACEMENT.y, ROOM_LABEL_PLACEMENT.z);
+  decal.rotation.x = ROOM_LABEL_PLACEMENT.rotationX;
+  decal.userData.generated = true;
+  return decal;
 }
 
 function addRoomLabels(environment: THREE.Group, rooms: OfficeRoom[]): void {
@@ -47,19 +68,70 @@ function addLighting(scene: THREE.Scene): void {
   scene.add(fill);
 }
 
-function createMixers(environment: THREE.Group): THREE.AnimationMixer[] {
-  const mixers: THREE.AnimationMixer[] = [];
-  environment.traverse((object) => {
-    if (object.name !== "office-agent") return;
+interface ActorRuntime {
+  mixer: THREE.AnimationMixer;
+  motion: { update: (delta: number) => void } | null;
+}
+
+function createActorRuntimes(environment: THREE.Group, random: () => number): ActorRuntime[] {
+  const runtimes: ActorRuntime[] = [];
+  environment.updateMatrixWorld(true);
+  environment.getObjectsByProperty("name", "office-agent").forEach((object, index) => {
     const clips = object.userData.animations as THREE.AnimationClip[] | undefined;
     const state = object.userData.officeState as OfficeRoom["state"] | undefined;
     const clip = state && clips ? resolveAnimationClip(state, clips) : clips?.[0];
     if (!clip) return;
     const mixer = new THREE.AnimationMixer(object);
-    mixer.clipAction(clip).play();
-    mixers.push(mixer);
+    const restingAction = mixer.clipAction(clip);
+    const walkClip = clips?.find((candidate) => candidate.name.toLowerCase() === "walk");
+    const walkingAction = walkClip ? mixer.clipAction(walkClip) : null;
+    restingAction.play();
+    object.userData.officeMotion = "stationary";
+    const bubbleAnchor = object.getObjectByName("office-activity-bubble-anchor");
+    const setActivity = (activity: OfficeActivity) => {
+      if (bubbleAnchor && state) updateActivityBubble(bubbleAnchor, state, activity);
+    };
+    setActivity("stationary");
+    const setWalking = (walking: boolean) => {
+      object.userData.officeMotion = walking ? "walking" : "stationary";
+      const current = walking ? walkingAction : restingAction;
+      const previous = walking ? restingAction : walkingAction;
+      previous?.stop();
+      current?.reset().play();
+    };
+    const ambient = state && walkingAction
+      ? createAmbientActorMotion(object, state, random, setWalking)
+      : null;
+    const spot = projectCoffeeSpot(index);
+    const worldSpot = environment.localToWorld(new THREE.Vector3(spot.x, object.position.y, spot.z));
+    const loungeSpot = object.parent?.worldToLocal(worldSpot) ?? worldSpot;
+    const coffee = state && walkingAction
+      ? createCoffeeBreakMotion(object, state, [
+        new THREE.Vector3(3, object.position.y, -2.5),
+        new THREE.Vector3(3, object.position.y, 4.8),
+        loungeSpot,
+      ], random, setWalking)
+      : null;
+    const motion = ambient || coffee ? {
+      update: (delta: number) => {
+        const wasOnBreak = coffee?.isActive() ?? false;
+        coffee?.update(delta);
+        const isOnBreak = coffee?.isActive() ?? false;
+        if (!wasOnBreak && isOnBreak) {
+          ambient?.reset();
+          setWalking(true);
+          setActivity("coffee-break");
+        } else if (wasOnBreak && !isOnBreak) {
+          ambient?.reset();
+          setActivity("stationary");
+        } else if (!isOnBreak) {
+          ambient?.update(delta);
+        }
+      },
+    } : null;
+    runtimes.push({ mixer, motion });
   });
-  return mixers;
+  return runtimes;
 }
 
 function updateStatusLights(environment: THREE.Group, elapsed: number): void {
@@ -75,6 +147,16 @@ function updateStatusLights(environment: THREE.Group, elapsed: number): void {
   });
 }
 
+function hasSameVisualState(current: readonly OfficeRoom[], next: readonly OfficeRoom[]): boolean {
+  return current.length === next.length && current.every((room, index) => {
+    const candidate = next[index];
+    return candidate?.id === room.id
+      && candidate.label === room.label
+      && candidate.state === room.state
+      && candidate.channel === room.channel;
+  });
+}
+
 function disposeGenerated(root: THREE.Object3D): void {
   root.traverse((object) => {
     if (!object.userData.generated) return;
@@ -82,7 +164,9 @@ function disposeGenerated(root: THREE.Object3D): void {
     if (object instanceof THREE.Mesh || object instanceof THREE.Sprite) {
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       materials.forEach((material) => {
-        if (material instanceof THREE.SpriteMaterial) material.map?.dispose();
+        if (material instanceof THREE.SpriteMaterial || material instanceof THREE.MeshBasicMaterial) {
+          material.map?.dispose();
+        }
         material.dispose();
       });
     }
@@ -105,21 +189,25 @@ export function createOfficeEnvironmentController(
   initialRooms: OfficeRoom[],
   models: OfficeModelMap,
   decorateEnvironment: (environment: THREE.Group, rooms: OfficeRoom[]) => void = addRoomLabels,
+  random: () => number = Math.random,
 ): OfficeEnvironmentController {
   let environment: THREE.Group;
-  let mixers: THREE.AnimationMixer[] = [];
+  let actorRuntimes: ActorRuntime[] = [];
   let elapsed = 0;
+  let renderedRooms: readonly OfficeRoom[] = [];
 
   const replaceEnvironment = (rooms: OfficeRoom[]) => {
+    if (environment && hasSameVisualState(renderedRooms, rooms)) return;
     if (environment) {
-      mixers.forEach((mixer) => mixer.stopAllAction());
+      actorRuntimes.forEach(({ mixer }) => mixer.stopAllAction());
       scene.remove(environment);
       disposeGenerated(environment);
     }
     environment = buildOfficeEnvironment(rooms, models);
+    renderedRooms = rooms;
     decorateEnvironment(environment, rooms);
     scene.add(environment);
-    mixers = createMixers(environment);
+    actorRuntimes = createActorRuntimes(environment, random);
   };
 
   replaceEnvironment(initialRooms);
@@ -127,11 +215,16 @@ export function createOfficeEnvironmentController(
     updateRooms: replaceEnvironment,
     updateAnimations: (delta) => {
       elapsed += delta;
-      mixers.forEach((mixer) => mixer.update(delta));
+      actorRuntimes.forEach(({ mixer, motion }) => {
+        motion?.update(delta);
+        mixer.update(delta);
+      });
       updateStatusLights(environment, elapsed);
+      updateRoomAmbience(environment, elapsed);
+      updateErrorMonsters(environment, elapsed);
     },
     dispose: () => {
-      mixers.forEach((mixer) => mixer.stopAllAction());
+      actorRuntimes.forEach(({ mixer }) => mixer.stopAllAction());
       scene.remove(environment);
       disposeGenerated(environment);
     },
