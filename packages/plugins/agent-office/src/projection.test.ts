@@ -54,6 +54,29 @@ describe("Paperclip to Agent Office projection", () => {
     ]);
   });
 
+  it("does not keep a room in error for a stale failed run", () => {
+    const rooms = projectOfficeRooms({
+      agents,
+      issues: [
+        { id: "issue-error", title: "Current work", status: "in_progress", assigneeAgentId: "lead" },
+      ],
+      runs: [
+        {
+          id: "stale-failure",
+          agentId: "lead",
+          status: "failed",
+          issueId: "issue-error",
+          createdAt: "2020-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(rooms.find((room) => room.id === "lead")).toMatchObject({
+      state: "executing",
+      taskTitle: "Current work",
+    });
+  });
+
   it("uses only the newest run when projecting run state", () => {
     const newerSuccess = projectOfficeRooms({
       agents,

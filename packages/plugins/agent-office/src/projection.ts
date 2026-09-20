@@ -45,6 +45,7 @@ const INITIAL_TEAM = [
 ] as const;
 
 const FAILED_RUN_STATUSES = new Set(["failed", "error", "timed_out"]);
+const FAILED_RUN_FRESHNESS_MS = 15 * 60 * 1000;
 const ACTIVE_RUN_STATUSES = new Set(["running", "in_progress", "started"]);
 const ACTIVE_ISSUE_STATUSES = new Set(["in_progress", "in_review"]);
 const QUEUED_ISSUE_STATUSES = new Set(["todo", "backlog", "queued"]);
@@ -67,6 +68,14 @@ function newestRun(runs: OfficeRunInput[]): OfficeRunInput | undefined {
   }, undefined);
 }
 
+function isCurrentFailure(run: OfficeRunInput): boolean {
+  if (!FAILED_RUN_STATUSES.has(run.status)) return false;
+  if (!run.createdAt) return true;
+
+  const createdAt = Date.parse(run.createdAt);
+  return !Number.isFinite(createdAt) || Date.now() - createdAt <= FAILED_RUN_FRESHNESS_MS;
+}
+
 function projectState(
   agentId: string,
   issues: OfficeIssueInput[],
@@ -77,7 +86,7 @@ function projectState(
   const issueById = new Map(agentIssues.map((issue) => [issue.id, issue]));
   const latestRun = newestRun(agentRuns);
 
-  if (latestRun && FAILED_RUN_STATUSES.has(latestRun.status)) {
+  if (latestRun && isCurrentFailure(latestRun)) {
     return {
       state: "error",
       taskTitle: (latestRun.issueId && issueById.get(latestRun.issueId)?.title) ?? agentIssues[0]?.title ?? null,
