@@ -9,6 +9,7 @@ import {
   type OfficeModelName,
 } from "./assets.js";
 import { buildOfficeEnvironment, type LoadedOfficeModel } from "./sceneComposition.js";
+import { COFFEE_ROOM_MODEL_SPECS, COFFEE_ROOM_POSITION } from "./coffeeRoom.js";
 
 const rooms: OfficeRoom[] = [
   "ORP Developer",
@@ -24,7 +25,7 @@ const rooms: OfficeRoom[] = [
   channel: index === 3 ? "codex" : index === 4 ? "hermes" : "paperclip",
 }));
 
-function model(name: OfficeModelName): LoadedOfficeModel {
+function model(name: string): LoadedOfficeModel {
   const object = new THREE.Group();
   object.name = `model:${name}`;
   object.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()));
@@ -46,6 +47,20 @@ describe("Agent Office scene composition", () => {
     expect(bubbleAnchors).toHaveLength(5);
     bubbleAnchors.forEach((anchor) => expect(anchor.position.y).toBeLessThanOrEqual(1.3));
     expect(environment.getObjectsByProperty("name", "office-status-light")).toHaveLength(5);
+  });
+
+  it("adds one off-center coffee room without replacing the central atrium", () => {
+    const models = new Map<string, LoadedOfficeModel>();
+    [...FURNITURE_MODELS, ...CHARACTER_MODELS].forEach((name) => models.set(name, model(name)));
+    COFFEE_ROOM_MODEL_SPECS.forEach(({ model: name }) => models.set(name, model(name)));
+
+    const environment = buildOfficeEnvironment(rooms, models);
+    const atrium = environment.getObjectByName("agent-office-atrium");
+    const coffeeRoom = environment.getObjectByName("agent-office-coffee-room");
+
+    expect(atrium?.position.toArray()).toEqual([0, 0, 0]);
+    expect(coffeeRoom?.position.toArray()).toEqual([COFFEE_ROOM_POSITION.x, 0, COFFEE_ROOM_POSITION.z]);
+    expect(environment.getObjectsByProperty("name", "agent-office-coffee-room")).toHaveLength(1);
   });
 
   it("uses polished rounded room surfaces", () => {

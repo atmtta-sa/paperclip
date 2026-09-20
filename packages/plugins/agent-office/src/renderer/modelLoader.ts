@@ -9,6 +9,8 @@ import {
   type OfficeModelName,
 } from "./assets.js";
 import type { LoadedOfficeModel, OfficeModelMap } from "./sceneComposition.js";
+import { COFFEE_ROOM_MODEL_SPECS } from "./coffeeRoom.js";
+import { tinyTreatsAssetUrl } from "./tinyTreatsLibrary.js";
 
 interface LoadedGltf {
   scene: THREE.Group;
@@ -62,8 +64,16 @@ export async function loadOfficeModels(
     names.map(async (name) => [name, normalizeModel(await readModel(modelAssetUrl(pluginId, name)))] as const),
   );
   const errorMonster = normalizeModel(await readModel(errorMonsterAssetUrl(pluginId)));
-  return new Map<OfficeModelName, LoadedOfficeModel>([
+  const coffeeModels = [...new Map(
+    COFFEE_ROOM_MODEL_SPECS.map((spec) => [spec.model, spec.collection] as const),
+  )];
+  const coffee = await Promise.all(coffeeModels.map(async ([name, collection]) => [
+    name,
+    normalizeModel(await readModel(tinyTreatsAssetUrl(pluginId, collection, name))),
+  ] as const));
+  return new Map<string, LoadedOfficeModel>([
     ...loaded,
     [ERROR_MONSTER_MODEL, errorMonster],
+    ...coffee,
   ]);
 }

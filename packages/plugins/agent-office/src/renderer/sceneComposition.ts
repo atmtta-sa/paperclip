@@ -9,6 +9,7 @@ import {
   type OfficeModelName,
 } from "./assets.js";
 import { createErrorMonster } from "./errorMonster.js";
+import { createCoffeeRoom } from "./coffeeRoom.js";
 import { addLoungeDetails } from "./loungeDetails.js";
 import {
   ATRIUM_FURNITURE,
@@ -27,7 +28,7 @@ export interface LoadedOfficeModel {
   size: THREE.Vector3;
 }
 
-export type OfficeModelMap = ReadonlyMap<OfficeModelName, LoadedOfficeModel>;
+export type OfficeModelMap = ReadonlyMap<string, LoadedOfficeModel>;
 
 const ROOM_ACCENTS = [0xe8a36b, 0x6fa8c7, 0x8bbf8f, 0xc78fb0, 0xd9b15e];
 const STATE_COLORS: Record<OfficeRoom["state"], number> = {
@@ -289,5 +290,6 @@ export function buildOfficeEnvironment(
   environment.name = "agent-office-environment";
   environment.add(buildAtrium(models));
   rooms.forEach((room, index) => environment.add(buildRoom(room, index, models)));
+  environment.add(createCoffeeRoom(models));
   return environment;
 }

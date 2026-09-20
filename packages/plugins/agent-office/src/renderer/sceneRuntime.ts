@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { getOfficeCameraFrustum } from "./cameraFraming.js";
 import type { OfficeRoom } from "../projection.js";
 import { updateActivityBubble, type OfficeActivity } from "./activityBubble.js";
 import { createAmbientActorMotion } from "./ambientMotion.js";
@@ -265,11 +266,11 @@ export function createOfficeScene(
   const render = () => {
     const width = Math.max(canvas.clientWidth, 1);
     const height = Math.max(canvas.clientHeight, 1);
-    const aspect = width / height;
-    camera.left = -18 * aspect;
-    camera.right = 18 * aspect;
-    camera.top = 18;
-    camera.bottom = -18;
+    const frustum = getOfficeCameraFrustum(width, height);
+    camera.left = frustum.left;
+    camera.right = frustum.right;
+    camera.top = frustum.top;
+    camera.bottom = frustum.bottom;
     camera.updateProjectionMatrix();
     renderer.setSize(width, height, false);
     const frameTime = performance.now();

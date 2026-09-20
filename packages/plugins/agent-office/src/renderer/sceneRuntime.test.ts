@@ -88,10 +88,12 @@ describe("Agent Office Three.js runtime compatibility", () => {
     ];
     const controller = createOfficeEnvironmentController(scene, rooms, new Map(), () => undefined);
     const environment = scene.getObjectByName("agent-office-environment");
+    const coffeeRoom = scene.getObjectByName("agent-office-coffee-room");
 
     controller.updateRooms(rooms.map((room) => ({ ...room, taskTitle: "Non-visual detail" })));
 
     expect(scene.getObjectByName("agent-office-environment")).toBe(environment);
+    expect(scene.getObjectByName("agent-office-coffee-room")).toBe(coffeeRoom);
     controller.dispose();
   });
 

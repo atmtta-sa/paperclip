@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { describe, expect, it, vi } from "vitest";
 import { CHARACTER_MODELS, ERROR_MONSTER_MODEL, FURNITURE_MODELS } from "./assets.js";
+import { COFFEE_ROOM_MODEL_SPECS } from "./coffeeRoom.js";
 import { loadOfficeModels } from "./modelLoader.js";
 
 function loadedScene() {
@@ -17,17 +18,26 @@ describe("Agent Office model loader", () => {
 
     const models = await loadOfficeModels("installed-plugin-id", loadOne);
 
-    expect(loadOne).toHaveBeenCalledTimes(FURNITURE_MODELS.length + CHARACTER_MODELS.length + 1);
+    const coffeeModels = new Set(COFFEE_ROOM_MODEL_SPECS.map(({ model }) => model));
+    expect(loadOne).toHaveBeenCalledTimes(
+      FURNITURE_MODELS.length + CHARACTER_MODELS.length + coffeeModels.size + 1,
+    );
     expect(loadOne).toHaveBeenNthCalledWith(
       1,
       "/_plugins/installed-plugin-id/ui/assets/kenney/desk.glb",
     );
     expect(models.get("desk")?.size.toArray()).toEqual([2, 3, 4]);
     expect(models.get("desk")?.animations[0]?.name).toBe("sit");
-    expect(loadOne).toHaveBeenLastCalledWith(
+    expect(loadOne).toHaveBeenCalledWith(
       "/_plugins/installed-plugin-id/ui/assets/kenney-blocky/robot.glb",
     );
     expect(models.get(ERROR_MONSTER_MODEL)?.size.toArray()).toEqual([2, 3, 4]);
+    expect(loadOne).toHaveBeenCalledWith(
+      "/_plugins/installed-plugin-id/ui/assets/tiny-treats/charming-kitchen/gltf/fridge.gltf",
+    );
+    expect(loadOne).toHaveBeenCalledWith(
+      "/_plugins/installed-plugin-id/ui/assets/tiny-treats/baked-goods/gltf/croissant.gltf",
+    );
   });
 
   it("resolves the installed plugin UUID from Paperclip contributions", async () => {
