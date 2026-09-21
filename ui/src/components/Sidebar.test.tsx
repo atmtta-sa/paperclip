@@ -20,6 +20,8 @@ const mockInstanceSettingsApi = vi.hoisted(() => ({
   getExperimental: vi.fn(),
 }));
 
+const mockHiddenSettings = vi.hoisted(() => new Set<string>());
+
 vi.mock("@/lib/router", () => ({
   NavLink: ({ to, children, className, ...props }: {
     to: string;
@@ -76,6 +78,10 @@ vi.mock("../api/attention", () => ({
 
 vi.mock("../api/instanceSettings", () => ({
   instanceSettingsApi: mockInstanceSettingsApi,
+}));
+
+vi.mock("../hooks/useHiddenSettings", () => ({
+  useHiddenSettings: () => ({ hidden: mockHiddenSettings, loaded: true }),
 }));
 
 vi.mock("../hooks/useInboxBadge", () => ({
@@ -158,6 +164,7 @@ describe("Sidebar", () => {
     mockSidebar.collapsed = false;
     mockSidebar.collapseLocked = false;
     mockSidebar.peeking = false;
+    mockHiddenSettings.clear();
   });
 
   afterEach(() => {
@@ -246,6 +253,32 @@ describe("Sidebar", () => {
     expect(navLabels).not.toContain("Activity");
     expect(navLabels).not.toContain("Costs");
     expect(container.querySelector('[data-testid="sidebar-recent-tasks"]')).not.toBeNull();
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("links directly to Experimental from the main sidebar unless operator-hidden", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+      enableStreamlinedUi: true,
+    });
+    let root = await renderSidebar();
+
+    const experimentalLink = [...container.querySelectorAll("nav a")]
+      .find((anchor) => anchor.textContent?.trim() === "Experimental");
+    expect(experimentalLink?.getAttribute("href")).toBe(
+      "/company/settings/instance/experimental",
+    );
+
+    flushSync(() => {
+      root.unmount();
+    });
+    mockHiddenSettings.add("instance.experimental");
+    root = await renderSidebar();
+
+    expect([...container.querySelectorAll("nav a")]
+      .some((anchor) => anchor.textContent?.trim() === "Experimental")).toBe(false);
 
     flushSync(() => {
       root.unmount();
@@ -405,7 +438,13 @@ describe("Sidebar", () => {
       .map((anchor) => anchor.textContent?.trim());
 
     expect(labels(workSection)).toEqual(["Tasks", "Projects", "Routines", "Artifacts"]);
-    expect(labels(orgSection)).toEqual(["Agents", "Skills", "Connectors", "Audit"]);
+    expect(labels(orgSection)).toEqual([
+      "Agents",
+      "Skills",
+      "Connectors",
+      "Audit",
+      "Experimental",
+    ]);
     expect(sections.indexOf(workSection!)).toBeLessThan(sections.indexOf(orgSection!));
     expect(
       workSection?.querySelector('a[href="/issues"] svg')?.classList.contains("lucide-circle-check"),

@@ -21,6 +21,7 @@ import {
   GanttChartSquare,
   LayoutGrid,
   Users,
+  FlaskConical,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -42,6 +43,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { useStreamlinedUiEnabled } from "../hooks/useStreamlinedUiEnabled";
+import { useHiddenSettings } from "../hooks/useHiddenSettings";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
@@ -60,6 +62,7 @@ export function Sidebar({ children }: { children?: ReactNode }) {
   const { selectedCompanyId, selectedCompany } = useCompany();
   const { collapsed, peeking } = useSidebar();
   const { enabled: streamlinedUiEnabled } = useStreamlinedUiEnabled();
+  const { hidden: hiddenSettings, loaded: hiddenSettingsLoaded } = useHiddenSettings();
   const rail = collapsed && !peeking;
   const inboxBadge = useInboxBadge(selectedCompanyId);
   const { data: experimentalSettings } = useQuery({
@@ -110,6 +113,8 @@ export function Sidebar({ children }: { children?: ReactNode }) {
   // is a new surface, hidden entirely while the flag is off (same no-flash
   // pattern as showWorkspacesLink above).
   const conferenceRoomChatEnabled = experimentalSettings?.enableConferenceRoomChat === true;
+  const showExperimentalSettings =
+    hiddenSettingsLoaded && !hiddenSettings.has("instance.experimental");
 
   const pluginContext = {
     companyId: selectedCompanyId,
@@ -244,6 +249,13 @@ export function Sidebar({ children }: { children?: ReactNode }) {
             <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
             <SidebarNavItem to="/apps" label="Connectors" icon={Unplug} />
             <SidebarNavItem to="/activity" label="Audit" icon={History} />
+            {showExperimentalSettings ? (
+              <SidebarNavItem
+                to="/company/settings/instance/experimental"
+                label="Experimental"
+                icon={FlaskConical}
+              />
+            ) : null}
           </SidebarSection>
         ) : null}
 
@@ -266,6 +278,13 @@ export function Sidebar({ children }: { children?: ReactNode }) {
               <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
               <SidebarNavItem to="/activity" label="Activity" icon={History} />
               <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
+              {showExperimentalSettings ? (
+                <SidebarNavItem
+                  to="/company/settings/instance/experimental"
+                  label="Experimental"
+                  icon={FlaskConical}
+                />
+              ) : null}
             </SidebarSection>
           </>
         )}
