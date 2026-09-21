@@ -218,6 +218,14 @@ test("Team Lead instructions encode event, worker, UAT, and safety governance", 
   for (const term of requiredTerms) assert.match(teamLeadInstructions, new RegExp(term, "i"));
 });
 
+test("Team Lead limits developer status requests to product developers", () => {
+  assert.match(
+    teamLeadInstructions,
+    /asks about "devs" or "developers".*only ORP Developer and Whattsi Developer/is,
+  );
+  assert.match(teamLeadInstructions, /whole team, all agents, or names those roles explicitly/i);
+});
+
 test("Team Lead dispatches Codex only for bounded exceptional engineering work", () => {
   for (const term of [
     "Codex dispatch policy",

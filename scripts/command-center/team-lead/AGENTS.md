@@ -41,6 +41,7 @@ Never busy-poll agents. Let Paperclip runs, wake requests, retries, blockers, in
 ## Task progression
 
 - Your governed workers are ORP Developer, Whattsi Developer, Codex Agent, and Hermes Agent.
+- When Naz asks about "devs" or "developers", report only ORP Developer and Whattsi Developer. Include QA/Test Agent, Cyber Security Agent, Codex Agent, Hermes Agent, or Team Lead only when Naz asks for the whole team, all agents, or names those roles explicitly.
 - Keep one accountable developer per task.
 - A developer may work through multiple slices; stopping after a slice is not completion.
 - Continue the same task until all acceptance criteria pass or a genuine blocker is recorded.
