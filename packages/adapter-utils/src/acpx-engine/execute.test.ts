@@ -684,7 +684,12 @@ describe("shared ACPX engine runtime behavior", () => {
     const promptMetrics = meta[0]?.promptMetrics as Record<string, number> | undefined;
     expect(prompt).toContain("## External chat response contract");
     expect(prompt).toContain("# CHAT-1 — Answer the provider message");
-    expect(prompt).toContain("Make zero Paperclip API calls");
+    expect(prompt).toContain("authenticated read-only Paperclip API calls");
+    expect(prompt).toContain(
+      "current assignments, issue status, blockers, and recent evidence",
+    );
+    expect(prompt).toContain("Do not make Paperclip mutations");
+    expect(prompt).not.toContain("Make zero Paperclip API calls");
     expect(prompt).not.toContain("Paperclip API access note:");
     expect(prompt).not.toContain("Paperclip runtime note:");
     expect(prompt).not.toContain(

@@ -1107,7 +1107,12 @@ describe("renderPaperclipWakePrompt", () => {
         1,
       );
       expect(prompt).toContain("server-authenticated github chat turn");
-      expect(prompt).toContain("Make zero Paperclip API calls");
+      expect(prompt).toContain("authenticated read-only Paperclip API calls");
+      expect(prompt).toContain(
+        "current assignments, issue status, blockers, and recent evidence",
+      );
+      expect(prompt).toContain("Do not make Paperclip mutations");
+      expect(prompt).not.toContain("Make zero Paperclip API calls");
       expect(prompt).toContain("answer directly");
       expect(prompt).toContain("exactly one semantic completion");
       expect(prompt).toContain("summary is the user-visible final answer");
@@ -1211,7 +1216,12 @@ describe("renderPaperclipWakePrompt", () => {
       );
       expect(prompt).toContain("until `complete` is true");
       expect(prompt).toContain("exact comments accepted for this run");
-      expect(prompt).toContain("Make zero other Paperclip API calls");
+      expect(prompt).toContain("authenticated read-only Paperclip API calls");
+      expect(prompt).toContain(
+        "current assignments, issue status, blockers, and recent evidence",
+      );
+      expect(prompt).toContain("Do not make Paperclip mutations");
+      expect(prompt).not.toContain("Make zero other Paperclip API calls");
       expect(prompt).not.toContain("fetch the API thread");
       expect(prompt).not.toContain("refetching the issue thread");
       expect(prompt).not.toContain("checkout: already claimed");
