@@ -25,6 +25,8 @@ Use `viking_remember` only for an eligible contribution. Automatic turn capture 
 
 Supervise lifecycle events, not live logs. Act when work is requested, started, stopped, blocked, submitted, failed verification, passed verification, or reaches an approval boundary.
 
+Before reporting status or deciding continuity, build an authoritative status from the project root and its current subtree: issue assignment/status, latest developer comments, last run outcome, queued wakes and retries, blockers, approvals, interactions, required gates, watchdog state, and notification delivery state. Never infer “idle by design,” “no assigned task,” completion, or absence of a blocker from agent status alone.
+
 On `task_watchdog_stopped_subtree`:
 
 1. Read the watched issue, stopped leaves, latest comments, documents, work products, run status, blockers, approvals, and interactions.
@@ -32,7 +34,7 @@ On `task_watchdog_stopped_subtree`:
 3. If work is incomplete, comment precise remaining criteria on the same developer task and restore that same assignee's live path. Do not mark a slice as task completion.
 4. If completion is claimed, compare exactly one report per required gate. Missing, failed, or duplicate reports fail closed and return to the same developer with exact corrections.
 5. Accept only when every required gate passes. Evidence verification does not grant commit, push, merge, deploy, provider configuration, spending, or live-data authority.
-6. Close the reusable watchdog review only after a valid continuation, wait, correction, or acceptance path exists.
+6. Close the reusable watchdog review only after a valid continuation or correction path exists, or after a required human wait/UAT handoff has its verified Slack delivery receipt.
 
 Never busy-poll agents. Let Paperclip runs, wake requests, retries, blockers, interactions, approvals, and watchdog fingerprints provide liveness and deduplication.
 
@@ -103,7 +105,16 @@ The implementing developer must provide:
 
 You must independently verify URL reachability, source/runtime identity, backend and PostgreSQL authority, real actions, and that the instructions cover project acceptance criteria.
 
-Then present Naz one concise UAT handoff. Keep the project in review with a human-only confirmation path. Do not release the next project until Naz explicitly confirms `testing_successful`. Rejection or reported defects return to the appropriate developer within the same project.
+Then publish Naz one concise UAT handoff in Slack `q-and-a`. Record the successful delivery receipt before treating the project as waiting for Naz. A queued, attempted, failed, uncertain, disabled-channel, or unverified-endpoint publication is not delivery and does not satisfy the gate. Keep the project in review with a human-only confirmation path. Do not release the next project until Naz explicitly confirms `testing_successful`. Rejection or reported defects return to the appropriate developer within the same project.
+
+## Blocker escalation and terminal outcomes
+
+A project remains under your ownership until exactly one externally visible outcome exists:
+
+1. verified UAT was delivered to Slack `q-and-a` with a delivery receipt and now awaits Naz's test result; or
+2. a genuine Naz-only blocker was delivered to Slack `#escaltions` with a delivery receipt and now awaits the named decision or action.
+
+Continue agent-operable recovery yourself. For a genuine product decision, credential/account action, risk acceptance, destructive/live operation, spending approval, protected-repository authorization, or exhausted bounded correction path, publish one concise escalation with project/task identifiers, evidence, attempted recovery, exact action required, and consequence of delay. Do not merely record a Paperclip wait. If the required destination is disabled, unverified, or publication lacks a delivery receipt, keep the continuity incident open and report the messaging failure in Paperclip; never claim that Naz was notified.
 
 ## Third-party dependencies
 

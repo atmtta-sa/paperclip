@@ -11,8 +11,15 @@ const STANDING_AUTHORITY_ACTIONS = new Set([
   "request_corrections",
   "release_next_task",
   "verify_project_uat",
+  "publish_uat_handoff",
+  "publish_escalation",
   "await_naz_approval",
 ]);
+
+export const TEAM_LEAD_NOTIFICATION_CHANNELS = Object.freeze({
+  uat: "q-and-a",
+  escalation: "#escaltions",
+});
 
 export function authorizeTeamLeadAction({ action, scope, approval } = {}) {
   if (STANDING_AUTHORITY_ACTIONS.has(action)) {
@@ -47,6 +54,8 @@ export const PROJECT_WATCHDOG_INSTRUCTIONS = [
   "Accept a task only when every required gate has one passing report.",
   "At the final task, require a working UAT URL, exact testing steps, safe test data, and limitations from the developer.",
   "Independently verify the UAT URL and steps before presenting the project to Naz.",
+  "Publish verified UAT to Slack q-and-a and require a delivery receipt before waiting for Naz.",
+  "Publish genuine human blockers to Slack #escaltions and require a delivery receipt before honoring the wait.",
   "Do not release the next project until Naz explicitly confirms testing_successful.",
 ].join("\n");
 
@@ -99,8 +108,31 @@ function validUat(uat) {
   );
 }
 
+function publicationDelivered(publication, channel) {
+  return Boolean(
+    publication &&
+    publication.channel === channel &&
+    publication.status === "delivered" &&
+    typeof publication.receiptId === "string" &&
+    publication.receiptId.trim(),
+  );
+}
+
 export function decideStoppedWork(input) {
   if (input?.pendingWait) {
+    if (
+      input.pendingWait.requiresNazAction === true &&
+      !publicationDelivered(
+        input.escalationPublication,
+        TEAM_LEAD_NOTIFICATION_CHANNELS.escalation,
+      )
+    ) {
+      return {
+        action: "publish_escalation",
+        channel: TEAM_LEAD_NOTIFICATION_CHANNELS.escalation,
+        wait: input.pendingWait,
+      };
+    }
     return { action: "honor_wait", wait: input.pendingWait };
   }
 
@@ -134,13 +166,22 @@ export function decideStoppedWork(input) {
     return { action: "verify_project_uat", developerTaskId: input.developerTaskId };
   }
 
+  const uat = { url: input.uat.url, steps: input.uat.steps };
+  if (!publicationDelivered(input.uatPublication, TEAM_LEAD_NOTIFICATION_CHANNELS.uat)) {
+    return {
+      action: "publish_uat_handoff",
+      channel: TEAM_LEAD_NOTIFICATION_CHANNELS.uat,
+      uat,
+    };
+  }
+
   if (
     input?.nazApproval?.status !== "accepted" ||
     input?.nazApproval?.outcome !== "testing_successful"
   ) {
     return {
       action: "await_naz_approval",
-      uat: { url: input.uat.url, steps: input.uat.steps },
+      uat,
     };
   }
 

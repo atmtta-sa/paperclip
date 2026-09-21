@@ -28,6 +28,8 @@ function stoppedWork(overrides = {}) {
     pendingWait: null,
     projectFinalTask: false,
     uat: null,
+    uatPublication: null,
+    escalationPublication: null,
     nazApproval: null,
     ...overrides,
   };
@@ -96,11 +98,16 @@ test("requires Team Lead verification of the URL and test steps", () => {
   );
 });
 
-test("waits for Naz after Team Lead verifies project UAT", () => {
+test("waits for Naz only after acknowledged Q&A delivery", () => {
   assert.deepEqual(
     decideStoppedWork(stoppedWork({
       projectFinalTask: true,
       uat: { url: "http://127.0.0.1:8000/en/project", steps: ["Open the page"], leadVerified: true },
+      uatPublication: {
+        channel: "q-and-a",
+        status: "delivered",
+        receiptId: "slack-receipt-2",
+      },
     })),
     {
       action: "await_naz_approval",
@@ -114,6 +121,11 @@ test("unlocks the next project only after explicit successful-test approval", ()
     decideStoppedWork(stoppedWork({
       projectFinalTask: true,
       uat: { url: "http://127.0.0.1:8000/en/project", steps: ["Open the page"], leadVerified: true },
+      uatPublication: {
+        channel: "q-and-a",
+        status: "delivered",
+        receiptId: "slack-receipt-2",
+      },
       nazApproval: { status: "accepted", outcome: "testing_successful" },
     })),
     { action: "release_next_project", completedTaskId: "task-1" },
@@ -198,6 +210,10 @@ test("Team Lead instructions encode event, worker, UAT, and safety governance", 
     "Whattsi Developer",
     "Codex Agent",
     "Hermes Agent",
+    "authoritative status",
+    "q-and-a",
+    "#escaltions",
+    "delivery receipt",
   ];
   for (const term of requiredTerms) assert.match(teamLeadInstructions, new RegExp(term, "i"));
 });
