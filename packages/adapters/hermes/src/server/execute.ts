@@ -245,10 +245,24 @@ interface ParsedOutput {
 
 /** Strip noise lines from a Hermes response (tool output, system messages, etc.) */
 function cleanResponse(raw: string): string {
+  let worktreeHeader = false;
   return raw
     .split("\n")
     .filter((line) => {
-      const t = line.trim();
+      const t = line
+        .trim()
+        .replace(/^\x1b\[[0-9;]*m/, "")
+        .replace(/\x1b\[[0-9;]*m$/, "");
+      if (t.startsWith("✓ Worktree created:")) {
+        worktreeHeader = true;
+        return false;
+      }
+      if (t.startsWith("✓ Worktree cleaned up:")) {
+        worktreeHeader = false;
+        return false;
+      }
+      if (worktreeHeader && /^(Branch|Base):\s/.test(t)) return false;
+      worktreeHeader = false;
       if (!t) return true; // keep blank lines for paragraph separation
       if (t.startsWith("[tool]") || t.startsWith("[hermes]") || t.startsWith("[paperclip]")) return false;
       if (t.startsWith("session_id:")) return false;

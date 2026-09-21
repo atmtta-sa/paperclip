@@ -131,6 +131,52 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(args).not.toContain("auto");
   });
 
+  it("omits worktree lifecycle output from the agent response", async () => {
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: [
+        "✓ Worktree created: /tmp/.worktrees/hermes-7b3bab57",
+        "  Branch: hermes/hermes-7b3bab57",
+        "  Base:   HEAD (local — could not reach remote)",
+        "Hey Naz! How can I help?",
+        "✓ Worktree cleaned up: /tmp/.worktrees/hermes-7b3bab57",
+        "",
+      ].join("\n"),
+      stderr: "",
+      pid: null,
+      startedAt: null,
+    });
+
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.summary).toBe("Hey Naz! How can I help?");
+    expect(result.resultJson).toMatchObject({
+      result: "Hey Naz! How can I help?",
+    });
+  });
+
+  it("preserves ordinary response lines that resemble labels", async () => {
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "Branch: keep this user-authored line\nBase: keep this too\n",
+      stderr: "",
+      pid: null,
+      startedAt: null,
+    });
+
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.summary).toBe(
+      "Branch: keep this user-authored line\nBase: keep this too",
+    );
+  });
+
   it("preserves a specific stderr diagnostic for a nonzero exit", async () => {
     vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
       exitCode: 1,
