@@ -2,8 +2,9 @@ import type { ExecutionWorkspace } from "@paperclipai/shared";
 
 /** Short-lived display cache only. Destructive operations must inspect afresh. */
 export function createWorkspaceGitInspectionCache<T>(inspect: (workspace: ExecutionWorkspace) => Promise<T>) {
-  const entries = new Map<string, { expiresAt: number; promise: Promise<T> }>();
+  const entries = new Map<string, { identity: string; expiresAt: number; promise: Promise<T> }>();
   return (workspace: ExecutionWorkspace): Promise<T> => {
+    const identity = JSON.stringify([workspace.companyId, workspace.id]);
     const key = JSON.stringify([
       workspace.companyId, workspace.id, workspace.updatedAt, workspace.providerType,
       workspace.providerRef, workspace.cwd, workspace.repoUrl, workspace.baseRef,
@@ -13,10 +14,16 @@ export function createWorkspaceGitInspectionCache<T>(inspect: (workspace: Execut
     const existing = entries.get(key);
     if (existing && existing.expiresAt > now) return existing.promise;
     for (const [candidate, entry] of entries) {
-      if (entry.expiresAt <= now) entries.delete(candidate);
+      if (entry.expiresAt <= now || (entry.identity === identity && entry.expiresAt !== Number.POSITIVE_INFINITY)) {
+        entries.delete(candidate);
+      }
     }
     if (entries.size >= 256) entries.delete(entries.keys().next().value!);
-    const entry = { expiresAt: Number.POSITIVE_INFINITY, promise: Promise.resolve().then(() => inspect(workspace)) };
+    const entry = {
+      identity,
+      expiresAt: Number.POSITIVE_INFINITY,
+      promise: Promise.resolve().then(() => inspect(workspace)),
+    };
     entries.set(key, entry);
     entry.promise = entry.promise.then((result) => {
       entry.expiresAt = Date.now() + 5_000;

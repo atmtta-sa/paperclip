@@ -2769,6 +2769,8 @@ async function queueResolvedInteractionContinuationWakeup(input: {
     );
 }
 
+export { queueResolvedInteractionContinuationWakeup };
+
 function readCheckboxSelectionForWake(input: {
   kind: string;
   payload?: unknown;

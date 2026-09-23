@@ -2445,6 +2445,44 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     );
     // Terminal run cleanup releases the checkout lock so future checkout 409s only mean a live owner exists.
     expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
+
+    const retryDueAt = retryRun?.scheduledRetryAt;
+    if (!retryRun || !retryDueAt) {
+      throw new Error("Expected a scheduled provider-loss retry");
+    }
+    expect(
+      await heartbeat.promoteDueScheduledRetries(
+        new Date(new Date(retryDueAt).getTime() + 1_000),
+      ),
+    ).toMatchObject({ runIds: [retryRun.id] });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, retryRun.id);
+    await heartbeat.waitForRunExecutionDrain(retryRun.id);
+
+    expect(await heartbeat.getRun(retryRun.id)).toMatchObject({
+      status: "succeeded",
+      error: null,
+      errorCode: null,
+    });
+    await expect(
+      db
+        .select({ status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.runId, retryRun.id)),
+    ).resolves.toEqual([{ status: "completed" }]);
+    await expect(
+      db
+        .select({ lastError: agentRuntimeState.lastError })
+        .from(agentRuntimeState)
+        .where(eq(agentRuntimeState.agentId, agentId)),
+    ).resolves.toEqual([{ lastError: null }]);
+    await expect(
+      db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.retryOfRunId, runId)),
+    ).resolves.toHaveLength(1);
   });
 
   it("requires reconciliation for a lost monitor whose provider outcomes are unknown", async () => {

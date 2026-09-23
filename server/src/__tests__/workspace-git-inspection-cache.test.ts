@@ -42,3 +42,18 @@ it("retries failed inspections and bounds retained entries", async () => {
   await read(workspace);
   expect(inspect).toHaveBeenCalledTimes(259);
 });
+
+it("discards superseded revisions instead of evicting unrelated hot workspaces", async () => {
+  const inspect = vi.fn(async () => null);
+  const read = createWorkspaceGitInspectionCache(inspect);
+  const stableWorkspace = { ...workspace, id: "stable", cwd: "/stable" };
+  const revisedWorkspace = { ...workspace, id: "revised", cwd: "/revised" };
+
+  await read(stableWorkspace);
+  for (let revision = 0; revision < 256; revision++) {
+    await read({ ...revisedWorkspace, updatedAt: new Date(revision) });
+  }
+  await read(stableWorkspace);
+
+  expect(inspect).toHaveBeenCalledTimes(257);
+});

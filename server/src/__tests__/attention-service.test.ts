@@ -41,7 +41,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { attentionRoutes } from "../routes/attention.js";
-import { attentionService } from "../services/attention.js";
+import { attentionService, listLatestExhaustedRuns } from "../services/attention.js";
 import { agentService } from "../services/agents.js";
 import { ROUTABLE_BLOCKED_ROLLOUT_AT } from "../services/routable-blocked.js";
 
@@ -223,6 +223,34 @@ describeEmbeddedPostgres("attention service", () => {
       currentParticipant: { type: "agent", agentId },
     };
   }
+
+  it("loads one latest exhaustion event per failed run", async () => {
+    const { companyId, workerId } = await seedCompany("ATE");
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: workerId,
+      invocationSource: "automation",
+      status: "failed",
+      error: "adapter failed",
+      contextSnapshot: {},
+    });
+    await db.insert(heartbeatRunEvents).values([1, 2, 3].map((seq) => ({
+      companyId,
+      runId,
+      agentId: workerId,
+      seq,
+      eventType: "lifecycle",
+      message: `Bounded retry exhausted attempt ${seq}`,
+      payload: {},
+    })));
+
+    const rows = await listLatestExhaustedRuns(db, companyId);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: runId, exhaustionMessage: "Bounded retry exhausted attempt 3" });
+  });
 
   it("excludes internal harness reviews from items, counts, and decision queues", async () => {
     const { companyId, workerId } = await seedCompany("ATH");
