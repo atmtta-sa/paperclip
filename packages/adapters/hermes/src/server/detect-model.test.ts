@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -114,6 +114,43 @@ async function withHermesHomeConfig(
     await rm(tempHome, { recursive: true, force: true });
   }
 }
+
+test("managed Hermes validation runs its own provider hello probe", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "paperclip-hermes-hello-probe-"));
+  const command = join(tempDir, "hermes-test");
+  await writeFile(command, [
+    "#!/bin/sh",
+    "if [ \"$1\" = \"--version\" ]; then",
+    "  echo 'Hermes Agent test'",
+    "  exit 0",
+    "fi",
+    "printf 'hello\\n'",
+    "",
+  ].join("\n"), "utf8");
+  await chmod(command, 0o755);
+
+  try {
+    const result = await testEnvironment({
+      companyId: "company-test",
+      adapterType: "hermes_local",
+      config: {
+        hermesCommand: command,
+        model: "moonshotai/kimi-k3",
+        provider: "openrouter",
+        helloProbe: true,
+        env: { OPENROUTER_API_KEY: "test-openrouter-key" },
+      },
+      executionTarget: { kind: "local" },
+    });
+
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      code: "hermes_hello_probe_passed",
+      level: "info",
+    }));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("testEnvironment does not warn about missing API keys when Hermes config provides a supported provider api_key", async () => {
   await withHermesHomeConfig([

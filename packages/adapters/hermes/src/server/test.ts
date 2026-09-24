@@ -10,6 +10,7 @@ import type {
   AdapterEnvironmentTestResult,
   AdapterEnvironmentCheck,
 } from "@paperclipai/adapter-utils";
+import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -23,6 +24,53 @@ const execFileAsync = promisify(execFile);
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+function stringEnv(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
+async function runHelloProbe(
+  ctx: AdapterEnvironmentTestContext,
+  config: Record<string, unknown>,
+  command: string,
+): Promise<AdapterEnvironmentCheck> {
+  const args = ["chat", "-q", "Reply exactly hello.", "-Q", "--max-turns", "1", "--source", "tool"];
+  const model = asString(config.model)?.trim();
+  const provider = asString(config.provider)?.trim();
+  if (model) args.push("--model", model);
+  if (provider) args.push("--provider", provider);
+
+  const probe = await runAdapterExecutionTargetProcess(
+    `hermes-environment-test-${Date.now()}`,
+    ctx.executionTarget ?? { kind: "local" },
+    command,
+    args,
+    {
+      cwd: asString(config.cwd) ?? process.cwd(),
+      env: { ...stringEnv(process.env), ...stringEnv(config.env) },
+      timeoutSec: 90,
+      graceSec: 5,
+      onLog: async () => {},
+    },
+  );
+
+  if (!probe.timedOut && (probe.exitCode ?? 1) === 0 && /\bhello\b/i.test(probe.stdout)) {
+    return {
+      code: "hermes_hello_probe_passed",
+      level: "info",
+      message: "Hermes provider hello probe succeeded.",
+    };
+  }
+  return {
+    code: probe.timedOut ? "hermes_hello_probe_timed_out" : "hermes_hello_probe_failed",
+    level: "error",
+    message: probe.timedOut ? "Hermes provider hello probe timed out." : "Hermes provider hello probe failed.",
+    hint: "Verify the selected provider account, model, and Hermes CLI configuration, then retry.",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +421,12 @@ export async function testEnvironment(
   // 7. Provider/model consistency
   const providerCheck = await checkProviderConsistency(config, detectedConfig);
   if (providerCheck) checks.push(providerCheck);
+
+  // Managed AI adoption must prove that this adapter can use the transiently
+  // injected account. Ordinary environment checks stay discovery-only.
+  if (config.helloProbe === true) {
+    checks.push(await runHelloProbe(ctx, config, command));
+  }
 
   // Determine overall status
   const hasErrors = checks.some((c) => c.level === "error");

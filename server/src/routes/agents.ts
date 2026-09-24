@@ -3176,7 +3176,10 @@ export function agentRoutes(
 
   async function testManagedEnvironment(adapterType: string, context: Parameters<ReturnType<typeof requireServerAdapter>["testEnvironment"]>[0], binding: AiConnectionBinding) {
     await assertManagedAiProjectAuth(context.config, binding.provider, context.executionTarget);
-    const result = await requireServerAdapter(adapterType).testEnvironment(context);
+    const managedContext = adapterType === "hermes_local"
+      ? { ...context, config: { ...context.config, helloProbe: true } }
+      : context;
+    const result = await requireServerAdapter(adapterType).testEnvironment(managedContext);
     if (result.status === "fail") return result;
     if (!result.checks.some(check => check.code.includes("hello_probe"))) {
       const providerAdapter = { anthropic: "claude_local", openai: "codex_local", openrouter: "opencode_local", xai: "grok_local" }[binding.provider];
