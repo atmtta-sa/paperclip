@@ -211,6 +211,14 @@ export interface AdapterExecutionContext {
   onCancellationReady?: () => Promise<void>;
   /** Server-owned, actor-attributed snapshot also rendered by legacy wake prompts. */
   executionContinuation?: ExecutionContinuationEnvelope | null;
+  /** Server-reserved hard ceiling for this autonomous run. */
+  autonomousBudgetEnvelope?: {
+    requestCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    runtimeMs: number;
+    costMicrousd: number;
+  };
   runId: string;
   agent: AdapterAgent;
   runtime: AdapterRuntime;

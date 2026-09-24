@@ -243,6 +243,22 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       .then((rows) => rows[0] ?? null);
   }
 
+  it("passes the committed run envelope to the adapter context", async () => {
+    const { agentId, issueId } = await seedCompanyAgentIssue();
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const call = mockAdapterExecute.mock.calls.at(-1);
+    expect(call?.[0]?.autonomousBudgetEnvelope).toEqual({
+      requestCount: 8,
+      inputTokens: 64_000,
+      outputTokens: 8_000,
+      runtimeMs: 300_000,
+      costMicrousd: 250_000,
+    });
+  });
+
   it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 

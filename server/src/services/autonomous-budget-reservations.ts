@@ -18,10 +18,12 @@ export type AutonomousBudgetRequest = {
   costCents?: number;
 };
 
-type NormalizedAutonomousBudgetRequest = Omit<
+export type AutonomousBudgetEnvelope = Omit<
   AutonomousBudgetRequest,
   "costMicrousd" | "costCents"
 > & { costMicrousd: number };
+
+type NormalizedAutonomousBudgetRequest = AutonomousBudgetEnvelope;
 
 export type AutonomousBudgetReservationInput = {
   companyId: string;
@@ -189,7 +191,12 @@ export async function reserveAutonomousBudget(
   db: Db,
   input: AutonomousBudgetReservationInput,
 ): Promise<
-  | { admitted: true; reservationId: string; replayed: boolean }
+  | {
+      admitted: true;
+      reservationId: string;
+      replayed: boolean;
+      envelope: AutonomousBudgetEnvelope;
+    }
   | { admitted: false; reason: BudgetBlockReason; policyId: string }
 > {
   return db.transaction(async (tx) => {
@@ -221,12 +228,30 @@ export async function reserveAutonomousBudget(
       .for("update");
 
     const existing = await tx
-      .select({ id: autonomousBudgetReservations.id })
+      .select({
+        id: autonomousBudgetReservations.id,
+        requestCount: autonomousBudgetReservations.reservedRequestCount,
+        inputTokens: autonomousBudgetReservations.reservedInputTokens,
+        outputTokens: autonomousBudgetReservations.reservedOutputTokens,
+        runtimeMs: autonomousBudgetReservations.reservedRuntimeMs,
+        costMicrousd: autonomousBudgetReservations.reservedCostMicrousd,
+      })
       .from(autonomousBudgetReservations)
       .where(eq(autonomousBudgetReservations.runId, input.runId))
       .then((rows) => rows[0] ?? null);
     if (existing) {
-      return { admitted: true as const, reservationId: existing.id, replayed: true };
+      return {
+        admitted: true as const,
+        reservationId: existing.id,
+        replayed: true,
+        envelope: {
+          requestCount: existing.requestCount,
+          inputTokens: existing.inputTokens,
+          outputTokens: existing.outputTokens,
+          runtimeMs: existing.runtimeMs,
+          costMicrousd: existing.costMicrousd,
+        },
+      };
     }
     if (policies.length === 0) throw new Error("autonomous_budget_policy_missing");
     const requested = input.requested
@@ -349,7 +374,12 @@ export async function reserveAutonomousBudget(
         .onConflictDoNothing();
     }
 
-    return { admitted: true as const, reservationId: reservation.id, replayed: false };
+    return {
+      admitted: true as const,
+      reservationId: reservation.id,
+      replayed: false,
+      envelope: requested,
+    };
   });
 }
 

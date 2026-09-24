@@ -104,6 +104,25 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(opts.onSpawn).toBe(onSpawn);
   });
 
+  it("injects the reserved autonomous budget envelope into Hermes", async () => {
+    const { ctx } = makeCtx();
+    const envelope = {
+      requestCount: 8,
+      inputTokens: 64_000,
+      outputTokens: 8_000,
+      runtimeMs: 300_000,
+      costMicrousd: 250_000,
+    };
+    (ctx as Record<string, unknown>).autonomousBudgetEnvelope = envelope;
+
+    await execute(ctx as any);
+
+    const mocked = vi.mocked(serverUtils.runChildProcess);
+    const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
+    const opts = lastCall[3] as { env: Record<string, string> };
+    expect(opts.env.HERMES_AUTONOMOUS_BUDGET_JSON).toBe(JSON.stringify(envelope));
+  });
+
   it("runChildProcess opts type includes onSpawn", () => {
     // Type-level assertion: if onSpawn were removed from the type,
     // this file would fail to compile. The runtime test above catches

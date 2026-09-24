@@ -23670,7 +23670,7 @@ export function heartbeatService(
                       agent.adapterType,
                     model: readNonEmptyString(configuredModel),
                   },
-                  () => dispatchResolvedInteractionContinuationWithAtomicGate(
+                  ({ envelope }) => dispatchResolvedInteractionContinuationWithAtomicGate(
                   (markDispatchStarted) =>
                     executePaperclipNativeSession({
                       db,
@@ -23722,6 +23722,7 @@ export function heartbeatService(
                       // workspace boundary authoritative.
                       managedAiCredentialHome: managedAiRuntime ? String((managedAiRuntime.config.env as Record<string, unknown>).CODEX_HOME) : undefined,
                       runnerEnvironment: {
+                        HERMES_AUTONOMOUS_BUDGET_JSON: JSON.stringify(envelope),
                         ...buildNativeProviderEnvironment(
                           adapterEnv,
                           process.env,
@@ -23885,7 +23886,7 @@ export function heartbeatService(
                     agent.adapterType,
                   model: readNonEmptyString(runtimeConfig.model),
                 },
-                () => dispatchResolvedInteractionContinuationWithAtomicGate(
+                ({ envelope }) => dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
                   legacyAdapterEntered = true;
                   return adapter.execute({
@@ -23894,6 +23895,7 @@ export function heartbeatService(
                     runtime: runtimeForAdapter,
                     config: runtimeConfig,
                     context: adapterContext,
+                    autonomousBudgetEnvelope: envelope,
                     executionContinuation: executionContinuation ?? null,
                     runtimeCommandSpec:
                       adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,

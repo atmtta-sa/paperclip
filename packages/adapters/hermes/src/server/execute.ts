@@ -512,6 +512,9 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+  if (ctx.autonomousBudgetEnvelope) {
+    env.HERMES_AUTONOMOUS_BUDGET_JSON = JSON.stringify(ctx.autonomousBudgetEnvelope);
+  }
 
   // PAPERCLIP_API_KEY is never accepted from config — the harness-minted run
   // token is the only source of Paperclip API identity.

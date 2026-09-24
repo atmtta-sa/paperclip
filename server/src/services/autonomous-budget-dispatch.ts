@@ -2,6 +2,7 @@ import type { Db } from "@paperclipai/db";
 import {
   reserveAutonomousBudget,
   type AutonomousBudgetReservationInput,
+  type AutonomousBudgetEnvelope,
   type BudgetBlockReason,
 } from "./autonomous-budget-reservations.js";
 
@@ -26,7 +27,11 @@ export function isAutonomousBudgetAdmissionError(
 export async function dispatchWithAutonomousBudgetReservation<T>(
   db: Db,
   input: AutonomousBudgetReservationInput,
-  dispatch: (reservation: { reservationId: string; replayed: boolean }) => Promise<T>,
+  dispatch: (reservation: {
+    reservationId: string;
+    replayed: boolean;
+    envelope: AutonomousBudgetEnvelope;
+  }) => Promise<T>,
 ): Promise<T> {
   const reservation = await reserveAutonomousBudget(db, input);
   if (!reservation.admitted) {
@@ -35,5 +40,6 @@ export async function dispatchWithAutonomousBudgetReservation<T>(
   return dispatch({
     reservationId: reservation.reservationId,
     replayed: reservation.replayed,
+    envelope: reservation.envelope,
   });
 }

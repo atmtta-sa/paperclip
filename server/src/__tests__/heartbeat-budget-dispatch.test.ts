@@ -91,6 +91,36 @@ describeEmbeddedPostgres("heartbeat budget dispatch gate", () => {
     expect(adapter).toHaveBeenCalledTimes(1);
   });
 
+  it("passes the exact reserved envelope on initial dispatch and replay", async () => {
+    const scope = await seedScope();
+    const runId = randomUUID();
+    const envelopes: unknown[] = [];
+    const adapter = vi.fn(async (reservation: { envelope: unknown }) => {
+      envelopes.push(reservation.envelope);
+      return "adapter-result";
+    });
+
+    await dispatchWithAutonomousBudgetReservation(db, { ...scope, runId }, adapter);
+    await dispatchWithAutonomousBudgetReservation(db, { ...scope, runId }, adapter);
+
+    expect(envelopes).toEqual([
+      {
+        requestCount: 8,
+        inputTokens: 64_000,
+        outputTokens: 8_000,
+        runtimeMs: 300_000,
+        costMicrousd: 250_000,
+      },
+      {
+        requestCount: 8,
+        inputTokens: 64_000,
+        outputTokens: 8_000,
+        runtimeMs: 300_000,
+        costMicrousd: 250_000,
+      },
+    ]);
+  });
+
   it("does not enter the adapter callback when a run envelope dimension is missing", async () => {
     const scope = await seedScope();
     await db
