@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { heartbeatRuns } from "@paperclipai/db";
 import {
   ISSUE_REWAKE_BASE_COOLDOWN_MS,
   ISSUE_REWAKE_MAX_COOLDOWN_MS,
@@ -9,6 +10,16 @@ import {
 } from "../services/issue-rewake-throttle.ts";
 
 const NOW = new Date("2026-07-12T18:14:00.000Z");
+
+it("exposes durable continuity outcome and circuit columns", () => {
+  expect(heartbeatRuns.workOutcome).toBeDefined();
+  expect(heartbeatRuns.stateFingerprintBefore).toBeDefined();
+  expect(heartbeatRuns.stateFingerprintAfter).toBeDefined();
+  expect(heartbeatRuns.noProgressStreak).toBeDefined();
+  expect(heartbeatRuns.continuityCircuitState).toBeDefined();
+  expect(heartbeatRuns.continuityCircuitOpenedAt).toBeDefined();
+  expect(heartbeatRuns.continuityCircuitAlertedAt).toBeDefined();
+});
 
 function runSample(input: {
   id: string;
@@ -144,6 +155,50 @@ describe("evaluateIssueRewakeThrottle", () => {
       hasNewIssueInputSinceLastRun: false,
     });
     expect(decision).toEqual({ blocked: false, noProgressStreak: 2 });
+  });
+
+  it("keeps an open unchanged-state circuit blocked after cooldown expiry", () => {
+    const decision = evaluateIssueRewakeThrottle({
+      now: NOW,
+      recentTerminalRuns: [
+        runSample({ id: "r2", finishedSecondsAgo: 600 }),
+        runSample({ id: "r1", finishedSecondsAgo: 700 }),
+      ],
+      runIdsWithIssueProgress: new Set(),
+      hasNewIssueInputSinceLastRun: false,
+      isCircuitOpen: true,
+      stateFingerprintChanged: false,
+    });
+    expect(decision.blocked).toBe(true);
+  });
+
+  it("does not close an open circuit for activity without a fingerprint change", () => {
+    const decision = evaluateIssueRewakeThrottle({
+      now: NOW,
+      recentTerminalRuns: [
+        runSample({ id: "r2", finishedSecondsAgo: 10 }),
+        runSample({ id: "r1", finishedSecondsAgo: 40 }),
+      ],
+      runIdsWithIssueProgress: new Set(),
+      hasNewIssueInputSinceLastRun: true,
+      isCircuitOpen: true,
+      stateFingerprintChanged: false,
+    });
+    expect(decision.blocked).toBe(true);
+  });
+
+  it("closes an open circuit after a verified fingerprint change", () => {
+    expect(evaluateIssueRewakeThrottle({
+      now: NOW,
+      recentTerminalRuns: [
+        runSample({ id: "r2", finishedSecondsAgo: 10 }),
+        runSample({ id: "r1", finishedSecondsAgo: 40 }),
+      ],
+      runIdsWithIssueProgress: new Set(),
+      hasNewIssueInputSinceLastRun: false,
+      isCircuitOpen: true,
+      stateFingerprintChanged: true,
+    })).toEqual({ blocked: false, noProgressStreak: 0 });
   });
 
   it("escalates the cooldown as the streak grows", () => {

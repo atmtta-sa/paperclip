@@ -27,6 +27,10 @@ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
+import {
+  loadIssueTaskStateFingerprint,
+  transitionIssueContinuityState,
+} from "./issue-continuity-state.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { initializeRunIdentity, explicitOperatorRunIdentity } from "./run-identity.js";
 import {
@@ -12513,6 +12517,119 @@ export function heartbeatService(
     void emitAgentTaskRun(db, updated);
   }
 
+  async function issueContinuityTerminalPatch(
+    run: typeof heartbeatRuns.$inferSelect,
+    status: string,
+  ): Promise<Partial<typeof heartbeatRuns.$inferInsert>> {
+    if (!isHeartbeatRunTerminalStatus(status)) return {};
+    const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    if (!issueId) return {};
+
+    const fingerprintAfter = await loadIssueTaskStateFingerprint({
+      db,
+      companyId: run.companyId,
+      issueId,
+    });
+    const fingerprintBefore = run.stateFingerprintBefore ?? fingerprintAfter;
+    if (!fingerprintBefore || !fingerprintAfter) return {};
+
+    const previousRun = await db
+      .select({
+        stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter,
+        workOutcome: heartbeatRuns.workOutcome,
+        noProgressStreak: heartbeatRuns.noProgressStreak,
+        continuityCircuitOpenedAt: heartbeatRuns.continuityCircuitOpenedAt,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, run.companyId),
+          eq(heartbeatRuns.agentId, run.agentId),
+          ne(heartbeatRuns.id, run.id),
+          isNotNull(heartbeatRuns.finishedAt),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.finishedAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    const previousNoProgressStreak =
+      previousRun?.workOutcome === "no_progress" &&
+      previousRun.stateFingerprintAfter === fingerprintBefore
+        ? previousRun.noProgressStreak
+        : 0;
+    const transition = transitionIssueContinuityState({
+      terminalStatus: status,
+      fingerprintBefore,
+      fingerprintAfter,
+      previousNoProgressStreak,
+      authorizedHumanResume:
+        parseObject(run.contextSnapshot).authorizedHumanResume === true,
+    });
+
+    return {
+      workOutcome: transition.workOutcome,
+      stateFingerprintBefore: fingerprintBefore,
+      stateFingerprintAfter: fingerprintAfter,
+      noProgressStreak: transition.noProgressStreak,
+      continuityCircuitState: transition.circuitState,
+      continuityCircuitOpenedAt:
+        transition.circuitState === "open"
+          ? previousRun?.continuityCircuitOpenedAt ?? new Date()
+          : null,
+    };
+  }
+
+  async function emitIssueContinuityCircuitAlert(
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<void> {
+    if (
+      run.continuityCircuitState !== "open" ||
+      !run.continuityCircuitOpenedAt ||
+      run.continuityCircuitAlertedAt
+    ) {
+      return;
+    }
+    const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    if (!issueId) return;
+    const circuitOpenedAt = run.continuityCircuitOpenedAt;
+
+    await db.transaction(async (tx) => {
+      const alertedAt = new Date();
+      const claimed = await tx
+        .update(heartbeatRuns)
+        .set({ continuityCircuitAlertedAt: alertedAt, updatedAt: alertedAt })
+        .where(
+          and(
+            eq(heartbeatRuns.id, run.id),
+            eq(heartbeatRuns.continuityCircuitState, "open"),
+            isNull(heartbeatRuns.continuityCircuitAlertedAt),
+          ),
+        )
+        .returning({ id: heartbeatRuns.id })
+        .then((rows) => rows[0] ?? null);
+      if (!claimed) return;
+
+      await tx.insert(activityLog).values({
+        companyId: run.companyId,
+        actorType: "system",
+        actorId: "continuity-circuit-breaker",
+        action: "issue.continuity_circuit_opened",
+        entityType: "issue",
+        entityId: issueId,
+        agentId: run.agentId,
+        runId: run.id,
+        responsibleUserId: run.responsibleUserId,
+        details: {
+          stateFingerprint: run.stateFingerprintAfter,
+          noProgressStreak: run.noProgressStreak,
+          circuitOpenedAt: circuitOpenedAt.toISOString(),
+        },
+        createdAt: alertedAt,
+      });
+    });
+  }
+
   async function setRunStatus(
     runId: string,
     status: string,
@@ -12523,6 +12640,17 @@ export function heartbeatService(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+
+    if (
+      previousStatus &&
+      previousStatus.status !== status &&
+      isHeartbeatRunTerminalStatus(status)
+    ) {
+      patch = {
+        ...patch,
+        ...(await issueContinuityTerminalPatch(previousStatus, status)),
+      };
+    }
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
@@ -12568,6 +12696,7 @@ export function heartbeatService(
             .then((rows) => rows[0] ?? null);
 
     if (updated) {
+      await emitIssueContinuityCircuitAlert(updated);
       publishLiveEvent({
         companyId: updated.companyId,
         type: "heartbeat.run.status",
@@ -12607,6 +12736,17 @@ export function heartbeatService(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+
+    if (
+      previousStatus &&
+      previousStatus.status !== status &&
+      isHeartbeatRunTerminalStatus(status)
+    ) {
+      patch = {
+        ...patch,
+        ...(await issueContinuityTerminalPatch(previousStatus, status)),
+      };
+    }
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
@@ -12661,6 +12801,7 @@ export function heartbeatService(
             .then((rows) => rows[0] ?? null);
 
     if (updated) {
+      await emitIssueContinuityCircuitAlert(updated);
       publishLiveEvent({
         companyId: updated.companyId,
         type: "heartbeat.run.status",
@@ -25750,6 +25891,8 @@ export function heartbeatService(
       ) {
         enrichedContextSnapshot.taskKey = explicitResumeSession.taskKey;
       }
+      enrichedContextSnapshot.authorizedHumanResume =
+        opts.requestedByActorType === "user";
       issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueId;
     }
     const effectiveTaskKey =
@@ -27128,6 +27271,8 @@ export function heartbeatService(
                 id: heartbeatRuns.id,
                 status: heartbeatRuns.status,
                 finishedAt: heartbeatRuns.finishedAt,
+                continuityCircuitState: heartbeatRuns.continuityCircuitState,
+                stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter,
               })
               .from(heartbeatRuns)
               .where(
@@ -27188,6 +27333,18 @@ export function heartbeatService(
                     .limit(1)
                 : [];
 
+              const currentStateFingerprint =
+                recentTerminalRuns[0]?.stateFingerprintAfter
+                  ? await loadIssueTaskStateFingerprint({
+                      db: tx as unknown as Db,
+                      companyId: agent.companyId,
+                      issueId: issue.id,
+                    })
+                  : null;
+              const stateFingerprintChanged =
+                recentTerminalRuns[0]?.stateFingerprintAfter && currentStateFingerprint
+                  ? recentTerminalRuns[0].stateFingerprintAfter !== currentStateFingerprint
+                  : undefined;
               const throttleDecision = evaluateIssueRewakeThrottle({
                 now: throttleNow,
                 recentTerminalRuns,
@@ -27201,28 +27358,39 @@ export function heartbeatService(
                 // Presentation/author metadata therefore cannot smuggle human
                 // wake privilege, nor can it mask an actual human response.
                 hasNewIssueInputSinceLastRun: newInputRows.length > 0,
+                isCircuitOpen:
+                  recentTerminalRuns[0]?.continuityCircuitState === "open",
+                stateFingerprintChanged,
               });
 
               if (throttleDecision.blocked) {
+                const throttleReason =
+                  throttleDecision.blockKind === "circuit_open"
+                    ? "issue_rewake_circuit_open"
+                    : "issue_rewake_throttled";
                 await tx.insert(agentWakeupRequests).values({
                   ...durableReceiptFields,
                   companyId: agent.companyId,
                   agentId,
                   source,
                   triggerDetail,
-                  reason: "issue_rewake_throttled",
+                  reason: throttleReason,
                   payload: {
                     ...(payload ?? {}),
                     issueId,
                     heartbeatSkip: {
-                      reason: "issue_rewake_throttled",
+                      reason: throttleReason,
                       requestedReason: reason,
                       noProgressStreak: throttleDecision.noProgressStreak,
-                      cooldownMs: throttleDecision.cooldownMs,
-                      lastRunFinishedAt:
-                        throttleDecision.lastRunFinishedAt.toISOString(),
-                      nextAllowedAt:
-                        throttleDecision.nextAllowedAt.toISOString(),
+                      ...(throttleDecision.blockKind === "cooldown"
+                        ? {
+                            cooldownMs: throttleDecision.cooldownMs,
+                            lastRunFinishedAt:
+                              throttleDecision.lastRunFinishedAt.toISOString(),
+                            nextAllowedAt:
+                              throttleDecision.nextAllowedAt.toISOString(),
+                          }
+                        : { circuitState: "open" }),
                     },
                   },
                   status: "skipped",
@@ -27361,6 +27529,11 @@ export function heartbeatService(
             adoptedCommentIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
               agent.companyId, issueId, agentId, adoptedCommentIds);
           }
+          const stateFingerprintBefore = await loadIssueTaskStateFingerprint({
+            db: tx as unknown as Db,
+            companyId: agent.companyId,
+            issueId: issue.id,
+          });
           const newRun = await tx
             .insert(heartbeatRuns)
             .values({
@@ -27383,6 +27556,7 @@ export function heartbeatService(
                 : enrichedContextSnapshot,
               sessionIdBefore: explicitContinuation ? null : sessionBefore,
               continuationAttempt,
+              stateFingerprintBefore,
               ...(reconciledSourceRunId
                 ? { retryOfRunId: reconciledSourceRunId }
                 : {}),

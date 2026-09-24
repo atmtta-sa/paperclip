@@ -90,6 +90,26 @@ export const heartbeatRuns = pgTable(
     issueCommentRetryQueuedAt: timestamp("issue_comment_retry_queued_at", { withTimezone: true }),
     livenessState: text("liveness_state"),
     livenessReason: text("liveness_reason"),
+    workOutcome: text("work_outcome").$type<
+      | "productive"
+      | "blocked"
+      | "no_progress"
+      | "provider_error"
+      | "cancelled"
+    >(),
+    stateFingerprintBefore: text("state_fingerprint_before"),
+    stateFingerprintAfter: text("state_fingerprint_after"),
+    noProgressStreak: integer("no_progress_streak").notNull().default(0),
+    continuityCircuitState: text("continuity_circuit_state")
+      .$type<"closed" | "open">()
+      .notNull()
+      .default("closed"),
+    continuityCircuitOpenedAt: timestamp("continuity_circuit_opened_at", {
+      withTimezone: true,
+    }),
+    continuityCircuitAlertedAt: timestamp("continuity_circuit_alerted_at", {
+      withTimezone: true,
+    }),
     continuationAttempt: integer("continuation_attempt").notNull().default(0),
     lastUsefulActionAt: timestamp("last_useful_action_at", { withTimezone: true }),
     nextAction: text("next_action"),

@@ -22,6 +22,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { loadIssueTaskStateFingerprint } from "../services/issue-continuity-state.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { runningProcesses } from "../adapters/index.ts";
 
@@ -159,6 +160,12 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     finishedSecondsAgo: number;
     startedSecondsAgo?: number;
     sessionIdAfter?: string;
+    workOutcome?: "productive" | "blocked" | "no_progress" | "provider_error" | "cancelled";
+    stateFingerprintBefore?: string;
+    stateFingerprintAfter?: string;
+    noProgressStreak?: number;
+    continuityCircuitState?: "closed" | "open";
+    continuityCircuitOpenedAt?: Date;
   }) {
     const runId = randomUUID();
     const finishedAt = new Date(Date.now() - input.finishedSecondsAgo * 1000);
@@ -176,6 +183,12 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       startedAt,
       finishedAt,
       sessionIdAfter: input.sessionIdAfter,
+      workOutcome: input.workOutcome,
+      stateFingerprintBefore: input.stateFingerprintBefore,
+      stateFingerprintAfter: input.stateFingerprintAfter,
+      noProgressStreak: input.noProgressStreak,
+      continuityCircuitState: input.continuityCircuitState,
+      continuityCircuitOpenedAt: input.continuityCircuitOpenedAt,
       contextSnapshot: { issueId: input.issueId, wakeReason: "issue_assigned" },
     });
     return runId;
@@ -206,6 +219,60 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       .limit(1)
       .then((rows) => rows[0] ?? null);
   }
+
+  it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db
+      .select({
+        workOutcome: heartbeatRuns.workOutcome,
+        stateFingerprintBefore: heartbeatRuns.stateFingerprintBefore,
+        stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter,
+        noProgressStreak: heartbeatRuns.noProgressStreak,
+        continuityCircuitState: heartbeatRuns.continuityCircuitState,
+        continuityCircuitOpenedAt: heartbeatRuns.continuityCircuitOpenedAt,
+        continuityCircuitAlertedAt: heartbeatRuns.continuityCircuitAlertedAt,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId))
+      .orderBy(heartbeatRuns.createdAt);
+
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({
+      workOutcome: "no_progress",
+      noProgressStreak: 1,
+      continuityCircuitState: "closed",
+    });
+    expect(runs[1]).toMatchObject({
+      workOutcome: "no_progress",
+      noProgressStreak: 2,
+      continuityCircuitState: "open",
+    });
+    expect(runs[0]?.stateFingerprintBefore).toMatch(/^[a-f0-9]{32}$/);
+    expect(runs[0]?.stateFingerprintAfter).toBe(runs[0]?.stateFingerprintBefore);
+    expect(runs[1]?.stateFingerprintBefore).toBe(runs[0]?.stateFingerprintAfter);
+    expect(runs[1]?.stateFingerprintAfter).toBe(runs[1]?.stateFingerprintBefore);
+    expect(runs[1]?.continuityCircuitOpenedAt).toBeInstanceOf(Date);
+    expect(runs[1]?.continuityCircuitAlertedAt).toBeInstanceOf(Date);
+    const alertCount = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issueId),
+          eq(activityLog.action, "issue.continuity_circuit_opened"),
+        ),
+      )
+      .then((rows) => rows[0]?.count ?? 0);
+    expect(alertCount).toBe(1);
+
+    expect(await assignmentWake(agentId, issueId)).toBeNull();
+    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_circuit_open");
+  });
 
   it("skips event-free re-wakes after consecutive no-progress runs and admits them again on new input", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
@@ -245,6 +312,107 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
     const admittedWake = await assignmentWake(agentId, issueId);
     expect(admittedWake).not.toBeNull();
+  });
+
+  it("keeps an open unchanged-fingerprint circuit blocked after cooldown expiry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const fingerprint = await loadIssueTaskStateFingerprint({ db, companyId, issueId });
+    expect(fingerprint).toMatch(/^[a-f0-9]{32}$/);
+
+    await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 600,
+      workOutcome: "no_progress",
+      stateFingerprintBefore: fingerprint!,
+      stateFingerprintAfter: fingerprint!,
+      noProgressStreak: 1,
+    });
+    await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 300,
+      workOutcome: "no_progress",
+      stateFingerprintBefore: fingerprint!,
+      stateFingerprintAfter: fingerprint!,
+      noProgressStreak: 2,
+      continuityCircuitState: "open",
+      continuityCircuitOpenedAt: new Date(Date.now() - 300_000),
+    });
+
+    const wake = await assignmentWake(agentId, issueId);
+
+    expect(wake).toBeNull();
+    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_circuit_open");
+  });
+
+  it("closes an open circuit after a verified material fingerprint change", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const fingerprint = await loadIssueTaskStateFingerprint({ db, companyId, issueId });
+    expect(fingerprint).toMatch(/^[a-f0-9]{32}$/);
+
+    await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 300,
+      workOutcome: "no_progress",
+      stateFingerprintBefore: fingerprint!,
+      stateFingerprintAfter: fingerprint!,
+      noProgressStreak: 2,
+      continuityCircuitState: "open",
+      continuityCircuitOpenedAt: new Date(Date.now() - 300_000),
+    });
+    await db
+      .update(issues)
+      .set({ title: "Materially revised mission" })
+      .where(eq(issues.id, issueId));
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+  });
+
+  it("does not close an open circuit for activity without a verified fingerprint change", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const fingerprint = await loadIssueTaskStateFingerprint({ db, companyId, issueId });
+    expect(fingerprint).toMatch(/^[a-f0-9]{32}$/);
+
+    await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 600,
+      workOutcome: "no_progress",
+      stateFingerprintBefore: fingerprint!,
+      stateFingerprintAfter: fingerprint!,
+      noProgressStreak: 1,
+    });
+    await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 300,
+      workOutcome: "no_progress",
+      stateFingerprintBefore: fingerprint!,
+      stateFingerprintAfter: fingerprint!,
+      noProgressStreak: 2,
+      continuityCircuitState: "open",
+      continuityCircuitOpenedAt: new Date(Date.now() - 300_000),
+    });
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "board-user",
+      action: "issue.comment_added",
+      entityType: "issue",
+      entityId: issueId,
+    });
+
+    const wake = await assignmentWake(agentId, issueId);
+
+    expect(wake).toBeNull();
+    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_circuit_open");
   });
 
   it("does not throttle system comment-driven wakes even during a no-progress streak", async () => {

@@ -139,16 +139,26 @@ export interface IssueRewakeThrottleInput {
   runIdsWithIssueProgress: ReadonlySet<string>;
   /** New issue input landed after the newest run finished. */
   hasNewIssueInputSinceLastRun: boolean;
+  /** Durable circuit state persisted by the newest run for this task fingerprint. */
+  isCircuitOpen?: boolean;
+  /** Verified comparison of current task state with the newest persisted fingerprint. */
+  stateFingerprintChanged?: boolean;
 }
 
 export type IssueRewakeThrottleDecision =
   | { blocked: false; noProgressStreak: number }
   | {
       blocked: true;
+      blockKind: "cooldown";
       noProgressStreak: number;
       cooldownMs: number;
       lastRunFinishedAt: Date;
       nextAllowedAt: Date;
+    }
+  | {
+      blocked: true;
+      blockKind: "circuit_open";
+      noProgressStreak: number;
     };
 
 export function computeIssueRewakeCooldownMs(noProgressStreak: number): number {
@@ -160,8 +170,12 @@ export function computeIssueRewakeCooldownMs(noProgressStreak: number): number {
 
 export function evaluateIssueRewakeThrottle(input: IssueRewakeThrottleInput): IssueRewakeThrottleDecision {
   const runs = input.recentTerminalRuns;
-  if (runs.length === 0) return { blocked: false, noProgressStreak: 0 };
-  if (input.hasNewIssueInputSinceLastRun) return { blocked: false, noProgressStreak: 0 };
+  if (input.stateFingerprintChanged === true) {
+    return { blocked: false, noProgressStreak: 0 };
+  }
+  if (runs.length === 0 && !input.isCircuitOpen) {
+    return { blocked: false, noProgressStreak: 0 };
+  }
 
   let noProgressStreak = 0;
   for (const run of runs) {
@@ -170,6 +184,17 @@ export function evaluateIssueRewakeThrottle(input: IssueRewakeThrottleInput): Is
     if (run.status !== "succeeded" || !run.finishedAt) break;
     if (input.runIdsWithIssueProgress.has(run.id)) break;
     noProgressStreak += 1;
+  }
+
+  if (input.isCircuitOpen) {
+    return { blocked: true, blockKind: "circuit_open", noProgressStreak };
+  }
+
+  if (
+    input.stateFingerprintChanged === undefined &&
+    input.hasNewIssueInputSinceLastRun
+  ) {
+    return { blocked: false, noProgressStreak: 0 };
   }
 
   if (noProgressStreak < ISSUE_REWAKE_NO_PROGRESS_THRESHOLD) {
@@ -182,7 +207,14 @@ export function evaluateIssueRewakeThrottle(input: IssueRewakeThrottleInput): Is
   const cooldownMs = computeIssueRewakeCooldownMs(noProgressStreak);
   const nextAllowedAt = new Date(lastRunFinishedAt.getTime() + cooldownMs);
   if (input.now.getTime() < nextAllowedAt.getTime()) {
-    return { blocked: true, noProgressStreak, cooldownMs, lastRunFinishedAt, nextAllowedAt };
+    return {
+      blocked: true,
+      blockKind: "cooldown",
+      noProgressStreak,
+      cooldownMs,
+      lastRunFinishedAt,
+      nextAllowedAt,
+    };
   }
   return { blocked: false, noProgressStreak };
 }
