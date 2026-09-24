@@ -115,6 +115,16 @@ export interface AdapterExecutionResult {
    * provider-reported `costUsd` as the cache-adjusted billed amount.
    */
   cacheAdjustedCostUsd?: number | null;
+  /** Complete run-scoped evidence required to release a budget reservation. */
+  budgetTelemetry?: {
+    providerRequestId: string;
+    requestCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    runtimeMs: number;
+    costMicrousd: number;
+    rateCardVersion?: string | null;
+  } | null;
   resultJson?: Record<string, unknown> | null;
   runtimeServices?: AdapterRuntimeServiceReport[];
   /**

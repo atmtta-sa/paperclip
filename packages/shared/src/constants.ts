@@ -872,16 +872,35 @@ export const FINANCE_UNITS = [
 ] as const;
 export type FinanceUnit = (typeof FINANCE_UNITS)[number];
 
-export const BUDGET_SCOPE_TYPES = ["company", "agent", "project"] as const;
+export const BUDGET_SCOPE_TYPES = ["company", "agent", "project", "task"] as const;
 export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 
-export const BUDGET_METRICS = ["billed_cents"] as const;
+export const BUDGET_METRICS = [
+  "billed_cents",
+  "billed_microusd",
+  "request_count",
+  "input_tokens",
+  "output_tokens",
+  "runtime_ms",
+] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 
-export const BUDGET_WINDOW_KINDS = ["calendar_month_utc", "lifetime"] as const;
+export const BUDGET_WINDOW_KINDS = [
+  "per_run",
+  "calendar_day_utc",
+  "calendar_month_utc",
+  "lifetime",
+] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
 
-export const BUDGET_THRESHOLD_TYPES = ["soft", "hard"] as const;
+export const BUDGET_THRESHOLD_TYPES = [
+  "soft",
+  "hard",
+  "50_percent",
+  "75_percent",
+  "90_percent",
+  "100_percent",
+] as const;
 export type BudgetThresholdType = (typeof BUDGET_THRESHOLD_TYPES)[number];
 
 export const BUDGET_INCIDENT_STATUSES = ["open", "resolved", "dismissed"] as const;

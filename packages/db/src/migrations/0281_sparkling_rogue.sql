@@ -1,0 +1,2 @@
+ALTER TABLE "autonomous_budget_reservations" ADD COLUMN "provider_request_id" text;--> statement-breakpoint
+ALTER TABLE "autonomous_budget_reservations" ADD COLUMN "provider_activity_occurred" boolean DEFAULT false NOT NULL;

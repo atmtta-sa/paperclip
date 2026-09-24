@@ -25,6 +25,11 @@ import {
 } from "./adapter-execution-control.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
+import {
+  dispatchWithAutonomousBudgetReservation,
+  isAutonomousBudgetAdmissionError,
+} from "./autonomous-budget-dispatch.js";
+import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import {
@@ -12520,6 +12525,7 @@ export function heartbeatService(
   async function issueContinuityTerminalPatch(
     run: typeof heartbeatRuns.$inferSelect,
     status: string,
+    forcedOutcome?: "telemetry_missing" | "budget_exhausted",
   ): Promise<Partial<typeof heartbeatRuns.$inferInsert>> {
     if (!isHeartbeatRunTerminalStatus(status)) return {};
     const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
@@ -12565,6 +12571,7 @@ export function heartbeatService(
       previousNoProgressStreak,
       authorizedHumanResume:
         parseObject(run.contextSnapshot).authorizedHumanResume === true,
+      forcedOutcome,
     });
 
     return {
@@ -12648,7 +12655,14 @@ export function heartbeatService(
     ) {
       patch = {
         ...patch,
-        ...(await issueContinuityTerminalPatch(previousStatus, status)),
+        ...(await issueContinuityTerminalPatch(
+          previousStatus,
+          status,
+          patch?.workOutcome === "telemetry_missing" ||
+            patch?.workOutcome === "budget_exhausted"
+            ? patch.workOutcome
+            : undefined,
+        )),
       };
     }
 
@@ -12744,7 +12758,14 @@ export function heartbeatService(
     ) {
       patch = {
         ...patch,
-        ...(await issueContinuityTerminalPatch(previousStatus, status)),
+        ...(await issueContinuityTerminalPatch(
+          previousStatus,
+          status,
+          patch?.workOutcome === "telemetry_missing" ||
+            patch?.workOutcome === "budget_exhausted"
+            ? patch.workOutcome
+            : undefined,
+        )),
       };
     }
 
@@ -23633,8 +23654,23 @@ export function heartbeatService(
               }
             }
             try {
+              if (!issueId) {
+                throw new Error("autonomous_budget_task_scope_missing");
+              }
               const guardedDispatch =
-                await dispatchResolvedInteractionContinuationWithAtomicGate(
+                await dispatchWithAutonomousBudgetReservation(
+                  db,
+                  {
+                    companyId: agent.companyId,
+                    agentId: agent.id,
+                    issueId,
+                    runId: run.id,
+                    provider:
+                      readNonEmptyString(runtimeConfig.provider) ??
+                      agent.adapterType,
+                    model: readNonEmptyString(configuredModel),
+                  },
+                  () => dispatchResolvedInteractionContinuationWithAtomicGate(
                   (markDispatchStarted) =>
                     executePaperclipNativeSession({
                       db,
@@ -23743,6 +23779,7 @@ export function heartbeatService(
                         await persistRunProcessMetadata(run.id, meta);
                       },
                     }),
+                ),
                 );
               if (!guardedDispatch.dispatched) return;
               nativeDispatchStarted = true;
@@ -23832,8 +23869,23 @@ export function heartbeatService(
             if (managedMcpConfig) {
               adapterContext.paperclipManagedMcp = managedMcpConfig;
             }
+            if (!issueId) {
+              throw new Error("autonomous_budget_task_scope_missing");
+            }
             const guardedDispatch =
-              await dispatchResolvedInteractionContinuationWithAtomicGate(
+              await dispatchWithAutonomousBudgetReservation(
+                db,
+                {
+                  companyId: agent.companyId,
+                  agentId: agent.id,
+                  issueId,
+                  runId: run.id,
+                  provider:
+                    readNonEmptyString(runtimeConfig.provider) ??
+                    agent.adapterType,
+                  model: readNonEmptyString(runtimeConfig.model),
+                },
+                () => dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
                   legacyAdapterEntered = true;
                   return adapter.execute({
@@ -23891,6 +23943,7 @@ export function heartbeatService(
                     authToken: authToken ?? undefined,
                   });
                 },
+              ),
               );
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
@@ -24233,8 +24286,31 @@ export function heartbeatService(
           usageBasis: adapterResult.usageBasis ?? null,
         });
         const normalizedUsage = sessionUsageResolution.normalizedUsage;
-        const runErrorMessage =
-          outcome === "cancelled"
+        const budgetTelemetry = adapterResult.budgetTelemetry ?? null;
+        const budgetReconciliation = await reconcileAutonomousBudget(db, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          issueId: issueId!,
+          runId: run.id,
+          providerActivityOccurred: nativeDispatchStarted || legacyAdapterEntered,
+          providerRequestId: budgetTelemetry?.providerRequestId ?? null,
+          actual: budgetTelemetry
+            ? {
+                requestCount: budgetTelemetry.requestCount,
+                inputTokens: budgetTelemetry.inputTokens,
+                outputTokens: budgetTelemetry.outputTokens,
+                runtimeMs: budgetTelemetry.runtimeMs,
+                costMicrousd: budgetTelemetry.costMicrousd,
+              }
+            : null,
+          rateCardVersion: budgetTelemetry?.rateCardVersion ?? null,
+        });
+        const telemetryMissing =
+          budgetReconciliation.status === "retained_missing_telemetry";
+        if (telemetryMissing) outcome = "failed";
+        const runErrorMessage = telemetryMissing
+          ? "Provider activity missing required usage telemetry"
+          : outcome === "cancelled"
             ? (latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled")
             : outcome === "succeeded"
               ? null
@@ -24245,8 +24321,9 @@ export function heartbeatService(
                 );
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(latestRun?.errorCode);
-        const runErrorCode =
-          outcome === "timed_out"
+        const runErrorCode = telemetryMissing
+          ? "telemetry_missing"
+          : outcome === "timed_out"
             ? "timeout"
             : outcome === "cancelled"
               ? (latestRun?.errorCode ?? "cancelled")
@@ -24380,6 +24457,7 @@ export function heartbeatService(
           signal: adapterResult.signal,
           usageJson,
           resultJson: persistedResultJson,
+          ...(telemetryMissing ? { workOutcome: "telemetry_missing" } : {}),
           sessionIdAfter:
             nextSessionState.displayId ?? nextSessionState.legacySessionId,
           stdoutExcerpt,
@@ -24923,6 +25001,9 @@ export function heartbeatService(
         )
           ? err
           : null;
+        const budgetAdmissionFailure = isAutonomousBudgetAdmissionError(err)
+          ? err
+          : null;
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(
             (await getRun(run.id).catch(() => null))?.errorCode,
@@ -24949,6 +25030,7 @@ export function heartbeatService(
           })
           .catch(() => null);
         const failureErrorCode =
+          (budgetAdmissionFailure ? "budget_exhausted" : null) ??
           workspaceValidationFailure?.code ??
           configurationIncompleteFailure?.code ??
           nonRetryablePreflightFailureCode(err) ??
@@ -24989,6 +25071,9 @@ export function heartbeatService(
         const failedRunWrite = await setRunStatusIfRunning(run.id, failureOutcome, {
           error: message,
           errorCode: stopSnapshot?.errorCode ?? failureErrorCode,
+          ...(budgetAdmissionFailure
+            ? { workOutcome: "budget_exhausted" as const }
+            : {}),
           finishedAt: new Date(),
           resultJson: mergeRunStopMetadataForAgent(agent, failureOutcome, {
             errorCode: failureErrorCode,
@@ -24998,7 +25083,9 @@ export function heartbeatService(
               ...(workspaceValidationFailure?.resultJson ??
                 configurationIncompleteFailure?.resultJson ??
                 {}),
-              ...(!legacyAdapterEntered && run.runtimeMode !== "native"
+              ...(!budgetAdmissionFailure &&
+              !legacyAdapterEntered &&
+              run.runtimeMode !== "native"
                 ? {
                     executionRecovery: {
                       kind: "bootstrap",
@@ -25067,16 +25154,19 @@ export function heartbeatService(
           ) {
             await finalizeIssueCommentPolicy(livenessRun, agent);
           }
-          await scheduleInteractionContinuationInfrastructureRetryIfEligible(
-            livenessRun,
-            agent,
-          );
+          if (!budgetAdmissionFailure) {
+            await scheduleInteractionContinuationInfrastructureRetryIfEligible(
+              livenessRun,
+              agent,
+            );
+          }
           await releaseIssueExecutionAndPromote(livenessRun, {
             // Native recovery owns the original heartbeat run through
             // exhaustion. Once its durable coordinator has classified a
             // terminal failure, generic issue recovery must not create a
             // replacement retryOfRunId chain for the same provider work.
-            suppressImmediateRecovery: nativeTerminalFailureCode !== null,
+            suppressImmediateRecovery:
+              nativeTerminalFailureCode !== null || budgetAdmissionFailure !== null,
           });
           await handleIssueReviewPathDisposition(livenessRun);
 

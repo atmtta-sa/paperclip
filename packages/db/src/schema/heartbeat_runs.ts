@@ -95,6 +95,8 @@ export const heartbeatRuns = pgTable(
       | "blocked"
       | "no_progress"
       | "provider_error"
+      | "telemetry_missing"
+      | "budget_exhausted"
       | "cancelled"
     >(),
     stateFingerprintBefore: text("state_fingerprint_before"),

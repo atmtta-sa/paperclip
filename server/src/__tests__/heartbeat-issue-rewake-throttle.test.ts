@@ -6,6 +6,9 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   agents,
+  autonomousBudgetReservations,
+  budgetIncidents,
+  budgetPolicies,
   companies,
   companySkills,
   createDb,
@@ -35,6 +38,15 @@ const mockAdapterExecute = vi.hoisted(() =>
     summary: "Issue rewake throttle test run.",
     provider: "test",
     model: "test-model",
+    budgetTelemetry: {
+      providerRequestId: randomUUID(),
+      requestCount: 1,
+      inputTokens: 10,
+      outputTokens: 5,
+      runtimeMs: 100,
+      costMicrousd: 1,
+      rateCardVersion: "test-v1",
+    },
   })),
 );
 
@@ -91,6 +103,9 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         await db.delete(issues);
         await db.delete(heartbeatRunEvents);
         await db.delete(activityLog);
+        await db.delete(autonomousBudgetReservations);
+        await db.delete(budgetIncidents);
+        await db.delete(budgetPolicies);
         await db.delete(heartbeatRuns);
         await db.delete(agentWakeupRequests);
         await db.delete(agentRuntimeState);
@@ -148,6 +163,14 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       assigneeAgentId: agentId,
       responsibleUserId: "responsible-user",
     });
+    await db.insert(budgetPolicies).values([
+      { companyId, scopeType: "task", scopeId: issueId, metric: "billed_microusd", windowKind: "lifetime", amount: 10_000_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "request_count", windowKind: "per_run", amount: 8 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "input_tokens", windowKind: "per_run", amount: 64_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "output_tokens", windowKind: "per_run", amount: 8_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "runtime_ms", windowKind: "per_run", amount: 300_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "billed_microusd", windowKind: "per_run", amount: 250_000 },
+    ]);
 
     return { companyId, agentId, issueId };
   }
@@ -272,6 +295,43 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
     expect(await assignmentWake(agentId, issueId)).toBeNull();
     expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_circuit_open");
+  });
+
+  it("records budget exhaustion and opens the circuit without adapter execution", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db
+      .update(budgetPolicies)
+      .set({ amount: 0 })
+      .where(
+        and(
+          eq(budgetPolicies.companyId, companyId),
+          eq(budgetPolicies.scopeId, issueId),
+          eq(budgetPolicies.metric, "billed_microusd"),
+          eq(budgetPolicies.windowKind, "lifetime"),
+        ),
+      );
+    mockAdapterExecute.mockClear();
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const run = await db
+      .select({
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        workOutcome: heartbeatRuns.workOutcome,
+        continuityCircuitState: heartbeatRuns.continuityCircuitState,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId))
+      .then((rows) => rows[0]);
+    expect(run).toMatchObject({
+      status: "failed",
+      errorCode: "budget_exhausted",
+      workOutcome: "budget_exhausted",
+      continuityCircuitState: "open",
+    });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
   });
 
   it("skips event-free re-wakes after consecutive no-progress runs and admits them again on new input", async () => {

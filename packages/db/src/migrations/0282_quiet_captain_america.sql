@@ -1,0 +1,2 @@
+ALTER TABLE "autonomous_budget_reservations" ADD COLUMN "reserved_cost_microusd" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "autonomous_budget_reservations" ADD COLUMN "actual_cost_microusd" bigint;

@@ -70,6 +70,26 @@ describe("issue continuity state", () => {
     });
   });
 
+  it.each(["telemetry_missing", "budget_exhausted"] as const)(
+    "opens the circuit immediately for %s",
+    (forcedOutcome) => {
+      expect(
+        transitionIssueContinuityState({
+          terminalStatus: "failed",
+          fingerprintBefore: "same",
+          fingerprintAfter: "same",
+          previousNoProgressStreak: 0,
+          forcedOutcome,
+        }),
+      ).toEqual({
+        workOutcome: forcedOutcome,
+        noProgressStreak: 1,
+        circuitState: "open",
+        openedNow: true,
+      });
+    },
+  );
+
   it("resets an open circuit when an authorized human explicitly resumes", () => {
     expect(
       transitionIssueContinuityState({

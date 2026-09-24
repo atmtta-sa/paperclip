@@ -1,3 +1,4 @@
+import type { BudgetMetric, BudgetScopeType, BudgetWindowKind } from "@paperclipai/shared";
 import { boolean, index, integer, pgTable, text, timestamp, uuid, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
@@ -6,10 +7,10 @@ export const budgetPolicies = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
-    scopeType: text("scope_type").notNull(),
+    scopeType: text("scope_type").$type<BudgetScopeType>().notNull(),
     scopeId: uuid("scope_id").notNull(),
-    metric: text("metric").notNull().default("billed_cents"),
-    windowKind: text("window_kind").notNull(),
+    metric: text("metric").$type<BudgetMetric>().notNull().default("billed_cents"),
+    windowKind: text("window_kind").$type<BudgetWindowKind>().notNull(),
     amount: integer("amount").notNull().default(0),
     warnPercent: integer("warn_percent").notNull().default(80),
     hardStopEnabled: boolean("hard_stop_enabled").notNull().default(true),

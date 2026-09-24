@@ -118,6 +118,8 @@ export type IssueContinuityWorkOutcome =
   | "blocked"
   | "no_progress"
   | "provider_error"
+  | "telemetry_missing"
+  | "budget_exhausted"
   | "cancelled";
 
 export function transitionIssueContinuityState(input: {
@@ -126,12 +128,21 @@ export function transitionIssueContinuityState(input: {
   fingerprintAfter: string;
   previousNoProgressStreak: number;
   authorizedHumanResume?: boolean;
+  forcedOutcome?: "telemetry_missing" | "budget_exhausted";
 }): {
   workOutcome: IssueContinuityWorkOutcome;
   noProgressStreak: number;
   circuitState: "closed" | "open";
   openedNow: boolean;
 } {
+  if (input.forcedOutcome) {
+    return {
+      workOutcome: input.forcedOutcome,
+      noProgressStreak: input.previousNoProgressStreak + 1,
+      circuitState: "open",
+      openedNow: true,
+    };
+  }
   if (input.terminalStatus === "cancelled") {
     return {
       workOutcome: "cancelled",
