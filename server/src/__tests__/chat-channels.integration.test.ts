@@ -22983,6 +22983,71 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(wakeup).toHaveBeenCalledTimes(1);
   });
 
+  it("replaces a legacy visible Slack conversation with a hidden container", async () => {
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, service } = await configuredSlackEndpoint(fixture, {
+      allowUnlinkedPeople: true,
+    });
+    const root = makeThread({
+      channelId: "C-LEGACY-VISIBLE-CONVERSATION",
+      id: "slack:C-LEGACY-VISIBLE-CONVERSATION:3206.1",
+      name: "legacy-visible-conversation",
+    });
+
+    await deliverMessage({
+      callbacks,
+      endpointId: endpoint.id,
+      thread: root.thread,
+      message: makeMessage({
+        id: "3206.1",
+        text: "@maya first status request",
+        mentioned: true,
+        userId: `U-LEGACY-${randomUUID()}`,
+      }),
+      trigger: "mention",
+    });
+
+    const [legacyConversation] = await service.listConversations(endpoint.id);
+    expect(legacyConversation).toBeDefined();
+    await db
+      .update(issues)
+      .set({ hiddenAt: null })
+      .where(eq(issues.id, legacyConversation!.issueId));
+
+    await deliverMessage({
+      callbacks,
+      endpointId: endpoint.id,
+      thread: root.thread,
+      message: makeMessage({
+        id: "3206.2",
+        text: "@maya second status request",
+        mentioned: true,
+        userId: `U-LEGACY-${randomUUID()}`,
+      }),
+      trigger: "mention",
+    });
+
+    const conversations = await service.listConversations(endpoint.id);
+    expect(conversations).toHaveLength(2);
+    const replacement = conversations.find(
+      (conversation) => conversation.issueId !== legacyConversation!.issueId,
+    );
+    expect(replacement).toBeDefined();
+    await expect(
+      db
+        .select({ hiddenAt: issues.hiddenAt })
+        .from(issues)
+        .where(eq(issues.id, replacement!.issueId))
+        .then((rows) => rows[0]),
+    ).resolves.toMatchObject({ hiddenAt: expect.any(Date) });
+    await expect(
+      db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(eq(issueComments.issueId, legacyConversation!.issueId)),
+    ).resolves.toEqual([{ body: "@maya first status request" }]);
+  });
+
   it("suppresses a queued provider reply when destination reach is revoked before transport", async () => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, runtime, service } =

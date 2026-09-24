@@ -15351,6 +15351,19 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               )
               .then((rows) => rows[0] ?? null)
           : null;
+      const legacyVisibleSlackConversation =
+        endpoint.provider === "slack" &&
+        existingConversation !== null &&
+        existingIssue !== null &&
+        existingIssue.hiddenAt === null;
+      if (legacyVisibleSlackConversation) {
+        await db
+          .update(chatConversations)
+          .set({ state: "completed", updatedAt: new Date() })
+          .where(eq(chatConversations.id, existingConversation!.id));
+        existingConversation = null;
+        existingIssue = null;
+      }
       if (
         isLinear &&
         existingConversation &&
@@ -15822,9 +15835,10 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       ) => {
         let conversation = existingConversation;
         if (!conversation) {
-          const sessionGeneration = isLinear
-            ? (latestConversation?.sessionGeneration ?? 0) + 1
-            : 1;
+          const sessionGeneration =
+            isLinear || legacyVisibleSlackConversation
+              ? (latestConversation?.sessionGeneration ?? 0) + 1
+              : 1;
           const issue = await issuesSvc.create(
             endpoint.companyId,
             {
