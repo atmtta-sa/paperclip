@@ -33,6 +33,24 @@ function stringEnv(value: unknown): Record<string, string> {
   );
 }
 
+function formatProbeFailure(
+  probe: { exitCode: number | null; stdout: string; stderr: string },
+  env: Record<string, string>,
+): string {
+  let detail = `${probe.stderr}\n${probe.stdout}`.trim();
+  for (const value of Object.values(env)) {
+    if (value) detail = detail.split(value).join("[REDACTED]");
+  }
+  detail = detail
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+  const exit = probe.exitCode === null ? "unknown exit" : `exit ${probe.exitCode}`;
+  return detail ? `Hermes probe ${exit}: ${detail}` : `Hermes probe ${exit} with no output.`;
+}
+
 async function runHelloProbe(
   ctx: AdapterEnvironmentTestContext,
   config: Record<string, unknown>,
@@ -43,6 +61,7 @@ async function runHelloProbe(
   const provider = asString(config.provider)?.trim();
   if (model) args.push("--model", model);
   if (provider) args.push("--provider", provider);
+  const env = { ...stringEnv(process.env), ...stringEnv(config.env) };
 
   const probe = await runAdapterExecutionTargetProcess(
     `hermes-environment-test-${Date.now()}`,
@@ -51,7 +70,7 @@ async function runHelloProbe(
     args,
     {
       cwd: asString(config.cwd) ?? process.cwd(),
-      env: { ...stringEnv(process.env), ...stringEnv(config.env) },
+      env,
       timeoutSec: 90,
       graceSec: 5,
       onLog: async () => {},
@@ -69,7 +88,9 @@ async function runHelloProbe(
     code: probe.timedOut ? "hermes_hello_probe_timed_out" : "hermes_hello_probe_failed",
     level: "error",
     message: probe.timedOut ? "Hermes provider hello probe timed out." : "Hermes provider hello probe failed.",
-    hint: "Verify the selected provider account, model, and Hermes CLI configuration, then retry.",
+    hint: probe.timedOut
+      ? "Verify the selected provider account, model, and Hermes CLI configuration, then retry."
+      : formatProbeFailure(probe, env),
   };
 }
 
