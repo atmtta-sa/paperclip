@@ -1968,6 +1968,13 @@ type IssueSubtreeDiagnosticsActivityResultRow =
 export type IssueDependencyReadiness = {
   issueId: string;
   blockerIssueIds: string[];
+  blockerStates: Array<{
+    blockerIssueId: string;
+    blockerKind: string;
+    requiredEvidenceVersion: string;
+    resolutionState: "unresolved" | "resolved";
+    evidenceRevision: number;
+  }>;
   unresolvedBlockerIssueIds: string[];
   unresolvedBlockerCount: number;
   /** Blockers whose status is `done` but whose execution workspace has not yet finalized. */
@@ -2268,6 +2275,7 @@ function createIssueDependencyReadiness(
   return {
     issueId,
     blockerIssueIds: [],
+    blockerStates: [],
     unresolvedBlockerIssueIds: [],
     unresolvedBlockerCount: 0,
     pendingFinalizeBlockerIssueIds: [],
@@ -2544,6 +2552,10 @@ async function listIssueDependencyReadinessMap(
     .select({
       issueId: issueRelations.relatedIssueId,
       blockerIssueId: issueRelations.issueId,
+      blockerKind: issueRelations.blockerKind,
+      requiredEvidenceVersion: issueRelations.requiredEvidenceVersion,
+      resolutionState: issueRelations.resolutionState,
+      evidenceRevision: issueRelations.evidenceRevision,
       blockerStatus: issues.status,
       blockerExecutionWorkspaceId: issues.executionWorkspaceId,
     })
@@ -2584,6 +2596,13 @@ async function listIssueDependencyReadinessMap(
       readinessMap.get(row.issueId) ??
       createIssueDependencyReadiness(row.issueId);
     current.blockerIssueIds.push(row.blockerIssueId);
+    current.blockerStates.push({
+      blockerIssueId: row.blockerIssueId,
+      blockerKind: row.blockerKind,
+      requiredEvidenceVersion: row.requiredEvidenceVersion,
+      resolutionState: row.resolutionState,
+      evidenceRevision: row.evidenceRevision,
+    });
     // Only done blockers resolve dependents; cancelled blockers stay unresolved
     // until an operator removes or replaces the blocker relationship explicitly.
     if (row.blockerStatus !== "done") {
@@ -9021,6 +9040,7 @@ export function issueService(db: Db) {
           id: candidate.id,
           assigneeAgentId: candidate.assigneeAgentId!,
           blockerIssueIds: readiness.blockerIssueIds,
+          blockerStates: readiness.blockerStates,
           blockedTransitionAt: candidate.blockedTransitionAt,
         }));
     },

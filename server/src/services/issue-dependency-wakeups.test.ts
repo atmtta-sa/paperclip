@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
+  buildIssueBlockerStateFingerprint,
   buildIssueBlockersResolvedWakeIdempotencyKey,
   buildIssueBlockersResolvedWakeStateKey,
   buildIssueBlockersResolvedWakeStateKeyWithoutCycle,
@@ -52,7 +53,7 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
     expect(first).toContain(dependentIssueId);
   });
 
-  it("changes when blockedTransitionAt changes", () => {
+  it("does not change when only blockedTransitionAt changes", () => {
     const first = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId,
       blockerIssueIds: [blockerIssueId],
@@ -63,10 +64,10 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
       blockerIssueIds: [blockerIssueId],
       blockedTransitionAt: secondCycle,
     });
-    expect(first).not.toBe(second);
+    expect(first).toBe(second);
   });
 
-  it("hashes a null cycle as none and differs from any timestamp", () => {
+  it("ignores a null, omitted, or dated blocked cycle", () => {
     const noneKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId,
       blockerIssueIds: [blockerIssueId],
@@ -82,13 +83,38 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
       blockedTransitionAt: firstCycle,
     });
     expect(noneKey).toBe(omittedKey);
-    expect(noneKey).not.toBe(datedKey);
-    expect(noneKey).not.toBe(
+    expect(noneKey).toBe(datedKey);
+    expect(noneKey).toBe(
       buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
         dependentIssueId,
         blockerIssueIds: [blockerIssueId],
       }),
     );
+  });
+
+  it("canonicalizes blocker order and changes for a durable evidence revision", () => {
+    const blockerA = {
+      blockerIssueId,
+      blockerKind: "issue_dependency",
+      requiredEvidenceVersion: "issue_done_v1",
+      resolutionState: "resolved" as const,
+      evidenceRevision: 3,
+    };
+    const blockerB = {
+      ...blockerA,
+      blockerIssueId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      evidenceRevision: 7,
+    };
+
+    const first = buildIssueBlockerStateFingerprint([blockerB, blockerA]);
+    const reordered = buildIssueBlockerStateFingerprint([blockerA, blockerB]);
+    const revised = buildIssueBlockerStateFingerprint([
+      blockerA,
+      { ...blockerB, evidenceRevision: 8 },
+    ]);
+
+    expect(first).toBe(reordered);
+    expect(first).not.toBe(revised);
   });
 });
 
@@ -116,7 +142,7 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
     expect(existing?.id).toBe("wake-cycle");
   });
 
-  it("does not let a completed old-key wake from a previous blocked cycle suppress", async () => {
+  it("suppresses a completed wake when only the blocked cycle changed", async () => {
     const oldKey = buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
       dependentIssueId,
       blockerIssueIds: [blockerIssueId],
@@ -132,7 +158,7 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
       ]),
       readyState,
     );
-    expect(existing).toBeNull();
+    expect(existing?.id).toBe("wake-old-previous-cycle");
   });
 
   it("suppresses a completed old-key wake requested at or after blockedTransitionAt", async () => {

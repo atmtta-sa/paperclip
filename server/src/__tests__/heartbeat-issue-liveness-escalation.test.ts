@@ -447,6 +447,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
         status: agentWakeupRequests.status,
         reason: agentWakeupRequests.reason,
         idempotencyKey: agentWakeupRequests.idempotencyKey,
+        blockerStateFingerprint: agentWakeupRequests.blockerStateFingerprint,
       })
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.agentId, agentId))
@@ -454,11 +455,9 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .then((rows) => rows[0] ?? null);
 
     expect(wake?.reason).toBe("issue_blockers_resolved");
-    expect(wake?.idempotencyKey).toBe(
-      buildIssueBlockersResolvedWakeStateKey({
-        dependentIssueId: blockedIssueId,
-        blockerIssueIds: [blockerIssueId],
-      }),
+    expect(wake?.blockerStateFingerprint).toMatch(/^[a-f0-9]{32}$/);
+    expect(wake?.idempotencyKey).toMatch(
+      new RegExp(`${wake?.blockerStateFingerprint}$`),
     );
     expect(["queued", "claimed", "completed"]).toContain(wake?.status);
 
@@ -487,6 +486,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
         status: agentWakeupRequests.status,
         reason: agentWakeupRequests.reason,
         idempotencyKey: agentWakeupRequests.idempotencyKey,
+        blockerStateFingerprint: agentWakeupRequests.blockerStateFingerprint,
       })
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.agentId, agentId))
@@ -494,11 +494,9 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .then((rows) => rows[0] ?? null);
 
     expect(wake?.reason).toBe("issue_blockers_resolved");
-    expect(wake?.idempotencyKey).toBe(
-      buildIssueBlockersResolvedWakeStateKey({
-        dependentIssueId: blockedIssueId,
-        blockerIssueIds: [blockerIssueId],
-      }),
+    expect(wake?.blockerStateFingerprint).toMatch(/^[a-f0-9]{32}$/);
+    expect(wake?.idempotencyKey).toMatch(
+      new RegExp(`${wake?.blockerStateFingerprint}$`),
     );
     expect(["queued", "claimed", "completed"]).toContain(wake?.status);
 
@@ -508,6 +506,89 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "issue.blockers_resolved_wake_emitted")));
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ entityId: blockedIssueId });
+  });
+
+  it("admits no unchanged blocker wakes and exactly one revised-evidence wake", async () => {
+    const { companyId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const heartbeat = heartbeatService(db);
+
+    expect((await heartbeat.reconcileResolvedDependencyWakes()).healed).toBe(1);
+    await heartbeat.drainActiveRunExecutions();
+    await issueService(db).update(blockedIssueId, { status: "blocked" });
+    const baselineRuns = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      await db
+        .update(issues)
+        .set({ blockedTransitionAt: new Date(Date.now() + attempt * 1_000) })
+        .where(eq(issues.id, blockedIssueId));
+      expect((await heartbeat.reconcileResolvedDependencyWakes()).healed).toBe(0);
+    }
+
+    const unchangedRuns = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(unchangedRuns).toHaveLength(baselineRuns.length);
+
+    await issueService(db).update(blockerIssueId, { status: "todo" });
+    await issueService(db).update(blockerIssueId, { status: "done" });
+    await issueService(db).update(blockedIssueId, { status: "blocked" });
+    const revisedEvidenceResult = await heartbeat.reconcileResolvedDependencyWakes();
+    expect(revisedEvidenceResult.healed).toBe(1);
+
+    const wakes = await db
+      .select({ fingerprint: agentWakeupRequests.blockerStateFingerprint })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+      ));
+    expect(wakes).toHaveLength(2);
+    expect(new Set(wakes.map((wake) => wake.fingerprint)).size).toBe(2);
+  });
+
+  it("rejects a stale blocker fingerprint before creating a run", async () => {
+    const { companyId, agentId, blockedIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const staleFingerprint = "0".repeat(32);
+
+    const run = await heartbeatService(db).wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: { issueId: blockedIssueId },
+      contextSnapshot: { issueId: blockedIssueId },
+      idempotencyKey:
+        `issue_blockers_resolved:state:${blockedIssueId}:1:${staleFingerprint}`,
+      blockerStateFingerprint: staleFingerprint,
+      requestedByActorType: "system",
+      requestedByActorId: "stale-fingerprint-regression",
+    });
+
+    expect(run).toBeNull();
+    expect(
+      await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)),
+    ).toHaveLength(0);
+    const receipts = await db
+      .select({
+        reason: agentWakeupRequests.reason,
+        status: agentWakeupRequests.status,
+        fingerprint: agentWakeupRequests.blockerStateFingerprint,
+      })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(receipts).toEqual([
+      {
+        reason: "blocker_state_stale_or_unverified",
+        status: "skipped",
+        fingerprint: staleFingerprint,
+      },
+    ]);
   });
 
   it("reconciles a resolved blocked dependency after the assignee-null window closes", async () => {
@@ -534,18 +615,17 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .select({
         reason: agentWakeupRequests.reason,
         idempotencyKey: agentWakeupRequests.idempotencyKey,
+        blockerStateFingerprint: agentWakeupRequests.blockerStateFingerprint,
       })
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.agentId, agentId))
       .orderBy(agentWakeupRequests.requestedAt)
       .then((rows) => rows[0] ?? null);
-    expect(wake).toMatchObject({
-      reason: "issue_blockers_resolved",
-      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
-        dependentIssueId: blockedIssueId,
-        blockerIssueIds: [blockerIssueId],
-      }),
-    });
+    expect(wake?.reason).toBe("issue_blockers_resolved");
+    expect(wake?.blockerStateFingerprint).toMatch(/^[a-f0-9]{32}$/);
+    expect(wake?.idempotencyKey).toMatch(
+      new RegExp(`${wake?.blockerStateFingerprint}$`),
+    );
   });
 
   async function seedExecutionWait(status: "active" | "resolved" = "resolved") {
@@ -653,12 +733,14 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
   it("retries a resolved dependency wake when the prior wake was skipped as stale", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const readiness = await issueService(db).getDependencyReadiness(blockedIssueId);
     // The route-time wake writes the level-triggered state key. A skip records a
     // `skipped` row with that key. `skipped` is not an in-flight status, so the
     // backstop must still re-emit for the same ready state.
     const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId: blockedIssueId,
       blockerIssueIds: [blockerIssueId],
+      blockerStates: readiness.blockerStates,
     });
     await db.insert(agentWakeupRequests).values({
       companyId,
@@ -732,18 +814,17 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .select({
         reason: agentWakeupRequests.reason,
         idempotencyKey: agentWakeupRequests.idempotencyKey,
+        blockerStateFingerprint: agentWakeupRequests.blockerStateFingerprint,
       })
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.agentId, agentId))
       .orderBy(agentWakeupRequests.requestedAt)
       .then((rows) => rows[0] ?? null);
-    expect(wake).toMatchObject({
-      reason: "issue_blockers_resolved",
-      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
-        dependentIssueId: blockedIssueId,
-        blockerIssueIds: [blockerIssueId],
-      }),
-    });
+    expect(wake?.reason).toBe("issue_blockers_resolved");
+    expect(wake?.blockerStateFingerprint).toMatch(/^[a-f0-9]{32}$/);
+    expect(wake?.idempotencyKey).toMatch(
+      new RegExp(`${wake?.blockerStateFingerprint}$`),
+    );
   });
 
   it("does not duplicate an existing dependency wake keyed to any resolved blocker", async () => {
@@ -855,6 +936,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     const stateKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId: blockedIssueId,
       blockerIssueIds: readiness.blockerIssueIds,
+      blockerStates: readiness.blockerStates,
     });
     const healedWake = await db
       .select({ status: agentWakeupRequests.status, idempotencyKey: agentWakeupRequests.idempotencyKey })

@@ -99,6 +99,7 @@ import {
 } from "../issue-execution-policy.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  buildIssueBlockerStateFingerprint,
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../issue-dependency-wakeups.js";
@@ -181,6 +182,7 @@ type RecoveryWakeupOptions = {
   reason?: string | null;
   payload?: Record<string, unknown> | null;
   idempotencyKey?: string | null;
+  blockerStateFingerprint?: string | null;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
@@ -5342,9 +5344,13 @@ export function recoveryService(
         // wake for an earlier partial resolution has a different key, so it does
         // not suppress this wake. The shared helper still suppresses a duplicate
         // wake for the SAME ready state, which bounds reconciliation.
+        const blockerStateFingerprint = buildIssueBlockerStateFingerprint(
+          readiness.blockerStates,
+        );
         const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
+          blockerStates: readiness.blockerStates,
           blockedTransitionAt: candidate.blockedTransitionAt,
         });
         const existingWake =
@@ -5352,6 +5358,7 @@ export function recoveryService(
             companyId,
             dependentIssueId: candidate.id,
             blockerIssueIds: readiness.blockerIssueIds,
+            blockerStates: readiness.blockerStates,
             blockedTransitionAt: candidate.blockedTransitionAt,
           });
         if (existingWake) {
@@ -5396,6 +5403,7 @@ export function recoveryService(
               backstop: payloadBackstop,
             },
             idempotencyKey,
+            blockerStateFingerprint,
             requestedByActorType: "system",
             requestedByActorId,
             contextSnapshot: {

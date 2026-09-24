@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
@@ -4198,6 +4198,78 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
 
     expect(blockerRelations.blocks.map((relation) => relation.id)).toEqual([blockedId]);
     expect(blockedRelations.blockedBy.map((relation) => relation.id)).toEqual([blockerId]);
+  });
+
+  it("revises durable blocker evidence only when resolution changes", async () => {
+    const companyId = randomUUID();
+    const blockerId = randomUUID();
+    const blockedId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Blocker", status: "todo", priority: "high" },
+      { id: blockedId, companyId, title: "Blocked", status: "blocked", priority: "medium" },
+    ]);
+    await svc.update(blockedId, { blockedByIssueIds: [blockerId] });
+
+    const readEvidence = () => db
+      .select({
+        state: issueRelations.resolutionState,
+        revision: issueRelations.evidenceRevision,
+        evidence: issueRelations.resolutionEvidence,
+      })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.issueId, blockerId),
+        eq(issueRelations.relatedIssueId, blockedId),
+      ))
+      .then((rows) => rows[0]);
+
+    await expect(readEvidence()).resolves.toMatchObject({
+      state: "unresolved",
+      revision: 0,
+      evidence: null,
+    });
+
+    await svc.update(blockerId, { title: "Renamed blocker" });
+    await expect(readEvidence()).resolves.toMatchObject({
+      state: "unresolved",
+      revision: 0,
+      evidence: null,
+    });
+
+    await svc.update(blockerId, { status: "done" });
+    await expect(readEvidence()).resolves.toMatchObject({
+      state: "resolved",
+      revision: 1,
+      evidence: expect.objectContaining({ blockerIssueId: blockerId, status: "done" }),
+    });
+
+    await svc.update(blockerId, { title: "Still resolved" });
+    await expect(readEvidence()).resolves.toMatchObject({ state: "resolved", revision: 1 });
+
+    await svc.update(blockerId, { status: "todo" });
+    await expect(readEvidence()).resolves.toMatchObject({
+      state: "unresolved",
+      revision: 2,
+      evidence: null,
+    });
+
+    await svc.update(blockerId, { status: "done" });
+    await expect(readEvidence()).resolves.toMatchObject({ state: "resolved", revision: 3 });
+    await expect(svc.getDependencyReadiness(blockedId)).resolves.toMatchObject({
+      blockerStates: [{
+        blockerIssueId: blockerId,
+        blockerKind: "issue_dependency",
+        requiredEvidenceVersion: "issue_done_v1",
+        resolutionState: "resolved",
+        evidenceRevision: 3,
+      }],
+    });
   });
 
   it("returns blocked-by summaries on newly created issues", async () => {

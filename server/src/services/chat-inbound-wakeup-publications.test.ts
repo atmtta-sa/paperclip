@@ -60,6 +60,7 @@ function fixture() {
     requestedByActorType: "user",
     requestedByActorId: "owner",
     idempotencyKey: trusted.idempotencyKey,
+    blockerStateFingerprint: null,
     coalescedCount: 0,
     requestedAt: new Date(),
     claimedAt: null,

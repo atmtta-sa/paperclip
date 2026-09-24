@@ -257,6 +257,7 @@ import {
 } from "../services/onboarding-first-task-assets.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  buildIssueBlockerStateFingerprint,
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../services/issue-dependency-wakeups.js";
@@ -14336,13 +14337,18 @@ export function issueRoutes(
           dependentIssueId: string;
           resolvedBlockerIssueId: string;
           blockerIssueIds: string[];
+          blockerStates: Parameters<typeof buildIssueBlockerStateFingerprint>[0];
           blockedTransitionAt?: Date | string | null;
           source: string;
           mutation: string;
         }) => {
+          const blockerStateFingerprint = buildIssueBlockerStateFingerprint(
+            input.blockerStates,
+          );
           const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: input.dependentIssueId,
             blockerIssueIds: input.blockerIssueIds,
+            blockerStates: input.blockerStates,
             blockedTransitionAt: input.blockedTransitionAt,
           });
           try {
@@ -14351,6 +14357,7 @@ export function issueRoutes(
                 companyId: issue.companyId,
                 dependentIssueId: input.dependentIssueId,
                 blockerIssueIds: input.blockerIssueIds,
+                blockerStates: input.blockerStates,
                 blockedTransitionAt: input.blockedTransitionAt,
               });
             if (existingWake) return;
@@ -14371,6 +14378,7 @@ export function issueRoutes(
               mutation: input.mutation,
             },
             idempotencyKey,
+            blockerStateFingerprint,
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
@@ -14580,6 +14588,7 @@ export function issueRoutes(
               dependentIssueId: dependent.id,
               resolvedBlockerIssueId: issue.id,
               blockerIssueIds: dependent.blockerIssueIds,
+              blockerStates: dependent.blockerStates,
               blockedTransitionAt: dependent.blockedTransitionAt,
               source: "issue.blockers_resolved",
               mutation: "blocker_done",
@@ -14611,6 +14620,7 @@ export function issueRoutes(
               dependentIssueId: issue.id,
               resolvedBlockerIssueId,
               blockerIssueIds: readiness.blockerIssueIds,
+              blockerStates: readiness.blockerStates,
               blockedTransitionAt: issue.blockedTransitionAt,
               source: "issue.blockers_restored",
               mutation: "blocked_dependency_restored",
@@ -17775,11 +17785,16 @@ export function issueRoutes(
           dependentIssueId: string;
           resolvedBlockerIssueId: string;
           blockerIssueIds: string[];
+          blockerStates: Parameters<typeof buildIssueBlockerStateFingerprint>[0];
           blockedTransitionAt?: Date | string | null;
         }) => {
+          const blockerStateFingerprint = buildIssueBlockerStateFingerprint(
+            input.blockerStates,
+          );
           const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: input.dependentIssueId,
             blockerIssueIds: input.blockerIssueIds,
+            blockerStates: input.blockerStates,
             blockedTransitionAt: input.blockedTransitionAt,
           });
           try {
@@ -17788,6 +17803,7 @@ export function issueRoutes(
                 companyId: currentIssue.companyId,
                 dependentIssueId: input.dependentIssueId,
                 blockerIssueIds: input.blockerIssueIds,
+                blockerStates: input.blockerStates,
                 blockedTransitionAt: input.blockedTransitionAt,
               });
             if (existingWake) return;
@@ -17808,6 +17824,7 @@ export function issueRoutes(
               mutation: "comment",
             },
             idempotencyKey,
+            blockerStateFingerprint,
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
@@ -17986,6 +18003,7 @@ export function issueRoutes(
               dependentIssueId: dependent.id,
               resolvedBlockerIssueId: currentIssue.id,
               blockerIssueIds: dependent.blockerIssueIds,
+              blockerStates: dependent.blockerStates,
               blockedTransitionAt: dependent.blockedTransitionAt,
             });
           }

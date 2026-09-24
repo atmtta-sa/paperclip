@@ -18,6 +18,14 @@ vi.setConfig({ testTimeout: 30000 });
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
+const resolvedBlockerStates = (blockerIssueIds: string[]) =>
+  blockerIssueIds.map((blockerIssueId) => ({
+    blockerIssueId,
+    blockerKind: "issue_dependency",
+    requiredEvidenceVersion: "issue_done_v1",
+    resolutionState: "resolved" as const,
+    evidenceRevision: 1,
+  }));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
   getById: vi.fn(),
@@ -173,6 +181,7 @@ describe("issue dependency wakeups in issue routes", () => {
     mockIssueService.getDependencyReadiness.mockResolvedValue({
       issueId: "issue-1",
       blockerIssueIds: [],
+      blockerStates: [],
       unresolvedBlockerIssueIds: [],
       unresolvedBlockerCount: 0,
       pendingFinalizeBlockerIssueIds: [],
@@ -223,6 +232,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: "issue-2",
         assigneeAgentId: "agent-2",
         blockerIssueIds: ["issue-1", "issue-3"],
+        blockerStates: resolvedBlockerStates(["issue-1", "issue-3"]),
       },
     ]);
 
@@ -282,6 +292,7 @@ describe("issue dependency wakeups in issue routes", () => {
     mockIssueService.getDependencyReadiness.mockResolvedValue({
       issueId: parentIssueId,
       blockerIssueIds: [childIssueId],
+      blockerStates: resolvedBlockerStates([childIssueId]),
       unresolvedBlockerIssueIds: [],
       unresolvedBlockerCount: 0,
       pendingFinalizeBlockerIssueIds: [],
@@ -449,6 +460,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: releaseIssueId,
         assigneeAgentId: "agent-release",
         blockerIssueIds: [reviewIssueId],
+        blockerStates: resolvedBlockerStates([reviewIssueId]),
         blockedTransitionAt: releaseBlockedAt,
       },
     ]);
@@ -473,6 +485,7 @@ describe("issue dependency wakeups in issue routes", () => {
           idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: releaseIssueId,
             blockerIssueIds: [reviewIssueId],
+            blockerStates: resolvedBlockerStates([reviewIssueId]),
             blockedTransitionAt: releaseBlockedAt,
           }),
           payload: expect.objectContaining({
@@ -504,6 +517,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: "22222222-2222-4222-8222-222222222222",
         assigneeAgentId: "agent-release",
         blockerIssueIds: [reviewIssueId],
+        blockerStates: resolvedBlockerStates([reviewIssueId]),
         blockedTransitionAt: new Date("2026-08-01T15:00:00.000Z"),
       },
     ]);
@@ -540,6 +554,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: releaseIssueId,
         assigneeAgentId: "agent-release",
         blockerIssueIds: [reviewIssueId],
+        blockerStates: resolvedBlockerStates([reviewIssueId]),
         blockedTransitionAt: releaseBlockedAt,
       },
     ]);
@@ -555,6 +570,7 @@ describe("issue dependency wakeups in issue routes", () => {
         idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: releaseIssueId,
           blockerIssueIds: [reviewIssueId],
+          blockerStates: resolvedBlockerStates([reviewIssueId]),
           blockedTransitionAt: releaseBlockedAt,
         }),
       }),
@@ -582,6 +598,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: qaIssueId,
         assigneeAgentId: "agent-qa",
         blockerIssueIds: [releaseIssueId],
+        blockerStates: resolvedBlockerStates([releaseIssueId]),
         blockedTransitionAt: qaBlockedAt,
       },
     ]);
@@ -600,6 +617,7 @@ describe("issue dependency wakeups in issue routes", () => {
         idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: qaIssueId,
           blockerIssueIds: [releaseIssueId],
+          blockerStates: resolvedBlockerStates([releaseIssueId]),
           blockedTransitionAt: qaBlockedAt,
         }),
       }),
@@ -629,6 +647,7 @@ describe("issue dependency wakeups in issue routes", () => {
     mockIssueService.getDependencyReadiness.mockResolvedValue({
       issueId: parentIssueId,
       blockerIssueIds: [childIssueId],
+      blockerStates: resolvedBlockerStates([childIssueId]),
       unresolvedBlockerIssueIds: [],
       unresolvedBlockerCount: 0,
       pendingFinalizeBlockerIssueIds: [],
@@ -661,6 +680,7 @@ describe("issue dependency wakeups in issue routes", () => {
           idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: parentIssueId,
             blockerIssueIds: [childIssueId],
+            blockerStates: resolvedBlockerStates([childIssueId]),
             blockedTransitionAt,
           }),
           payload: expect.objectContaining({

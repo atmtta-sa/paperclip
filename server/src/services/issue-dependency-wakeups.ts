@@ -35,7 +35,16 @@ export type IssueBlockersResolvedWakeCycleInput = Date | string | null | undefin
 export type IssueBlockersResolvedReadyStateInput = {
   dependentIssueId: string;
   blockerIssueIds: string[];
+  blockerStates?: IssueBlockerEvidenceState[];
   blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+};
+
+export type IssueBlockerEvidenceState = {
+  blockerIssueId: string;
+  blockerKind: string;
+  requiredEvidenceVersion: string;
+  resolutionState: "unresolved" | "resolved";
+  evidenceRevision: number;
 };
 
 /**
@@ -58,11 +67,35 @@ function uniqueSortedBlockerIssueIds(blockerIssueIds: string[]): string[] {
   return [...new Set(blockerIssueIds.filter(Boolean))].sort();
 }
 
-function hashBlockerReadyStateDigest(sortedBlockerIssueIds: string[], cycle: string | null): string {
-  const payload = cycle == null
-    ? sortedBlockerIssueIds.join(",")
-    : `${sortedBlockerIssueIds.join(",")}\n${cycle}`;
+export function buildIssueBlockerStateFingerprint(
+  blockerStates: IssueBlockerEvidenceState[],
+): string {
+  const payload = [...blockerStates]
+    .filter((state) => state.blockerIssueId)
+    .sort((left, right) => left.blockerIssueId.localeCompare(right.blockerIssueId))
+    .map((state) => [
+      state.blockerIssueId,
+      state.blockerKind,
+      state.requiredEvidenceVersion,
+      state.resolutionState,
+      String(state.evidenceRevision),
+    ].join("\u001f"))
+    .join("\n");
   return createHash("sha256").update(payload).digest("hex").slice(0, 32);
+}
+
+function blockerStatesForReadyState(
+  blockerIssueIds: string[],
+  blockerStates?: IssueBlockerEvidenceState[],
+): IssueBlockerEvidenceState[] {
+  if (blockerStates) return blockerStates;
+  return uniqueSortedBlockerIssueIds(blockerIssueIds).map((blockerIssueId) => ({
+    blockerIssueId,
+    blockerKind: "issue_dependency",
+    requiredEvidenceVersion: "legacy_issue_done_v0",
+    resolutionState: "resolved",
+    evidenceRevision: 0,
+  }));
 }
 
 function buildStateKey(dependentIssueId: string, digest: string, blockerCount: number): string {
@@ -104,7 +137,9 @@ export function buildIssueBlockersResolvedWakeStateKeyWithoutCycle(input: {
   const sortedBlockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
   return buildStateKey(
     input.dependentIssueId,
-    hashBlockerReadyStateDigest(sortedBlockerIssueIds, null),
+    buildIssueBlockerStateFingerprint(
+      blockerStatesForReadyState(sortedBlockerIssueIds),
+    ),
     sortedBlockerIssueIds.length,
   );
 }
@@ -120,10 +155,11 @@ export function buildIssueBlockersResolvedWakeStateKeyWithoutCycle(input: {
  */
 export function buildIssueBlockersResolvedWakeStateKey(input: IssueBlockersResolvedReadyStateInput) {
   const sortedBlockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
-  const cycle = formatIssueBlockersResolvedWakeCycle(input.blockedTransitionAt);
   return buildStateKey(
     input.dependentIssueId,
-    hashBlockerReadyStateDigest(sortedBlockerIssueIds, cycle),
+    buildIssueBlockerStateFingerprint(
+      blockerStatesForReadyState(sortedBlockerIssueIds, input.blockerStates),
+    ),
     sortedBlockerIssueIds.length,
   );
 }
@@ -192,6 +228,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     companyId: string;
     dependentIssueId: string;
     blockerIssueIds: string[];
+    blockerStates?: IssueBlockerEvidenceState[];
     blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
   },
 ) {

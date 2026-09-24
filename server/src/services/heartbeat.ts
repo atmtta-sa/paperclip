@@ -388,7 +388,10 @@ import {
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
+import {
+  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  buildIssueBlockerStateFingerprint,
+} from "./issue-dependency-wakeups.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -3519,6 +3522,7 @@ interface WakeupOptions {
   reason?: string | null;
   payload?: Record<string, unknown> | null;
   idempotencyKey?: string | null;
+  blockerStateFingerprint?: string | null;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
@@ -25569,9 +25573,12 @@ export function heartbeatService(
     if (durableRequest?.failedRunRetry) {
       opts = { ...opts, allowRunCoalescing: false };
     }
-    const durableReceiptFields = durableRequest
-      ? { id: durableRequest.id, requestedAt: durableRequest.requestedAt }
-      : {};
+    const durableReceiptFields = {
+      ...(durableRequest
+        ? { id: durableRequest.id, requestedAt: durableRequest.requestedAt }
+        : {}),
+      blockerStateFingerprint: opts.blockerStateFingerprint ?? null,
+    };
     const existingDurableReceipt = async (queryDb: Db) => {
       if (!durableRequest) return null;
       const receipt = await queryDb
@@ -27017,6 +27024,95 @@ export function heartbeatService(
           // Server-side recovery retries insert runs directly and never reach
           // this gate.
           if (
+            reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON &&
+            opts.blockerStateFingerprint
+          ) {
+            const currentBlockerStates = await tx
+              .select({
+                blockerIssueId: issueRelations.issueId,
+                blockerKind: issueRelations.blockerKind,
+                requiredEvidenceVersion: issueRelations.requiredEvidenceVersion,
+                resolutionState: issueRelations.resolutionState,
+                evidenceRevision: issueRelations.evidenceRevision,
+                resolutionEvidence: issueRelations.resolutionEvidence,
+              })
+              .from(issueRelations)
+              .where(
+                and(
+                  eq(issueRelations.companyId, agent.companyId),
+                  eq(issueRelations.relatedIssueId, issue.id),
+                  eq(issueRelations.type, "blocks"),
+                ),
+              )
+              .for("share");
+            const hasVerifiedResolutionEvidence =
+              currentBlockerStates.length > 0 &&
+              currentBlockerStates.every(
+                (state) =>
+                  state.resolutionState === "resolved" &&
+                  state.resolutionEvidence !== null,
+              );
+            const currentBlockerStateFingerprint =
+              hasVerifiedResolutionEvidence
+                ? buildIssueBlockerStateFingerprint(currentBlockerStates)
+                : null;
+
+            if (
+              currentBlockerStateFingerprint !== opts.blockerStateFingerprint
+            ) {
+              const now = new Date();
+              await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields,
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason: "blocker_state_stale_or_unverified",
+                payload: {
+                  ...(payload ?? {}),
+                  issueId,
+                  heartbeatSkip: {
+                    reason: "blocker_state_stale_or_unverified",
+                    requestedReason: reason,
+                  },
+                },
+                status: "skipped",
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+                blockerStateFingerprint: opts.blockerStateFingerprint,
+                finishedAt: now,
+              });
+              return { kind: "skipped" as const };
+            }
+          }
+
+          const latestBlockerFingerprint =
+            reason === "issue_blockers_resolved" && opts.blockerStateFingerprint
+              ? await tx
+                  .select({
+                    fingerprint: agentWakeupRequests.blockerStateFingerprint,
+                  })
+                  .from(agentWakeupRequests)
+                  .where(
+                    and(
+                      eq(agentWakeupRequests.companyId, agent.companyId),
+                      eq(agentWakeupRequests.agentId, agentId),
+                      eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+                      isNotNull(agentWakeupRequests.blockerStateFingerprint),
+                      sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                    ),
+                  )
+                  .orderBy(desc(agentWakeupRequests.requestedAt))
+                  .limit(1)
+              : [];
+          const hasRevisedBlockerEvidence =
+            latestBlockerFingerprint.length > 0 &&
+            latestBlockerFingerprint[0]?.fingerprint !==
+              opts.blockerStateFingerprint;
+
+          if (
+            !hasRevisedBlockerEvidence &&
             isThrottleCandidateIssueRewake({
               reason,
               wakeCommentId: wakeCommentId ?? null,
@@ -27502,6 +27598,7 @@ export function heartbeatService(
           requestedByActorType: opts.requestedByActorType ?? null,
           requestedByActorId: opts.requestedByActorId ?? null,
           idempotencyKey: opts.idempotencyKey ?? null,
+          blockerStateFingerprint: opts.blockerStateFingerprint ?? null,
           finishedAt: now,
         });
         if (source === "timer") {
@@ -27530,6 +27627,7 @@ export function heartbeatService(
           requestedByActorType: opts.requestedByActorType ?? null,
           requestedByActorId: opts.requestedByActorId ?? null,
           idempotencyKey: opts.idempotencyKey ?? null,
+          blockerStateFingerprint: opts.blockerStateFingerprint ?? null,
         })
         .returning()
         .then((rows) => rows[0]);

@@ -31,6 +31,7 @@ export const agentWakeupRequests = pgTable(
     requestedByActorType: text("requested_by_actor_type"),
     requestedByActorId: text("requested_by_actor_id"),
     idempotencyKey: text("idempotency_key"),
+    blockerStateFingerprint: text("blocker_state_fingerprint"),
     runId: uuid("run_id"),
     requestedAt: timestamp("requested_at", { withTimezone: true })
       .notNull()
