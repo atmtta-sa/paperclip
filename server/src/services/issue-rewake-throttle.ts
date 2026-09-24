@@ -41,15 +41,21 @@ export const ISSUE_REWAKE_RUN_SAMPLE_LIMIT = 8;
 
 /**
  * Wake reasons that assert issue state rather than deliver a new event.
- * These (plus reason-less on-demand invokes) are the only wakes the throttle
- * applies to; every event-shaped reason (comments, mentions, blockers
- * resolved, interactions, approvals, monitors, reviews, …) passes through.
+ * These (plus reason-less on-demand invokes) enter no-progress evaluation.
+ * Automated lifecycle events are included because their labels do not prove
+ * that durable task state changed. Human input and authorized resumes are
+ * exempted separately by `isThrottleCandidateIssueRewake`.
  */
 export const THROTTLED_ISSUE_REWAKE_REASONS: ReadonlySet<string> = new Set([
   "issue_assigned",
   "issue_continuation_needed",
   "issue_assignment_recovery",
   "issue_graph_liveness_backstop",
+  "issue_blockers_resolved",
+  "issue_children_completed",
+  "issue_monitor_due",
+  "process_lost_retry",
+  "run_liveness_continuation",
 ]);
 
 /**
