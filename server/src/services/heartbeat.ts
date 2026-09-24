@@ -25693,12 +25693,23 @@ export function heartbeatService(
 
     if (!company || company.status !== "active") {
       const companyStatus = company?.status ?? "missing";
+      const autonomousExecutionPaused = companyStatus === "paused";
+      const skipReason = autonomousExecutionPaused
+        ? "autonomous_execution_paused"
+        : "company.inactive";
+      const error = autonomousExecutionPaused
+        ? "Autonomous execution is paused for this company"
+        : `Wake suppressed because company status is ${companyStatus}`;
       if (opts.requestedByActorType === "user") {
-        throw conflict("Company is not active", { status: companyStatus });
+        throw conflict(error, {
+          status: companyStatus,
+          ...(autonomousExecutionPaused ? { reason: skipReason } : {}),
+        });
       }
-      await writeSkippedRequest("company.inactive", {
-        error: `Wake suppressed because company status is ${companyStatus}`,
-      }, { companyStatus });
+      await writeSkippedRequest(skipReason, { error }, {
+        companyStatus,
+        ...(autonomousExecutionPaused ? { reason: skipReason } : {}),
+      });
       return null;
     }
 

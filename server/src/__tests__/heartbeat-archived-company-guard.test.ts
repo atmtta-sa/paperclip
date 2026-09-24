@@ -79,6 +79,41 @@ describeEmbeddedPostgres("heartbeat archived-company guard", () => {
     return { companyId, agentId };
   }
 
+  async function insertPausedCompanyAgent() {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Emergency Paused Co",
+      status: "paused",
+      pauseReason: "continuity_safety",
+      pausedAt: new Date("2026-06-04T00:00:00Z"),
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Paused Company Agent",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {
+        heartbeat: {
+          enabled: true,
+          intervalSec: 60,
+          wakeOnDemand: true,
+        },
+      },
+      permissions: {},
+    });
+
+    return { companyId, agentId };
+  }
+
   async function insertInvalidOrgChainAgent() {
     const companyId = randomUUID();
     const managerId = randomUUID();
@@ -182,6 +217,66 @@ describeEmbeddedPostgres("heartbeat archived-company guard", () => {
       reason: "company.inactive",
       error: "Wake suppressed because company status is archived",
     });
+  });
+
+  it("records the emergency kill switch reason for every autonomous wake source", async () => {
+    const { agentId } = await insertPausedCompanyAgent();
+    const heartbeat = heartbeatService(db);
+
+    const autonomousWakes = [
+      { source: "timer", triggerDetail: "system" },
+      { source: "automation", triggerDetail: "system" },
+      { source: "on_demand", triggerDetail: "system" },
+    ] as const;
+
+    for (const wake of autonomousWakes) {
+      const run = await heartbeat.wakeup(agentId, {
+        ...wake,
+        reason: "issue_continuation_needed",
+        requestedByActorType: "system",
+        requestedByActorId: "continuity-controller",
+      });
+      expect(run).toBeNull();
+    }
+
+    const wakeups = await db
+      .select({
+        status: agentWakeupRequests.status,
+        reason: agentWakeupRequests.reason,
+        error: agentWakeupRequests.error,
+      })
+      .from(agentWakeupRequests);
+
+    expect(wakeups).toHaveLength(autonomousWakes.length);
+    expect(wakeups).toEqual(
+      expect.arrayContaining(
+        autonomousWakes.map(() => ({
+          status: "skipped",
+          reason: "autonomous_execution_paused",
+          error: "Autonomous execution is paused for this company",
+        })),
+      ),
+    );
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(0);
+  });
+
+  it("rejects explicit user execution while the emergency kill switch is active", async () => {
+    const { agentId } = await insertPausedCompanyAgent();
+    const heartbeat = heartbeatService(db);
+
+    await expect(
+      heartbeat.wakeup(agentId, {
+        source: "on_demand",
+        triggerDetail: "manual",
+        requestedByActorType: "user",
+        requestedByActorId: "board-user",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      details: { status: "paused", reason: "autonomous_execution_paused" },
+    });
+
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(0);
   });
 
   it("does not advance issue monitors for archived companies", async () => {
