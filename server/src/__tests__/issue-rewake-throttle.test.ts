@@ -69,17 +69,15 @@ describe("isThrottleCandidateIssueRewake", () => {
     })).toBe(true);
   });
 
-  it("passes event-shaped wake reasons through", () => {
+  it("keeps automated lifecycle events throttle-eligible", () => {
     for (const reason of [
-      "issue_commented",
-      "issue_comment_mentioned",
       "issue_blockers_resolved",
       "issue_children_completed",
       "issue_monitor_due",
       "process_lost_retry",
       "run_liveness_continuation",
     ]) {
-      expect(isThrottleCandidateIssueRewake({ ...base, reason })).toBe(false);
+      expect(isThrottleCandidateIssueRewake({ ...base, reason })).toBe(true);
     }
   });
 });

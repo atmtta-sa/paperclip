@@ -265,6 +265,28 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(commentWake).not.toBeNull();
   });
 
+  it("does not invoke the adapter for blocker-resolution wakes with no new state", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 40 });
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 10 });
+    const adapterCallsBefore = mockAdapterExecute.mock.calls.length;
+
+    const blockerWake = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: { issueId },
+      contextSnapshot: { issueId, wakeReason: "issue_blockers_resolved" },
+      requestedByActorType: "system",
+      requestedByActorId: "dependency-reconciler",
+    });
+
+    expect(blockerWake).toBeNull();
+    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_throttled");
+    expect(mockAdapterExecute.mock.calls.length).toBe(adapterCallsBefore);
+  });
+
   it("keeps agent comments throttled without hiding genuinely new human input", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 
