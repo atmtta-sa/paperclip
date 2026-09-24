@@ -15840,6 +15840,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               responsibleUserId: taskUserId ?? endpoint.sponsorUserId,
               originKind: "chat_channel",
               originId: `${endpoint.id}:${thread.id}:${sessionGeneration}`,
+              ...(endpoint.provider === "slack" ? { hiddenAt: new Date() } : {}),
               idempotencyKey: `chat:${endpoint.id}:${thread.id}:${sessionGeneration}`,
             },
             taskTx,

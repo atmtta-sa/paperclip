@@ -1107,11 +1107,23 @@ describe("renderPaperclipWakePrompt", () => {
         1,
       );
       expect(prompt).toContain("server-authenticated github chat turn");
-      expect(prompt).toContain("authenticated read-only Paperclip API calls");
+      expect(prompt).toContain("A status-only or informational request is read-only");
       expect(prompt).toContain(
         "current assignments, issue status, blockers, and recent evidence",
       );
-      expect(prompt).toContain("Do not make Paperclip mutations");
+      expect(prompt).toContain(
+        "An explicit authenticated instruction to act may use authorized Paperclip mutations",
+      );
+      expect(prompt).toContain(
+        "Do not create a task unless the user explicitly asks to create one",
+      );
+      expect(prompt).toContain(
+        "Never copy the external-chat transcript into a task description or comment",
+      );
+      expect(prompt).toContain(
+        "read back and verify every mutation before claiming success",
+      );
+      expect(prompt).not.toContain("Do not make Paperclip mutations");
       expect(prompt).not.toContain("Make zero Paperclip API calls");
       expect(prompt).toContain("answer directly");
       expect(prompt).toContain("exactly one semantic completion");
@@ -1216,11 +1228,23 @@ describe("renderPaperclipWakePrompt", () => {
       );
       expect(prompt).toContain("until `complete` is true");
       expect(prompt).toContain("exact comments accepted for this run");
-      expect(prompt).toContain("authenticated read-only Paperclip API calls");
+      expect(prompt).toContain("A status-only or informational request is read-only");
       expect(prompt).toContain(
         "current assignments, issue status, blockers, and recent evidence",
       );
-      expect(prompt).toContain("Do not make Paperclip mutations");
+      expect(prompt).toContain(
+        "An explicit authenticated instruction to act may use authorized Paperclip mutations",
+      );
+      expect(prompt).toContain(
+        "Do not create a task unless the user explicitly asks to create one",
+      );
+      expect(prompt).toContain(
+        "Never copy the external-chat transcript into a task description or comment",
+      );
+      expect(prompt).toContain(
+        "read back and verify every mutation before claiming success",
+      );
+      expect(prompt).not.toContain("Do not make Paperclip mutations");
       expect(prompt).not.toContain("Make zero other Paperclip API calls");
       expect(prompt).not.toContain("fetch the API thread");
       expect(prompt).not.toContain("refetching the issue thread");

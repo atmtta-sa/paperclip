@@ -22936,6 +22936,53 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(wakeup).not.toHaveBeenCalled();
   });
 
+  it("keeps ordinary Slack conversations out of operational task surfaces", async () => {
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, service, wakeup } = await configuredSlackEndpoint(
+      fixture,
+      { allowUnlinkedPeople: true },
+    );
+    const root = makeThread({
+      channelId: "C-HIDDEN-CONVERSATION",
+      id: "slack:C-HIDDEN-CONVERSATION:3205.1",
+      name: "hidden-conversation",
+    });
+
+    await deliverMessage({
+      callbacks,
+      endpointId: endpoint.id,
+      thread: root.thread,
+      message: makeMessage({
+        id: "3205.1",
+        text: "@maya what is the current developer status?",
+        mentioned: true,
+        userId: `U-HIDDEN-${randomUUID()}`,
+      }),
+      trigger: "mention",
+    });
+
+    const [conversation] = await service.listConversations(endpoint.id);
+    expect(conversation).toBeDefined();
+    const [container] = await db
+      .select({
+        hiddenAt: issues.hiddenAt,
+        originKind: issues.originKind,
+      })
+      .from(issues)
+      .where(eq(issues.id, conversation!.issueId));
+    expect(container).toMatchObject({
+      hiddenAt: expect.any(Date),
+      originKind: "chat_channel",
+    });
+    await expect(
+      db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(eq(issueComments.issueId, conversation!.issueId)),
+    ).resolves.toEqual([{ body: "@maya what is the current developer status?" }]);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+  });
+
   it("suppresses a queued provider reply when destination reach is revoked before transport", async () => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, runtime, service } =

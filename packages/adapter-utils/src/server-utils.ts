@@ -2289,6 +2289,9 @@ function renderPaperclipWakePromptBody(
     }
   };
 
+  const externalChatControlPlaneContract =
+    "A status-only or informational request is read-only: use only the necessary authenticated GET requests, limited to data this agent is authorized to view, such as current assignments, issue status, blockers, and recent evidence. An explicit authenticated instruction to act may use authorized Paperclip mutations after all normal permission, approval, execution-policy, containment, budget, pause/cancel, and company-boundary checks. Resume, reassign, wake, update, or resolve existing work without creating a new task. Do not create a task unless the user explicitly asks to create one; then create only a clean structured task specification. Never copy the external-chat transcript into a task description or comment. For a `human_only` interaction, submit only the authenticated user's explicit decision with that user's attribution; never approve it as the agent. Use existing event/action correlation to avoid replaying completed mutations, and read back and verify every mutation before claiming success.";
+
   const executionContractLines = externalChatContract
     ? [
         externalChatQuestionResponseTurn
@@ -2303,10 +2306,10 @@ function renderPaperclipWakePromptBody(
         ...(externalChatReaderTurn
           ? [
               "The inline comment batch is incomplete. Before answering, call `read_current_wake_comments` without a cursor, then pass each returned `nextCursor` until `complete` is true. That closed reader exposes only the exact comments accepted for this run. Attachment entries marked `metadata_only` are not readable bytes; state that limitation instead of inferring their contents.",
-              "After the complete read, answer every accepted comment in order. When an accurate answer requires live control-plane state, make only the necessary authenticated read-only Paperclip API calls (GET requests), limited to data this agent is authorized to view, such as current assignments, issue status, blockers, and recent evidence. Do not make Paperclip mutations: do not post progress or completion comments, write task status, check out an issue, or call any non-read operation.",
+              `After the complete read, answer every accepted comment in order. ${externalChatControlPlaneContract}`,
             ]
           : [
-              "For a self-contained text request, answer directly from the supplied task and wake context. When an accurate answer requires live control-plane state, make only the necessary authenticated read-only Paperclip API calls (GET requests), limited to data this agent is authorized to view, such as current assignments, issue status, blockers, and recent evidence. Do not make Paperclip mutations: do not post progress or completion comments, write task status, check out an issue, or call any non-read operation.",
+              `For a self-contained text request, answer directly from the supplied task and wake context. ${externalChatControlPlaneContract}`,
             ]),
         "The harness owns task state and persists your final assistant response. If the runtime offers a semantic completion operation, emit exactly one semantic completion and do not duplicate that response in a Paperclip comment or status update.",
         "The semantic completion summary is the user-visible final answer. Include every requested answer, exact value, description, and any actionable file-access or delivery limitation there; a statement that you read, checked, or prepared something is not a substitute. Private progress commentary is not delivered as the final answer.",

@@ -21,6 +21,15 @@ Contribute only verified, reusable governance knowledge. Include `Contributor: T
 
 Use `viking_remember` only for an eligible contribution. Automatic turn capture and implicit local-memory mirroring are disabled; `viking_forget` and `viking_add_resource` are unavailable. Do not bypass those controls.
 
+## Slack command boundary
+
+- Treat status questions as read-only. Read authoritative Paperclip state and answer in Slack without creating or updating a Paperclip task.
+- Do not create a Paperclip task unless Naz explicitly asks you to create a task. Requests to inspect status, explain a blocker, resume existing work, or resolve an existing interaction are not task-creation requests.
+- Never copy Slack conversation text into task descriptions, comments, or dashboard activity. When Naz explicitly requests a task, create only a clean structured task specification with its scope, owner, acceptance criteria, gates, and stop condition.
+- Use an existing task, interaction, assignment, or wake when Naz directs action on existing work. Record only the minimum native Paperclip execution evidence produced by that action; do not mirror the Slack dialogue.
+- Read each developer's current adapter provider and model configuration before reporting a provider blocker. A historical failed run does not prove the current provider. ORP Developer and Whattsi Developer currently use Kimi K3; if live configuration changes, report the verified live value instead.
+- Do not claim that a Slack-directed action occurred until the resulting Paperclip mutation, wake, or run has been read back and verified.
+
 ## Event-driven supervision
 
 Supervise lifecycle events, not live logs. Act when work is requested, started, stopped, blocked, submitted, failed verification, passed verification, or reaches an approval boundary.
