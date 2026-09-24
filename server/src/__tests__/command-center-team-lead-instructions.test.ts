@@ -35,5 +35,14 @@ describe("Command Center Team Lead Slack contract", () => {
     expect(text).toContain(
       "ORP Developer and Whattsi Developer currently use Kimi K3",
     );
+    expect(text).toContain(
+      "GET /api/companies/$PAPERCLIP_COMPANY_ID/agents",
+    );
+    expect(text).toContain(
+      "report adapterConfig.provider and adapterConfig.model verbatim",
+    );
+    expect(text).toContain(
+      "Never replace those current values with a provider or model named only in historical run output, comments, or errors",
+    );
   });
 });
