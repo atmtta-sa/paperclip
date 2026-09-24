@@ -337,6 +337,40 @@ describe("managed AI connections", () => {
     expect(isAiConnectionCompatible(binding, "paperclip_runner", "same-model", "acpx", "claude")).toBe(true);
     expect(isAiConnectionCompatible(binding, "paperclip_runner", "same-model", "acpx", "codex")).toBe(false);
     expect(isAiConnectionCompatible({ provider: "openrouter", method: "api_key" }, "opencode_local", "anthropic/model")).toBe(false);
+    expect(isAiConnectionCompatible({ provider: "openrouter", method: "api_key" }, "opencode_local", "openrouter/anthropic/model")).toBe(true);
+    expect(isAiConnectionCompatible({ provider: "openrouter", method: "api_key" }, "hermes_local", "moonshotai/kimi-k3")).toBe(true);
+    expect(isAiConnectionCompatible({ provider: "openrouter", method: "api_key" }, "hermes_local", "")).toBe(false);
+  });
+  it("injects a managed OpenRouter API key into Hermes without rewriting its model", async () => {
+    const saved = await service.save(companyId, "alice", {
+      provider: "openrouter",
+      method: "api_key",
+      ownership: "personal",
+      name: "Hermes OpenRouter",
+      apiKey: "fixture-openrouter",
+      allAgents: true,
+      agentIds: [],
+    }, "fixture-openrouter");
+    const runtime = await prepareManagedAiRuntime(db, {
+      ...input,
+      adapterType: "hermes_local",
+      responsibleUserId: "alice",
+      binding: { provider: "openrouter", method: "api_key", mode: "responsible_user" },
+      config: { model: "moonshotai/kimi-k3", provider: "openrouter" },
+    });
+    try {
+      expect(runtime.attribution).toMatchObject({
+        connectionId: saved.connectionId,
+        grantId: saved.grantId,
+        provider: "openrouter",
+        method: "api_key",
+      });
+      expect(runtime.config.model).toBe("moonshotai/kimi-k3");
+      expect(runtime.config.provider).toBe("openrouter");
+      expect((runtime.config.env as Record<string, string>).OPENROUTER_API_KEY).toBe("fixture-openrouter");
+    } finally {
+      await runtime.cleanup();
+    }
   });
   it("does not let a forged delegation bypass human access or accept an expired subscription attempt", async () => {
     const selected = await service.select({ ...input, userId: "alice" });

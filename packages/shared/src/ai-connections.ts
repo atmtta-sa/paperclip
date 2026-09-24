@@ -97,7 +97,10 @@ export const AI_CONNECTION_CAPABILITIES: Record<
   openrouter: {
     name: "OpenRouter",
     methods: {
-      api_key: { adapters: ["opencode_local"], envKey: "OPENROUTER_API_KEY" },
+      api_key: {
+        adapters: ["opencode_local", "hermes_local"],
+        envKey: "OPENROUTER_API_KEY",
+      },
     },
   },
   xai: {
@@ -132,7 +135,10 @@ export function isAiConnectionCompatible(
   return (
     candidates.some((method) => method?.adapters.includes(adapterType)) &&
     (requirement.provider !== "openrouter" ||
-      (typeof model === "string" && model.startsWith("openrouter/")))
+      (typeof model === "string" &&
+        (adapterType === "hermes_local"
+          ? model.trim().length > 0
+          : model.startsWith("openrouter/"))))
   );
 }
 export type AiConnectionUnavailableReason =
