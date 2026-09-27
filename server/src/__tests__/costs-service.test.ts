@@ -66,6 +66,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
 }));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockFetchAllQuotaWindows = vi.hoisted(() => vi.fn());
+const mockAutonomousContinuitySnapshot = vi.hoisted(() => vi.fn());
 const mockCostService = vi.hoisted(() => ({
   createEvent: vi.fn(),
   summary: vi.fn().mockResolvedValue({ spendCents: 0 }),
@@ -126,6 +127,9 @@ function registerModuleMocks() {
   vi.doMock("../services/quota-windows.js", () => ({
     fetchAllQuotaWindows: mockFetchAllQuotaWindows,
   }));
+  vi.doMock("../services/autonomous-continuity-snapshot.js", () => ({
+    autonomousContinuitySnapshot: mockAutonomousContinuitySnapshot,
+  }));
 }
 
 describe("cost routes", () => {
@@ -170,6 +174,7 @@ describe("cost routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAutonomousContinuitySnapshot.mockResolvedValue({ companyId: "company-1", paused: true, totals: { held: 1 }, recent: [] });
     mockAccessService.decide.mockReset();
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
@@ -244,6 +249,29 @@ describe("cost routes", () => {
       estimatedDebitCents: 0,
       eventCount: 0,
     });
+  });
+
+  it("serves continuity ledger evidence only to a board member of the company", async () => {
+    const authorized = createAppWithActor({
+      type: "board", userId: "board-user", source: "session",
+      isInstanceAdmin: false, companyIds: ["company-1"],
+      memberships: [{ companyId: "company-1", status: "active", membershipRole: "admin" }],
+    });
+    const path = "/api/companies/company-1/budgets/autonomous-continuity";
+    const allowed = await request(authorized).get(path);
+    expect(allowed.status).toBe(200);
+    expect(allowed.body).toMatchObject({ companyId: "company-1", totals: { held: 1 } });
+    expect(mockAutonomousContinuitySnapshot).toHaveBeenCalledWith(expect.anything(), "company-1");
+
+    mockAutonomousContinuitySnapshot.mockClear();
+    const outsider = createAppWithActor({
+      type: "board", userId: "outsider", source: "session",
+      isInstanceAdmin: false, companyIds: ["company-2"],
+    });
+    expect((await request(outsider).get(path)).status).toBe(403);
+    const agent = createAppWithActor({ type: "agent", agentId: "agent-1", companyId: "company-1", runId: "run-1" });
+    expect((await request(agent).get(path)).status).toBe(403);
+    expect(mockAutonomousContinuitySnapshot).not.toHaveBeenCalled();
   });
 
   it("returns issue subtree cost summaries for issue refs", async () => {

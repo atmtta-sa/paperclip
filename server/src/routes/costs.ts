@@ -22,6 +22,7 @@ import {
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { fetchAllQuotaWindows } from "../services/quota-windows.js";
+import { autonomousContinuitySnapshot } from "../services/autonomous-continuity-snapshot.js";
 import { badRequest } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
@@ -291,6 +292,18 @@ export function costRoutes(
     if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
     const overview = await budgets.overview(companyId);
     res.json(overview);
+  });
+
+  router.get("/companies/:companyId/budgets/autonomous-continuity", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    const snapshot = await autonomousContinuitySnapshot(db, companyId);
+    if (!snapshot) {
+      res.status(404).json({ error: "Company not found" });
+      return;
+    }
+    res.json(snapshot);
   });
 
   router.post(

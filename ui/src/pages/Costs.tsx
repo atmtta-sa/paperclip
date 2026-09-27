@@ -11,6 +11,7 @@ import type {
 } from "@paperclipai/shared";
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
 import { budgetsApi } from "../api/budgets";
+import { AutonomousContinuityCard } from "../components/AutonomousContinuityCard";
 import { costsApi } from "../api/costs";
 import { BillerSpendCard } from "../components/BillerSpendCard";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
@@ -216,6 +217,13 @@ export function Costs({
     queryKey: queryKeys.budgets.overview(companyId),
     queryFn: () => budgetsApi.overview(companyId),
     enabled: !!selectedCompanyId && customReady,
+    refetchInterval: 30_000,
+    staleTime: 5_000,
+  });
+  const { data: continuityData, isLoading: continuityLoading, error: continuityError } = useQuery({
+    queryKey: ["autonomous-continuity", companyId],
+    queryFn: () => budgetsApi.autonomousContinuity(companyId),
+    enabled: !!selectedCompanyId && mainTab === "budgets",
     refetchInterval: 30_000,
     staleTime: 5_000,
   });
@@ -901,6 +909,12 @@ export function Costs({
                   />
                 </CardContent>
               </Card>
+
+              <AutonomousContinuityCard
+                snapshot={continuityData}
+                loading={continuityLoading}
+                error={Boolean(continuityError)}
+              />
 
               {activeBudgetIncidents.length > 0 ? (
                 <div className="space-y-3">
