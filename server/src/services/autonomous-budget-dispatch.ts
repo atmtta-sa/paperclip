@@ -18,6 +18,14 @@ export class AutonomousBudgetAdmissionError extends Error {
   }
 }
 
+export class AutonomousExecutionPausedError extends Error {
+  readonly reason = "autonomous_execution_paused";
+  constructor() {
+    super("autonomous_execution_paused");
+    this.name = "AutonomousExecutionPausedError";
+  }
+}
+
 export function isAutonomousBudgetAdmissionError(
   error: unknown,
 ): error is AutonomousBudgetAdmissionError {
@@ -35,6 +43,9 @@ export async function dispatchWithAutonomousBudgetReservation<T>(
 ): Promise<T> {
   const reservation = await reserveAutonomousBudget(db, input);
   if (!reservation.admitted) {
+    if (reservation.reason === "autonomous_execution_paused") {
+      throw new AutonomousExecutionPausedError();
+    }
     throw new AutonomousBudgetAdmissionError(reservation.reason, reservation.policyId);
   }
   return dispatch({

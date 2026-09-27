@@ -4,10 +4,13 @@ function usd(microusd: number) {
   return `$${(microusd / 1_000_000).toFixed(4)}`;
 }
 
-export function AutonomousContinuityCard({ snapshot, loading, error }: {
+export function AutonomousContinuityCard({ snapshot, loading, error, onPause, pausing, pauseError }: {
   snapshot?: AutonomousContinuitySnapshot;
   loading: boolean;
   error: boolean;
+  onPause?: () => void;
+  pausing?: boolean;
+  pauseError?: boolean;
 }) {
   return (
     <section aria-label="Autonomous continuity" className="rounded-lg border border-border p-4 space-y-3">
@@ -15,7 +18,13 @@ export function AutonomousContinuityCard({ snapshot, loading, error }: {
       {error ? <p role="alert" className="text-destructive">Continuity ledger unavailable. Do not assume zero usage.</p>
         : loading || !snapshot ? <p>Loading continuity ledger…</p>
         : <>
-          <p>Company execution: {snapshot.paused ? "Paused" : "Active"}. All-time ledger commitments, not verified provider billing or remaining allowance.</p>
+          <p>Effective execution state: {snapshot.paused ? "Paused" : "Active"}. All-time ledger commitments, not verified provider billing or remaining allowance.</p>
+          <p>New autonomous dispatches: {snapshot.autonomousPaused ? "Paused" : "Allowed by pause control"}. Already-running requests are not cancelled.</p>
+          {!snapshot.autonomousPaused && onPause ? <button type="button" onClick={onPause} disabled={pausing}
+            className="rounded border border-destructive px-3 py-1 text-destructive disabled:opacity-50">
+            {pausing ? "Pausing…" : "Pause new autonomous dispatches"}
+          </button> : null}
+          {pauseError ? <p role="alert" className="text-destructive">Pause failed; check the control state before retrying.</p> : null}
           <p>Runs: {snapshot.totals.runs} · Requests: {snapshot.totals.requests} · Input: {snapshot.totals.inputTokens} · Output: {snapshot.totals.outputTokens} · Committed: {usd(snapshot.totals.costMicrousd)}</p>
           {snapshot.totals.missingTelemetry > 0 ? <p role="alert" className="text-destructive">Missing telemetry: {snapshot.totals.missingTelemetry} retained reservations. Automation must remain blocked.</p> : null}
           <p>Held reservations: {snapshot.totals.held}</p>

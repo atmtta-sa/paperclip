@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
   createCostEventSchema,
@@ -23,6 +24,7 @@ import {
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { fetchAllQuotaWindows } from "../services/quota-windows.js";
 import { autonomousContinuitySnapshot } from "../services/autonomous-continuity-snapshot.js";
+import { setAutonomousExecutionPause } from "../services/autonomous-execution-control.js";
 import { badRequest } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
@@ -305,6 +307,24 @@ export function costRoutes(
     }
     res.json(snapshot);
   });
+
+  router.post(
+    "/companies/:companyId/budgets/autonomous-pause",
+    validate(z.object({ paused: z.boolean() }).strict()),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      assertBoard(req);
+      const state = await setAutonomousExecutionPause(db, {
+        companyId, paused: req.body.paused, actorId: req.actor.userId ?? "local-board",
+      });
+      if (!state) {
+        res.status(404).json({ error: "Company not found" });
+        return;
+      }
+      res.json(state);
+    },
+  );
 
   router.post(
     "/companies/:companyId/budgets/policies",

@@ -1,0 +1,1 @@
+ALTER TABLE "companies" ADD COLUMN "autonomous_execution_paused" boolean DEFAULT true NOT NULL;

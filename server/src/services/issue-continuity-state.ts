@@ -132,7 +132,7 @@ export function transitionIssueContinuityState(input: {
   /** An explicit empty Hermes result cannot establish useful work. */
   hasVisibleResponse?: boolean;
   authorizedHumanResume?: boolean;
-  forcedOutcome?: "telemetry_missing" | "budget_exhausted";
+  forcedOutcome?: "telemetry_missing" | "budget_exhausted" | "blocked";
 }): {
   workOutcome: IssueContinuityWorkOutcome;
   noProgressStreak: number;

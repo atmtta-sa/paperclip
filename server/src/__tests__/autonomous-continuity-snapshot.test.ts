@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { agents, autonomousBudgetReservations, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -64,5 +65,10 @@ describeDb("autonomous continuity operator snapshot", () => {
         circuitState: "open", stopReason: "missing_usage" })]),
     });
     expect(await autonomousContinuitySnapshot(db, randomUUID())).toBeNull();
+    await db.update(companies).set({ status: "active", autonomousExecutionPaused: true })
+      .where(eq(companies.id, first));
+    expect(await autonomousContinuitySnapshot(db, first)).toMatchObject({
+      paused: true, autonomousPaused: true,
+    });
   });
 });

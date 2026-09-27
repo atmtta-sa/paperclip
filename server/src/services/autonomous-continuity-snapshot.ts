@@ -4,7 +4,7 @@ import { autonomousBudgetReservations, companies, heartbeatRuns } from "@papercl
 
 /** Read-only operator view. Totals are all-time ledger commitments, not provider billing. */
 export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
-  const [company] = await db.select({ status: companies.status })
+  const [company] = await db.select({ status: companies.status, autonomousPaused: companies.autonomousExecutionPaused })
     .from(companies).where(eq(companies.id, companyId));
   if (!company) return null;
 
@@ -42,5 +42,6 @@ export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
     .orderBy(desc(autonomousBudgetReservations.createdAt), desc(autonomousBudgetReservations.id))
     .limit(25);
 
-  return { companyId, paused: company.status === "paused", totals, recent };
+  return { companyId, paused: company.status === "paused" || company.autonomousPaused,
+    autonomousPaused: company.autonomousPaused, totals, recent };
 }

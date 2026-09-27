@@ -42,6 +42,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     await db.insert(companies).values({
       id: companyId,
       name: "Reconciliation company",
+      autonomousExecutionPaused: false,
       issuePrefix: `RC${companyId.slice(0, 4)}`,
       requireBoardApprovalForNewAgents: false,
     });
@@ -257,6 +258,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     await db.insert(companies).values({
       id: companyId,
       name: "Layered budget company",
+      autonomousExecutionPaused: false,
       issuePrefix: "LB",
       requireBoardApprovalForNewAgents: false,
     });
@@ -336,6 +338,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     await db.insert(companies).values({
       id: companyId,
       name: "Budget race company",
+      autonomousExecutionPaused: false,
       issuePrefix: "BR",
       requireBoardApprovalForNewAgents: false,
     });

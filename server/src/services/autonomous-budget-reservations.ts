@@ -5,6 +5,7 @@ import {
   autonomousBudgetReservations,
   budgetIncidents,
   budgetPolicies,
+  companies,
   issues,
 } from "@paperclipai/db";
 import type { BudgetMetric, BudgetScopeType, BudgetWindowKind } from "@paperclipai/shared";
@@ -198,8 +199,15 @@ export async function reserveAutonomousBudget(
       envelope: AutonomousBudgetEnvelope;
     }
   | { admitted: false; reason: BudgetBlockReason; policyId: string }
+  | { admitted: false; reason: "autonomous_execution_paused" }
 > {
   return db.transaction(async (tx) => {
+    // Serialize pause and admission on the company row, including replay.
+    const [company] = await tx.select({ paused: companies.autonomousExecutionPaused })
+      .from(companies).where(eq(companies.id, input.companyId)).for("update");
+    if (!company || company.paused) {
+      return { admitted: false as const, reason: "autonomous_execution_paused" as const };
+    }
     const policies = await tx
       .select()
       .from(budgetPolicies)

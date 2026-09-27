@@ -54,6 +54,8 @@ Autonomous issue work additionally requires an active, hard-stop **per-run** pol
 
 Treat `blocked`, `no_progress`, `budget_exhausted`, and `telemetry_missing` as terminal for the current autonomous attempt. A successful process exit or unchanged cooldown does not authorize another paid request. Unverified usage/cost retains the reservation instead of counting as zero. Before resuming, inspect the task fingerprint, circuit, pending reservations, last work outcome, and the material new evidence. Do not copy Slack status conversations into task logs or create a task unless Naz explicitly asks for one.
 
+The Budgets continuity card offers a board-only, audited "Pause new autonomous dispatches" control. Migration `0283` initializes existing and new companies with autonomous execution paused; the migration has not been applied by this source change. The control denies both new reservations and replay admission for that company after the pause transaction commits, but does not cancel already-running requests. Its dedicated flag is separate from company lifecycle status. Read the continuity snapshot back to verify the flag; do not infer a live kill switch from source code or an HTTP success alone. Resume through an explicit, audited board action only after the release gates pass.
+
 These are local source controls; they are not evidence that a deployed service has the correct policy rows or that a provider charge has been reconciled. Keep automation paused until those are read back and a separately approved funded canary is verified.
 
 ## Viewing Costs

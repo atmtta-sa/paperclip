@@ -10,6 +10,7 @@ import { api } from "./client";
 export type AutonomousContinuitySnapshot = {
   companyId: string;
   paused: boolean;
+  autonomousPaused: boolean;
   totals: {
     runs: number; requests: number; inputTokens: number; outputTokens: number;
     costMicrousd: number; held: number; missingTelemetry: number;
@@ -28,6 +29,8 @@ export const budgetsApi = {
     api.get<BudgetOverview>(`/companies/${companyId}/budgets/overview`),
   autonomousContinuity: (companyId: string) =>
     api.get<AutonomousContinuitySnapshot>(`/companies/${companyId}/budgets/autonomous-continuity`),
+  pauseAutonomous: (companyId: string) =>
+    api.post<{ companyId: string; paused: boolean }>(`/companies/${companyId}/budgets/autonomous-pause`, { paused: true }),
   upsertPolicy: (companyId: string, data: BudgetPolicyUpsertInput) =>
     api.post<BudgetPolicySummary>(`/companies/${companyId}/budgets/policies`, data),
   resolveIncident: (companyId: string, incidentId: string, data: BudgetIncidentResolutionInput) =>

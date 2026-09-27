@@ -227,6 +227,15 @@ export function Costs({
     refetchInterval: 30_000,
     staleTime: 5_000,
   });
+  const pauseAutonomousMutation = useMutation({
+    mutationFn: async () => {
+      await budgetsApi.pauseAutonomous(companyId);
+      const observed = await budgetsApi.autonomousContinuity(companyId);
+      if (!observed.autonomousPaused) throw new Error("Autonomous pause was not verified");
+      return observed;
+    },
+    onSuccess: (observed) => queryClient.setQueryData(["autonomous-continuity", companyId], observed),
+  });
 
   const invalidateBudgetViews = () => {
     if (!selectedCompanyId) return;
@@ -914,6 +923,9 @@ export function Costs({
                 snapshot={continuityData}
                 loading={continuityLoading}
                 error={Boolean(continuityError)}
+                onPause={() => pauseAutonomousMutation.mutate()}
+                pausing={pauseAutonomousMutation.isPending}
+                pauseError={pauseAutonomousMutation.isError}
               />
 
               {activeBudgetIncidents.length > 0 ? (

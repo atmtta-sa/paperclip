@@ -26,6 +26,7 @@ import {
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import {
+  AutonomousExecutionPausedError,
   dispatchWithAutonomousBudgetReservation,
   isAutonomousBudgetAdmissionError,
 } from "./autonomous-budget-dispatch.js";
@@ -12558,7 +12559,7 @@ export function heartbeatService(
   async function issueContinuityTerminalPatch(
     run: typeof heartbeatRuns.$inferSelect,
     status: string,
-    forcedOutcome?: "telemetry_missing" | "budget_exhausted",
+    forcedOutcome?: "telemetry_missing" | "budget_exhausted" | "blocked",
     successfulProviderResponses?: number,
     hasVisibleResponse?: boolean,
   ): Promise<Partial<typeof heartbeatRuns.$inferInsert>> {
@@ -12696,7 +12697,8 @@ export function heartbeatService(
           previousStatus,
           status,
           patch?.workOutcome === "telemetry_missing" ||
-            patch?.workOutcome === "budget_exhausted"
+            patch?.workOutcome === "budget_exhausted" ||
+            patch?.workOutcome === "blocked"
             ? patch.workOutcome
             : undefined,
           parseObject(patch?.resultJson).successfulProviderResponses === 0 ? 0 : undefined,
@@ -12801,7 +12803,8 @@ export function heartbeatService(
           previousStatus,
           status,
           patch?.workOutcome === "telemetry_missing" ||
-            patch?.workOutcome === "budget_exhausted"
+            patch?.workOutcome === "budget_exhausted" ||
+            patch?.workOutcome === "blocked"
             ? patch.workOutcome
             : undefined,
           parseObject(patch?.resultJson).successfulProviderResponses === 0 ? 0 : undefined,
@@ -25169,6 +25172,7 @@ export function heartbeatService(
         const budgetAdmissionFailure = isAutonomousBudgetAdmissionError(err)
           ? err
           : null;
+        const autonomousPauseFailure = err instanceof AutonomousExecutionPausedError;
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(
             (await getRun(run.id).catch(() => null))?.errorCode,
@@ -25195,6 +25199,7 @@ export function heartbeatService(
           })
           .catch(() => null);
         const failureErrorCode =
+          (autonomousPauseFailure ? "autonomous_execution_paused" : null) ??
           (budgetAdmissionFailure ? "budget_exhausted" : null) ??
           workspaceValidationFailure?.code ??
           configurationIncompleteFailure?.code ??
@@ -25238,7 +25243,7 @@ export function heartbeatService(
           errorCode: stopSnapshot?.errorCode ?? failureErrorCode,
           ...(budgetAdmissionFailure
             ? { workOutcome: "budget_exhausted" as const }
-            : {}),
+            : autonomousPauseFailure ? { workOutcome: "blocked" as const } : {}),
           finishedAt: new Date(),
           resultJson: mergeRunStopMetadataForAgent(agent, failureOutcome, {
             errorCode: failureErrorCode,
@@ -25319,7 +25324,7 @@ export function heartbeatService(
           ) {
             await finalizeIssueCommentPolicy(livenessRun, agent);
           }
-          if (!budgetAdmissionFailure) {
+          if (!budgetAdmissionFailure && !autonomousPauseFailure) {
             await scheduleInteractionContinuationInfrastructureRetryIfEligible(
               livenessRun,
               agent,
@@ -25331,7 +25336,7 @@ export function heartbeatService(
             // terminal failure, generic issue recovery must not create a
             // replacement retryOfRunId chain for the same provider work.
             suppressImmediateRecovery:
-              nativeTerminalFailureCode !== null || budgetAdmissionFailure !== null,
+              nativeTerminalFailureCode !== null || budgetAdmissionFailure !== null || autonomousPauseFailure,
           });
           await handleIssueReviewPathDisposition(livenessRun);
 

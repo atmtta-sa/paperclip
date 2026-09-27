@@ -77,7 +77,7 @@ describe("issue continuity state", () => {
     });
   });
 
-  it.each(["telemetry_missing", "budget_exhausted"] as const)(
+  it.each(["telemetry_missing", "budget_exhausted", "blocked"] as const)(
     "opens the circuit immediately for %s",
     (forcedOutcome) => {
       expect(
