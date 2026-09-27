@@ -68,6 +68,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockFetchAllQuotaWindows = vi.hoisted(() => vi.fn());
 const mockAutonomousContinuitySnapshot = vi.hoisted(() => vi.fn());
 const mockSetAutonomousExecutionPause = vi.hoisted(() => vi.fn());
+const mockSetScopedAutonomousExecutionPause = vi.hoisted(() => vi.fn());
 const mockCostService = vi.hoisted(() => ({
   createEvent: vi.fn(),
   summary: vi.fn().mockResolvedValue({ spendCents: 0 }),
@@ -133,6 +134,7 @@ function registerModuleMocks() {
   }));
   vi.doMock("../services/autonomous-execution-control.js", () => ({
     setAutonomousExecutionPause: mockSetAutonomousExecutionPause,
+    setScopedAutonomousExecutionPause: mockSetScopedAutonomousExecutionPause,
   }));
 }
 
@@ -180,6 +182,7 @@ describe("cost routes", () => {
     vi.clearAllMocks();
     mockAutonomousContinuitySnapshot.mockResolvedValue({ companyId: "company-1", paused: true, totals: { held: 1 }, recent: [] });
     mockSetAutonomousExecutionPause.mockResolvedValue({ companyId: "company-1", paused: true });
+    mockSetScopedAutonomousExecutionPause.mockResolvedValue({ companyId: "company-1", scopeType: "task", scopeId: "task-1", paused: true });
     mockAccessService.decide.mockReset();
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
@@ -299,6 +302,32 @@ describe("cost routes", () => {
     expect(mockSetAutonomousExecutionPause).toHaveBeenCalledWith(expect.anything(), {
       companyId: "company-1", paused: true, actorId: "board-user",
     });
+  });
+
+  it("limits scoped pause writes to a company board member and returns persisted state", async () => {
+    const path = "/api/companies/company-1/budgets/autonomous-pause/task/task-1";
+    const outsider = createAppWithActor({ type: "board", userId: "outsider", source: "session",
+      isInstanceAdmin: false, companyIds: ["company-2"] });
+    const agent = createAppWithActor({ type: "agent", agentId: "agent-1", companyId: "company-1", runId: "run-1" });
+    expect((await request(outsider).post(path).send({ paused: true })).status).toBe(403);
+    expect((await request(agent).post(path).send({ paused: true })).status).toBe(403);
+    expect(mockSetScopedAutonomousExecutionPause).not.toHaveBeenCalled();
+    const board = createAppWithActor({ type: "board", userId: "board-user", source: "session",
+      isInstanceAdmin: false, companyIds: ["company-1"],
+      memberships: [{ companyId: "company-1", status: "active", membershipRole: "admin" }] });
+    expect((await request(board).post(path).send({ paused: "yes" })).status).toBe(400);
+    expect(mockSetScopedAutonomousExecutionPause).not.toHaveBeenCalled();
+    expect((await request(board).post("/api/companies/company-1/budgets/autonomous-pause/project/task-1")
+      .send({ paused: true })).status).toBe(400);
+    expect(mockSetScopedAutonomousExecutionPause).not.toHaveBeenCalled();
+    const response = await request(board).post(path).send({ paused: true });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ companyId: "company-1", scopeType: "task", scopeId: "task-1", paused: true });
+    expect(mockSetScopedAutonomousExecutionPause).toHaveBeenCalledWith(expect.anything(), {
+      companyId: "company-1", scopeType: "task", scopeId: "task-1", paused: true, actorId: "board-user",
+    });
+    mockSetScopedAutonomousExecutionPause.mockResolvedValueOnce(null);
+    expect((await request(board).post(path).send({ paused: true })).status).toBe(404);
   });
 
   it("returns issue subtree cost summaries for issue refs", async () => {

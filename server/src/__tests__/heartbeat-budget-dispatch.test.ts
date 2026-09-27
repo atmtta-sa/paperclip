@@ -135,6 +135,23 @@ describeEmbeddedPostgres("heartbeat budget dispatch gate", () => {
     expect(adapter).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["agent", "task"] as const)("denies new and replay dispatch when the %s is paused", async (scopeType) => {
+    const scope = await seedScope();
+    const runId = randomUUID();
+    const adapter = vi.fn(async () => "started");
+    await dispatchWithAutonomousBudgetReservation(db, { ...scope, runId }, adapter);
+    if (scopeType === "agent") {
+      await db.update(agents).set({ autonomousExecutionPaused: true }).where(eq(agents.id, scope.agentId));
+    } else {
+      await db.update(issues).set({ autonomousExecutionPaused: true }).where(eq(issues.id, scope.issueId));
+    }
+    await expect(dispatchWithAutonomousBudgetReservation(db, { ...scope, runId: randomUUID() }, adapter))
+      .rejects.toMatchObject({ reason: "autonomous_execution_paused" });
+    await expect(dispatchWithAutonomousBudgetReservation(db, { ...scope, runId }, adapter))
+      .rejects.toMatchObject({ reason: "autonomous_execution_paused" });
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
   it("does not enter the adapter callback when a run envelope dimension is missing", async () => {
     const scope = await seedScope();
     await db

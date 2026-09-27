@@ -24,7 +24,7 @@ import {
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { fetchAllQuotaWindows } from "../services/quota-windows.js";
 import { autonomousContinuitySnapshot } from "../services/autonomous-continuity-snapshot.js";
-import { setAutonomousExecutionPause } from "../services/autonomous-execution-control.js";
+import { setAutonomousExecutionPause, setScopedAutonomousExecutionPause } from "../services/autonomous-execution-control.js";
 import { badRequest } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
@@ -320,6 +320,30 @@ export function costRoutes(
       });
       if (!state) {
         res.status(404).json({ error: "Company not found" });
+        return;
+      }
+      res.json(state);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/budgets/autonomous-pause/:scopeType/:scopeId",
+    validate(z.object({ paused: z.boolean() }).strict()),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      assertBoard(req);
+      const scopeType = z.enum(["agent", "task"]).safeParse(req.params.scopeType);
+      if (!scopeType.success) {
+        res.status(400).json({ error: "Invalid autonomous pause scope" });
+        return;
+      }
+      const state = await setScopedAutonomousExecutionPause(db, {
+        companyId, scopeType: scopeType.data, scopeId: req.params.scopeId as string,
+        paused: req.body.paused, actorId: req.actor.userId ?? "local-board",
+      });
+      if (!state) {
+        res.status(404).json({ error: "Autonomous pause target not found" });
         return;
       }
       res.json(state);

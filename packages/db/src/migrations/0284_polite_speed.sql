@@ -1,0 +1,2 @@
+ALTER TABLE "agents" ADD COLUMN "autonomous_execution_paused" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "issues" ADD COLUMN "autonomous_execution_paused" boolean DEFAULT false NOT NULL;

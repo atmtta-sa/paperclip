@@ -4831,6 +4831,7 @@ const issueListSelect = {
   lastStatusDecisionId: issues.lastStatusDecisionId,
   workMode: issues.workMode,
   harnessKind: issues.harnessKind,
+  autonomousExecutionPaused: issues.autonomousExecutionPaused,
   priority: issues.priority,
   reviewPolicy: issues.reviewPolicy,
   assigneeAgentId: issues.assigneeAgentId,

@@ -21,6 +21,7 @@ export type AutonomousContinuitySnapshot = {
   }>;
   recent: Array<{
     runId: string; agentId: string; issueId: string | null;
+    agentAutonomousPaused: boolean | null; taskAutonomousPaused: boolean | null;
     reservationStatus: string; reservedCostMicrousd: number; actualCostMicrousd: number | null;
     workOutcome: string | null; fingerprintBefore: string | null;
     fingerprintAfter: string | null; noProgressStreak: number | null;
@@ -35,6 +36,10 @@ export const budgetsApi = {
     api.get<AutonomousContinuitySnapshot>(`/companies/${companyId}/budgets/autonomous-continuity`),
   pauseAutonomous: (companyId: string) =>
     api.post<{ companyId: string; paused: boolean }>(`/companies/${companyId}/budgets/autonomous-pause`, { paused: true }),
+  setScopedAutonomousPause: (companyId: string, scopeType: "agent" | "task", scopeId: string, paused: boolean) =>
+    api.post<{ companyId: string; scopeType: "agent" | "task"; scopeId: string; paused: boolean }>(
+      `/companies/${companyId}/budgets/autonomous-pause/${scopeType}/${encodeURIComponent(scopeId)}`, { paused },
+    ),
   upsertPolicy: (companyId: string, data: BudgetPolicyUpsertInput) =>
     api.post<BudgetPolicySummary>(`/companies/${companyId}/budgets/policies`, data),
   resolveIncident: (companyId: string, incidentId: string, data: BudgetIncidentResolutionInput) =>

@@ -208,6 +208,16 @@ export async function reserveAutonomousBudget(
     if (!company || company.paused) {
       return { admitted: false as const, reason: "autonomous_execution_paused" as const };
     }
+    const agent = await tx.select({ id: agents.id, paused: agents.autonomousExecutionPaused })
+      .from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)))
+      .then((rows) => rows[0] ?? null);
+    const issue = await tx.select({ id: issues.id, paused: issues.autonomousExecutionPaused })
+      .from(issues).where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!agent || !issue) throw new Error("autonomous_budget_scope_mismatch");
+    if (agent.paused || issue.paused) {
+      return { admitted: false as const, reason: "autonomous_execution_paused" as const };
+    }
     const policies = await tx
       .select()
       .from(budgetPolicies)
@@ -265,18 +275,6 @@ export async function reserveAutonomousBudget(
     const requested = input.requested
       ? normalizeBudgetRequest(input.requested)
       : deriveRunEnvelope(policies);
-
-    const agent = await tx
-      .select({ id: agents.id })
-      .from(agents)
-      .where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)))
-      .then((rows) => rows[0] ?? null);
-    const issue = await tx
-      .select({ id: issues.id })
-      .from(issues)
-      .where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)))
-      .then((rows) => rows[0] ?? null);
-    if (!agent || !issue) throw new Error("autonomous_budget_scope_mismatch");
 
     const now = new Date();
     const crossedThresholds: Array<{

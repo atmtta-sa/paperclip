@@ -236,6 +236,22 @@ export function Costs({
     },
     onSuccess: (observed) => queryClient.setQueryData(["autonomous-continuity", companyId], observed),
   });
+  const scopedPauseMutation = useMutation({
+    mutationFn: async (input: { scopeType: "agent" | "task"; scopeId: string; paused: boolean }) => {
+      const result = await budgetsApi.setScopedAutonomousPause(companyId, input.scopeType, input.scopeId, input.paused);
+      if (result.companyId !== companyId || result.scopeType !== input.scopeType
+        || result.scopeId !== input.scopeId || result.paused !== input.paused) {
+        throw new Error("Scoped autonomous pause response mismatch");
+      }
+      const observed = await budgetsApi.autonomousContinuity(companyId);
+      const verified = observed.recent.some((run) => (input.scopeType === "agent"
+        ? run.agentId === input.scopeId && run.agentAutonomousPaused === input.paused
+        : run.issueId === input.scopeId && run.taskAutonomousPaused === input.paused));
+      if (!verified) throw new Error("Scoped autonomous pause was not verified");
+      return observed;
+    },
+    onSuccess: (observed) => queryClient.setQueryData(["autonomous-continuity", companyId], observed),
+  });
 
   const invalidateBudgetViews = () => {
     if (!selectedCompanyId) return;
@@ -926,6 +942,9 @@ export function Costs({
                 onPause={() => pauseAutonomousMutation.mutate()}
                 pausing={pauseAutonomousMutation.isPending}
                 pauseError={pauseAutonomousMutation.isError}
+                onScopedPause={(scopeType, scopeId, paused) => scopedPauseMutation.mutate({ scopeType, scopeId, paused })}
+                scopedPausePending={scopedPauseMutation.isPending}
+                scopedPauseError={scopedPauseMutation.isError}
               />
 
               {activeBudgetIncidents.length > 0 ? (

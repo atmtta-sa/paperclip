@@ -1,6 +1,6 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, autonomousBudgetReservations, companies, heartbeatRuns } from "@paperclipai/db";
+import { activityLog, agents, autonomousBudgetReservations, companies, heartbeatRuns, issues } from "@paperclipai/db";
 
 /** Read-only operator view. Totals are all-time ledger commitments, not provider billing. */
 export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
@@ -26,6 +26,8 @@ export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
     runId: autonomousBudgetReservations.runId,
     agentId: autonomousBudgetReservations.agentId,
     issueId: autonomousBudgetReservations.issueId,
+    agentAutonomousPaused: agents.autonomousExecutionPaused,
+    taskAutonomousPaused: issues.autonomousExecutionPaused,
     reservationStatus: autonomousBudgetReservations.status,
     reservedCostMicrousd: autonomousBudgetReservations.reservedCostMicrousd,
     actualCostMicrousd: autonomousBudgetReservations.actualCostMicrousd,
@@ -38,6 +40,8 @@ export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
     createdAt: autonomousBudgetReservations.createdAt,
   }).from(autonomousBudgetReservations)
     .leftJoin(heartbeatRuns, eq(heartbeatRuns.id, autonomousBudgetReservations.runId))
+    .leftJoin(agents, and(eq(agents.id, autonomousBudgetReservations.agentId), eq(agents.companyId, companyId)))
+    .leftJoin(issues, and(eq(issues.id, autonomousBudgetReservations.issueId), eq(issues.companyId, companyId)))
     .where(eq(autonomousBudgetReservations.companyId, companyId))
     .orderBy(desc(autonomousBudgetReservations.createdAt), desc(autonomousBudgetReservations.id))
     .limit(25);

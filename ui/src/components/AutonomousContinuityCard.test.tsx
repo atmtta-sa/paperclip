@@ -11,6 +11,7 @@ const snapshot: AutonomousContinuitySnapshot = {
     stateFingerprint: "same", circuitOpenedAt: "2026-09-27T00:00:00Z",
     createdAt: "2026-09-27T00:00:00Z" }],
   recent: [{ runId: "run-1", agentId: "agent-1", issueId: "task-1",
+    agentAutonomousPaused: false, taskAutonomousPaused: true,
     reservationStatus: "retained_missing_telemetry", reservedCostMicrousd: 250000,
     actualCostMicrousd: null, workOutcome: "telemetry_missing", fingerprintBefore: "same",
     fingerprintAfter: "same", noProgressStreak: 2, circuitState: "open",
@@ -42,5 +43,14 @@ describe("AutonomousContinuityCard", () => {
     const paused = renderToStaticMarkup(<AutonomousContinuityCard
       snapshot={snapshot} loading={false} error={false} onPause={() => undefined} />);
     expect(paused).not.toContain("<button");
+  });
+  it("offers scoped agent pause and task resume from persisted flags", () => {
+    const html = renderToStaticMarkup(<AutonomousContinuityCard
+      snapshot={snapshot} loading={false} error={false}
+      onScopedPause={() => undefined} />);
+    expect(html).toContain("Pause agent agent-1");
+    expect(html).toContain("Resume task task-1");
+    expect(html).not.toContain("Resume agent agent-1");
+    expect(html).not.toContain("Pause task task-1");
   });
 });

@@ -7,6 +7,7 @@ import {
   timestamp,
   jsonb,
   index,
+  boolean,
   unique,
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
@@ -22,6 +23,7 @@ export const agents = pgTable(
     title: text("title"),
     icon: text("icon"),
     status: text("status").notNull().default("idle"),
+    autonomousExecutionPaused: boolean("autonomous_execution_paused").notNull().default(false),
     reportsTo: uuid("reports_to").references((): AnyPgColumn => agents.id),
     capabilities: text("capabilities"),
     adapterType: text("adapter_type").notNull().default("process"),

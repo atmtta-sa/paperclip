@@ -12,6 +12,7 @@ import {
   unique,
   bigint,
   check,
+  boolean,
 } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { projects } from "./projects.js";
@@ -40,6 +41,7 @@ export const issues = pgTable(
     title: text("title").notNull(),
     description: text("description"),
     status: text("status").notNull().default("backlog"),
+    autonomousExecutionPaused: boolean("autonomous_execution_paused").notNull().default(false),
     statusVersion: bigint("status_version", { mode: "number" }).notNull().default(0),
     lastStatusDecisionId: uuid("last_status_decision_id"),
     workMode: text("work_mode").notNull().default("standard"),

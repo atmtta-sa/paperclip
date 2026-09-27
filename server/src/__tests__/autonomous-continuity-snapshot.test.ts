@@ -80,5 +80,11 @@ describeDb("autonomous continuity operator snapshot", () => {
     expect(await autonomousContinuitySnapshot(db, first)).toMatchObject({
       paused: true, autonomousPaused: true,
     });
+    await db.update(agents).set({ autonomousExecutionPaused: true }).where(eq(agents.id, a));
+    await db.update(issues).set({ autonomousExecutionPaused: true }).where(eq(issues.id, task));
+    expect(await autonomousContinuitySnapshot(db, first)).toMatchObject({
+      recent: expect.arrayContaining([expect.objectContaining({ runId: run,
+        agentAutonomousPaused: true, taskAutonomousPaused: true })]),
+    });
   });
 });
