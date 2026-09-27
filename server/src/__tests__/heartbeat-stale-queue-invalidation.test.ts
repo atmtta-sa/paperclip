@@ -4,6 +4,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   agents,
   agentWakeupRequests,
+  autonomousBudgetReservations,
+  budgetPolicies,
   companies,
   costEvents,
   createDb,
@@ -210,6 +212,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       defaultResponsibleUserId: "responsible-user",
       requireBoardApprovalForNewAgents: false,
+      autonomousExecutionPaused: false,
     });
     await db.insert(agents).values({
       id: agentId,
@@ -240,6 +243,20 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     invocationSource?: "assignment" | "automation";
     scheduledRetryReason?: string | null;
   }) {
+    if (input.issueId) {
+      await db.insert(budgetPolicies).values([
+        { companyId: input.companyId, scopeType: "task", scopeId: input.issueId,
+          metric: "request_count", windowKind: "per_run", amount: 8 },
+        { companyId: input.companyId, scopeType: "task", scopeId: input.issueId,
+          metric: "input_tokens", windowKind: "per_run", amount: 64_000 },
+        { companyId: input.companyId, scopeType: "task", scopeId: input.issueId,
+          metric: "output_tokens", windowKind: "per_run", amount: 8_000 },
+        { companyId: input.companyId, scopeType: "task", scopeId: input.issueId,
+          metric: "runtime_ms", windowKind: "per_run", amount: 300_000 },
+        { companyId: input.companyId, scopeType: "task", scopeId: input.issueId,
+          metric: "billed_microusd", windowKind: "per_run", amount: 250_000 },
+      ]).onConflictDoNothing();
+    }
     const wakeupRequestId = randomUUID();
     const runId = randomUUID();
     await db.insert(agentWakeupRequests).values({
@@ -866,7 +883,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(agent?.lastHeartbeatAt?.getTime()).toBeGreaterThanOrEqual(now.getTime());
   });
 
-  it("allows generic timer wakes when the agent has assigned todo work", async () => {
+  it("does not dispatch a generic timer wake for todo work without an active task scope", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
@@ -888,12 +905,14 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     });
 
     expect(run).not.toBeNull();
-    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
-
-    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+    expect(await waitForCondition(async () => (await db.select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id)))[0]?.status === "failed")).toBe(true);
+    expect(countExecuteCallsForRun(run!.id)).toBe(0);
+    expect(await db.select({ id: autonomousBudgetReservations.id }).from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, run!.id))).toHaveLength(0);
   });
 
-  it("allows legacy generic timer wakes by default when no skip policy is set", async () => {
+  it("does not dispatch a legacy generic timer wake without a task scope", async () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
@@ -906,11 +925,14 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     });
 
     expect(run).not.toBeNull();
-    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
-    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+    expect(await waitForCondition(async () => (await db.select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id)))[0]?.status === "failed")).toBe(true);
+    expect(countExecuteCallsForRun(run!.id)).toBe(0);
+    expect(await db.select({ id: autonomousBudgetReservations.id }).from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, run!.id))).toHaveLength(0);
   });
 
-  it("allows explicit proactive generic timer wakes without assigned issue work", async () => {
+  it("does not dispatch a proactive generic timer wake without an assigned task", async () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
@@ -924,8 +946,11 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     });
 
     expect(run).not.toBeNull();
-    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
-    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+    expect(await waitForCondition(async () => (await db.select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id)))[0]?.status === "failed")).toBe(true);
+    expect(countExecuteCallsForRun(run!.id)).toBe(0);
+    expect(await db.select({ id: autonomousBudgetReservations.id }).from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, run!.id))).toHaveLength(0);
   });
 
   it("skips wakes before queueing when per-agent daily run cap is reached", async () => {
@@ -1638,11 +1663,22 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         originCommentIds: [wakeCommentId],
         interactionResolvedAt: new Date().toISOString(), mutation: "interaction", source: `${interactionKind}.resolved`, forceFreshSession: true } });
     await heartbeat.resumeQueuedRuns();
-    expect(await waitForCondition(async () => (await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status === "succeeded")).toBe(true);
+    expect(await waitForCondition(async () => {
+      const [row] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId));
+      return row != null && row.status !== "queued" && row.status !== "running";
+    })).toBe(true);
+    const [terminal] = await db.select({ status: heartbeatRuns.status,
+      workOutcome: heartbeatRuns.workOutcome, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(terminal).toMatchObject({ status: "failed", workOutcome: "telemetry_missing" });
     // Terminal status precedes completion bookkeeping. Drain those writes before
     // afterEach truncates the fixture, otherwise PostgreSQL can deadlock.
     await heartbeat.waitForRunExecutionDrain(runId);
     expect(countExecuteCallsForRun(runId)).toBe(1);
+    expect(await db.select({ status: autonomousBudgetReservations.status }).from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, runId)))
+      .toEqual([{ status: "retained_missing_telemetry" }]);
     await waitForCondition(async () => claimedIssue !== null);
     expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: runId });
   });
