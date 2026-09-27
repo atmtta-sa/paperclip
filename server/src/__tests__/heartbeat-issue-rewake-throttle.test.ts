@@ -831,6 +831,50 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(mockAdapterExecute.mock.calls.length).toBe(adapterCallsBefore);
   });
 
+  it("replays 247 unchanged blocker wakes without another fake-provider dispatch", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockClear();
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+
+    for (let attempt = 0; attempt < 247; attempt += 1) {
+      const wake = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_blockers_resolved",
+        payload: { issueId },
+        contextSnapshot: { issueId, wakeReason: "issue_blockers_resolved" },
+        requestedByActorType: "system",
+        requestedByActorId: "dependency-reconciler",
+      });
+      expect(wake).toBeNull();
+    }
+
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+    const [skipped] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.agentId, agentId),
+        eq(agentWakeupRequests.reason, "issue_rewake_circuit_open")));
+    expect(skipped?.count).toBe(247);
+    const runs = await db.select({ continuityCircuitState: heartbeatRuns.continuityCircuitState })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(2);
+    expect(runs.some((run) => run.continuityCircuitState === "open")).toBe(true);
+    const calls = mockAdapterExecute.mock.calls;
+    expect(calls.every(([context]) => context.autonomousBudgetEnvelope?.inputTokens === 64_000
+      && context.autonomousBudgetEnvelope?.costMicrousd === 250_000)).toBe(true);
+    const fakeResults = await Promise.all(mockAdapterExecute.mock.results.map((result) => result.value));
+    expect(fakeResults.every((result) => result.budgetTelemetry.inputTokens <= 64_000)).toBe(true);
+    expect(fakeResults.reduce((cost, result) => cost + result.budgetTelemetry.costMicrousd, 0))
+      .toBeLessThanOrEqual(250_000);
+    const [reserved] = await db.select({ cost: sql<number>`coalesce(sum(${autonomousBudgetReservations.reservedCostMicrousd}), 0)::int` })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reserved?.cost).toBeLessThanOrEqual(10_000_000);
+  });
+
   it("keeps agent comments throttled without hiding genuinely new human input", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 
