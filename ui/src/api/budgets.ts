@@ -23,6 +23,11 @@ export type AutonomousContinuitySnapshot = {
     id: string; issueId: string; agentId: string | null; runId: string | null;
     previousInputTokens: number; actualInputTokens: number; createdAt: string;
   }>;
+  costVelocityAlerts: Array<{
+    id: string; companyId: string; agentId: string | null; runId: string | null;
+    committedCostMicrousd: number; dailyLimitMicrousd: number; windowMinutes: number;
+    createdAt: string;
+  }>;
   recent: Array<{
     runId: string; agentId: string; issueId: string | null;
     agentAutonomousPaused: boolean | null; taskAutonomousPaused: boolean | null;

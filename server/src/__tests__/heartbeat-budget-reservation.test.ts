@@ -476,6 +476,29 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     });
   });
 
+  it("audits rapid committed-cost velocity once without claiming provider spend", async () => {
+    const scope = await createCostBudgetFixture(1000);
+    const [policy] = await db.insert(budgetPolicies).values({ companyId: scope.companyId,
+      scopeType: "company", scopeId: scope.companyId, metric: "billed_microusd",
+      windowKind: "calendar_day_utc", amount: 1_000_000,
+    }).returning({ id: budgetPolicies.id });
+    const reserve = (runId: string, costMicrousd: number) => reserveAutonomousBudget(db, {
+      ...scope, runId, requested: { requestCount: 1, inputTokens: 1_000,
+        outputTokens: 100, runtimeMs: 1_000, costMicrousd },
+    });
+    await reserve(randomUUID(), 100_000);
+    const second = randomUUID();
+    await reserve(second, 200_000);
+    await reserve(second, 200_000);
+    await reserve(randomUUID(), 100_000);
+    const alerts = (await db.select().from(activityLog).where(eq(activityLog.companyId, scope.companyId)))
+      .filter((row) => row.action === "company.continuity_cost_velocity");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ entityId: scope.companyId,
+      details: { policyId: policy.id, sourceRunId: second, committedCostMicrousd: 300_000,
+        dailyLimitMicrousd: 1_000_000, windowMinutes: 15 } });
+  });
+
   it("emits each crossed utilization threshold once per policy window", async () => {
     const scope = await createCostBudgetFixture(100);
     const policy = await db

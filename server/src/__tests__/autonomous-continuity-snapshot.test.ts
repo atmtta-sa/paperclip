@@ -65,9 +65,17 @@ describeDb("autonomous continuity operator snapshot", () => {
         entityType: "issue", entityId: task, agentId: a,
         details: { sourceRunId: "orphan-run", previousInputTokens: 35_000,
           actualInputTokens: 80_000, provider: "openrouter", model: "test-model" } },
+      { companyId: first, actorId: "autonomous-budget-reservation", action: "company.continuity_cost_velocity",
+        entityType: "company", entityId: first, agentId: a,
+        details: { sourceRunId: run, policyId: randomUUID(), committedCostMicrousd: 300_000,
+          dailyLimitMicrousd: 1_000_000, windowMinutes: 15 } },
       { companyId: second, actorId: "continuity-circuit-breaker", action: "issue.continuity_circuit_opened",
         entityType: "issue", entityId: randomUUID(), agentId: b,
         details: { stateFingerprint: "other", circuitOpenedAt: "2026-09-27T00:00:00.000Z" } },
+      { companyId: second, actorId: "autonomous-budget-reservation", action: "company.continuity_cost_velocity",
+        entityType: "company", entityId: second, agentId: b,
+        details: { sourceRunId: randomUUID(), policyId: randomUUID(), committedCostMicrousd: 999_000,
+          dailyLimitMicrousd: 1_000_000, windowMinutes: 15 } },
     ]);
     const snapshot = await autonomousContinuitySnapshot(db, first);
     expect(snapshot).toMatchObject({
@@ -86,6 +94,8 @@ describeDb("autonomous continuity operator snapshot", () => {
         expect.objectContaining({ issueId: task, runId: "orphan-run",
           previousInputTokens: 35_000, actualInputTokens: 80_000 }),
       ]),
+      costVelocityAlerts: [expect.objectContaining({ companyId: first, agentId: a, runId: run,
+        committedCostMicrousd: 300_000, dailyLimitMicrousd: 1_000_000, windowMinutes: 15 })],
     });
     expect(await autonomousContinuitySnapshot(db, randomUUID())).toBeNull();
     await db.update(companies).set({ status: "active", autonomousExecutionPaused: true })

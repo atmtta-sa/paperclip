@@ -9,6 +9,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import type { BudgetMetric, BudgetScopeType, BudgetWindowKind } from "@paperclipai/shared";
+import { recordAutonomousCostVelocityAlert } from "./autonomous-cost-velocity-alert.js";
 
 export type AutonomousBudgetRequest = {
   requestCount: number;
@@ -378,6 +379,13 @@ export async function reserveAutonomousBudget(
           status: "open",
         })
         .onConflictDoNothing();
+    }
+
+    for (const policy of policies) {
+      if (policy.scopeType === "company" && policy.metric === "billed_microusd"
+        && policy.windowKind === "calendar_day_utc") {
+        await recordAutonomousCostVelocityAlert(tx, input, policy, now);
+      }
     }
 
     return {

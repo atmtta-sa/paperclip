@@ -87,6 +87,30 @@ export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
         previousInputTokens, actualInputTokens }] : [];
   });
 
+  const velocityRows = await db.select({
+    id: activityLog.id,
+    companyId: activityLog.entityId,
+    agentId: activityLog.agentId,
+    details: activityLog.details,
+    createdAt: activityLog.createdAt,
+  }).from(activityLog)
+    .where(and(eq(activityLog.companyId, companyId),
+      eq(activityLog.action, "company.continuity_cost_velocity"),
+      eq(activityLog.entityType, "company"), eq(activityLog.entityId, companyId)))
+    .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
+    .limit(25);
+  const costVelocityAlerts = velocityRows.flatMap(({ details, ...row }) => {
+    const cost = details?.committedCostMicrousd;
+    const limit = details?.dailyLimitMicrousd;
+    const minutes = details?.windowMinutes;
+    return typeof cost === "number" && Number.isSafeInteger(cost) && cost >= 0
+      && typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0
+      && minutes === 15
+      ? [{ ...row, runId: typeof details?.sourceRunId === "string" ? details.sourceRunId : null,
+        committedCostMicrousd: cost, dailyLimitMicrousd: limit, windowMinutes: minutes }] : [];
+  });
+
   return { companyId, paused: company.status === "paused" || company.autonomousPaused,
-    autonomousPaused: company.autonomousPaused, totals, recent, circuitAlerts, promptGrowthAlerts };
+    autonomousPaused: company.autonomousPaused, totals, recent, circuitAlerts, promptGrowthAlerts,
+    costVelocityAlerts };
 }
