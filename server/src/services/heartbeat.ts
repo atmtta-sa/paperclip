@@ -842,6 +842,18 @@ const GIT_SENSITIVE_LOCAL_ADAPTER_TYPES = new Set([
 ]);
 export { MAX_TURN_CONTINUATION_RETRY_REASON };
 export const MAX_TURN_CONTINUATION_WAKE_REASON = "max_turns_continuation_retry";
+export const SESSION_ROLLOVER_RETRY_REASON = "session_rollover";
+export const SESSION_ROLLOVER_WAKE_REASON = "session_rollover_required";
+const SESSION_ROLLOVER_MAX_ATTEMPTS = 10;
+
+export function isSessionRolloverRequiredRun(input: {
+  errorCode?: string | null;
+  resultJson?: unknown;
+}): boolean {
+  return input.errorCode === SESSION_ROLLOVER_WAKE_REASON ||
+    readNonEmptyString(parseObject(input.resultJson).turn_exit_reason) ===
+      SESSION_ROLLOVER_WAKE_REASON;
+}
 const MAX_TURN_CONTINUATION_DEFAULT_MAX_ATTEMPTS = 2;
 const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
 const MAX_TURN_CONTINUATION_DEFAULT_DELAY_MS = 1_000;
@@ -9335,7 +9347,16 @@ export function heartbeatService(
       if (!run) return null;
       const agent = await getAgent(run.agentId);
       if (!agent || agent.companyId !== run.companyId) return null;
-      const result = await scheduleBoundedRetryForRun(run, agent);
+      const result = await scheduleBoundedRetryForRun(run, agent,
+        isSessionRolloverRequiredRun(run)
+          ? {
+              retryReason: SESSION_ROLLOVER_RETRY_REASON,
+              wakeReason: SESSION_ROLLOVER_WAKE_REASON,
+              maxAttempts: SESSION_ROLLOVER_MAX_ATTEMPTS,
+              delayMs: 0,
+            }
+          : undefined,
+      );
       return result.outcome === "scheduled" ? result.run : null;
     },
   });
@@ -9541,6 +9562,11 @@ export function heartbeatService(
           await scheduleBoundedRetryForRun(source, agent, effect.reviewParticipant ? {
             retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
             wakeReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON,
+          } : isSessionRolloverRequiredRun(source) ? {
+            retryReason: SESSION_ROLLOVER_RETRY_REASON,
+            wakeReason: SESSION_ROLLOVER_WAKE_REASON,
+            maxAttempts: SESSION_ROLLOVER_MAX_ATTEMPTS,
+            delayMs: 0,
           } : undefined);
         }
       } else if (effect.kind === "run_queued") {
@@ -15184,7 +15210,8 @@ export function heartbeatService(
     );
     const nextAttempt =
       (retryReason === WORKSPACE_BUSY_RETRY_REASON ||
-      retryReason === MAX_TURN_CONTINUATION_RETRY_REASON
+      retryReason === MAX_TURN_CONTINUATION_RETRY_REASON ||
+      retryReason === SESSION_ROLLOVER_RETRY_REASON
         ? (run.scheduledRetryAttempt ?? 0)
         : executionFailureRetryCount(run)) + 1;
     const computedBaseSchedule =
@@ -15311,6 +15338,7 @@ export function heartbeatService(
     const requiresIssueGate =
       hasConversationContinuationPolicy(run.resultJson) ||
       retryReason === MAX_TURN_CONTINUATION_RETRY_REASON ||
+      retryReason === SESSION_ROLLOVER_RETRY_REASON ||
       retryReason === INTERACTION_CONTINUATION_INFRA_RETRY_REASON;
     if (requiresIssueGate) {
       const gate = await runDispatch.evaluateScheduledRetryGate({
@@ -15414,6 +15442,79 @@ export function heartbeatService(
       },
       "normal_model",
     );
+    if (retryReason === SESSION_ROLLOVER_RETRY_REASON && issueId) {
+      const priorCapsule = parseObject(
+        parseObject(parseObject(run.contextSnapshot).executionContinuation)
+          .taskStateCapsule,
+      );
+      const hasCompletedAction = Object.values(
+        parseObject(parseObject(run.resultJson).apiToolReceipts),
+      ).some((receipt) => parseObject(receipt).state === "completed");
+      if (
+        readNonEmptyString(priorCapsule.hash) &&
+        readNonEmptyString(priorCapsule.stateFingerprint) ===
+          run.stateFingerprintAfter &&
+        !hasCompletedAction
+      ) {
+        await appendRunEvent(run, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message:
+            "Session rollover suppressed because durable task state is unchanged",
+          payload: {
+            retryReason,
+            errorCode: "continuation_capsule_unchanged",
+          },
+        });
+        return {
+          outcome: "not_scheduled" as const,
+          reason: "Session rollover capsule is unchanged",
+          errorCode: "continuation_capsule_unchanged" as const,
+          issueId,
+        };
+      }
+      const continuationSummary = await getIssueContinuationSummaryDocument(
+        db,
+        issueId,
+      );
+      try {
+        await buildExecutionContinuation({
+          db,
+          companyId: run.companyId,
+          issueId,
+          agentId: agent.id,
+          context: retryContextSnapshot,
+          previousContextRunId: run.id,
+          summary: continuationSummary?.body ?? null,
+          exposeLowTrustRaw: false,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.message !== "continuation_capsule_unchanged"
+        ) {
+          throw error;
+        }
+        await appendRunEvent(run, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message:
+            "Session rollover suppressed because the task-state capsule is unchanged",
+          payload: {
+            retryReason,
+            errorCode: "continuation_capsule_unchanged",
+          },
+        });
+        return {
+          outcome: "not_scheduled" as const,
+          reason: "Session rollover capsule is unchanged",
+          errorCode: "continuation_capsule_unchanged" as const,
+          issueId,
+        };
+      }
+    }
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(
       run,
       retryContextSnapshot,
@@ -20345,6 +20446,16 @@ export function heartbeatService(
             })
           : null;
       context.executionContinuation = executionContinuation;
+      if (executionContinuation?.coverage.kind === "bounded_task_capsule") {
+        await db.update(heartbeatRuns)
+          .set({
+            contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ executionContinuation })}::jsonb`,
+          })
+          .where(and(
+            eq(heartbeatRuns.id, run.id),
+            eq(heartbeatRuns.companyId, agent.companyId),
+          ));
+      }
       const paperclipWakePayload = await buildPaperclipWakePayload({
         db,
         companyId: agent.companyId,
@@ -24705,7 +24816,14 @@ export function heartbeatService(
               `[paperclip] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
             );
           }
-          if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
+          if (outcome === "failed" && isSessionRolloverRequiredRun(livenessRun)) {
+            await scheduleBoundedRetryForRun(livenessRun, agent, {
+              retryReason: SESSION_ROLLOVER_RETRY_REASON,
+              wakeReason: SESSION_ROLLOVER_WAKE_REASON,
+              maxAttempts: SESSION_ROLLOVER_MAX_ATTEMPTS,
+              delayMs: 0,
+            });
+          } else if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
             const policy = parseMaxTurnContinuationPolicy(agent);
             if (policy.enabled && policy.maxAttempts > 0) {
               await scheduleBoundedRetryForRun(livenessRun, agent, {

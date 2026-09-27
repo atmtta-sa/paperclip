@@ -24,7 +24,11 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  SESSION_ROLLOVER_RETRY_REASON,
+  SESSION_ROLLOVER_WAKE_REASON,
+} from "../services/heartbeat.ts";
 import { loadIssueTaskStateFingerprint } from "../services/issue-continuity-state.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { runningProcesses } from "../adapters/index.ts";
@@ -92,6 +96,25 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     // in-flight wakeup that is still before run registration, which a plain run
     // table status poll cannot see.
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    mockAdapterExecute.mockReset();
+    mockAdapterExecute.mockImplementation(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      summary: "Issue rewake throttle test run.",
+      provider: "test",
+      model: "test-model",
+      budgetTelemetry: {
+        providerRequestId: randomUUID(),
+        requestCount: 1,
+        inputTokens: 10,
+        outputTokens: 5,
+        runtimeMs: 100,
+        costMicrousd: 1,
+        rateCardVersion: "test-v1",
+      },
+    }));
     // Post-run bookkeeping (run-event records, follow-up wake scheduling) can
     // still write for a moment after a run reaches a terminal status, so a
     // single delete sweep can hit a foreign-key violation when a late insert
@@ -256,6 +279,70 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       outputTokens: 8_000,
       runtimeMs: 300_000,
       costMicrousd: 250_000,
+    });
+  });
+
+  it("starts one fresh rollover session and rejects the unchanged capsule before another run", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const rolloverResult = () => ({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Session rollover required",
+      errorCode: SESSION_ROLLOVER_WAKE_REASON,
+      clearSession: true,
+      summary: "Checkpointed work; verification remains.",
+      provider: "test",
+      model: "test-model",
+      resultJson: { turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON },
+      budgetTelemetry: {
+        providerRequestId: randomUUID(),
+        requestCount: 1,
+        inputTokens: 10,
+        outputTokens: 5,
+        runtimeMs: 100,
+        costMicrousd: 1,
+        rateCardVersion: "test-v1",
+      },
+    });
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute
+      .mockImplementationOnce(async () => rolloverResult())
+      .mockImplementationOnce(async () => rolloverResult());
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    await heartbeat.promoteDueScheduledRetries();
+    await heartbeat.resumeQueuedRuns();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+    const rolloverContext = mockAdapterExecute.mock.calls[1]?.[0];
+    expect(rolloverContext?.runtime?.sessionId).toBeNull();
+    expect(rolloverContext?.context?.wakeReason).toBe(
+      SESSION_ROLLOVER_WAKE_REASON,
+    );
+    expect(
+      rolloverContext?.executionContinuation?.coverage.kind,
+    ).toBe("bounded_task_capsule");
+    const runs = await db
+      .select({
+        scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(2);
+    const [persistedRollover] = runs.filter(
+      (run) => run.scheduledRetryReason === SESSION_ROLLOVER_RETRY_REASON,
+    );
+    expect(persistedRollover).toBeDefined();
+    expect(
+      (persistedRollover?.contextSnapshot as { executionContinuation?: unknown })
+        ?.executionContinuation,
+    ).toMatchObject({
+      taskStateCapsule: rolloverContext?.executionContinuation?.taskStateCapsule,
+      coverage: { kind: "bounded_task_capsule" },
     });
   });
 

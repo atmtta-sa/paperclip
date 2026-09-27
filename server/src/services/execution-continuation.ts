@@ -13,6 +13,11 @@ import type { ExecutionContinuationEnvelope } from "@paperclipai/shared";
 import { sanitizeQuarantinedCommentForHigherTrust } from "./source-trust.js";
 import { hasConversationContinuationPolicy } from "./conversation-continuation.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
+import { loadIssueTaskStateFingerprint } from "./issue-continuity-state.js";
+import {
+  assertTaskStateCapsuleAdvanced,
+  buildTaskStateCapsule,
+} from "./task-state-capsule.js";
 
 const object = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v)
@@ -217,7 +222,7 @@ export async function buildExecutionContinuation(input: {
       row.authorType === "user" && !row.createdByRunId && !row.deleted && row.body.trim().length > 0,
   );
   const priorRuns = await db
-    .select({ id: heartbeatRuns.id, result: heartbeatRuns.resultJson, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, runtimeMode: heartbeatRuns.runtimeMode, retryOfRunId: heartbeatRuns.retryOfRunId })
+    .select({ id: heartbeatRuns.id, result: heartbeatRuns.resultJson, context: heartbeatRuns.contextSnapshot, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, runtimeMode: heartbeatRuns.runtimeMode, retryOfRunId: heartbeatRuns.retryOfRunId })
     .from(heartbeatRuns)
     .where(
       and(
@@ -312,10 +317,36 @@ export async function buildExecutionContinuation(input: {
     (hasConversationContinuationPolicy(lastTerminal.result) ||
       lastTerminal.status === "interrupted" || lastTerminal.errorCode === "process_lost")
     ? lastTerminal.id : undefined);
+  const objective = latestRequest?.body ?? issue.description ?? issue.title;
+  const unresolvedInteractionIds = interactions
+    .filter((row) => row.status === "pending")
+    .map((row) => row.id);
+  const rollover = string(input.context.wakeReason) === "session_rollover_required";
+  const stateFingerprint = rollover
+    ? await loadIssueTaskStateFingerprint({ db, companyId, issueId })
+    : null;
+  const taskStateCapsule = rollover && stateFingerprint
+    ? buildTaskStateCapsule({
+        issueId,
+        objective: issue.title,
+        completedWork: null,
+        completedActions,
+        unresolvedInteractionIds,
+        stateFingerprint,
+      })
+    : undefined;
+  if (taskStateCapsule) {
+    const priorHash = priorRuns
+      .map((run) => object(object(run.context).executionContinuation))
+      .map((continuation) => object(continuation.taskStateCapsule))
+      .map((capsule) => string(capsule.hash))
+      .findLast((hash): hash is string => hash !== null);
+    assertTaskStateCapsuleAdvanced(taskStateCapsule, priorHash);
+  }
   return {
     ...(interruptedRunId ? { interruptedRunId } : {}),
-    ...(resumeDelta ? { resumeDelta } : {}),
-    recoveryOutcomes: reconciliations
+    ...(!rollover && resumeDelta ? { resumeDelta } : {}),
+    recoveryOutcomes: rollover ? [] : reconciliations
       .filter((row) => row.evidence.executionReconciliation)
       .map((row) => ({
         recoveryActionId: row.id,
@@ -330,9 +361,9 @@ export async function buildExecutionContinuation(input: {
       sourceRunId,
     },
     originCommentIds,
-    objective: latestRequest?.body ?? issue.description ?? issue.title,
-    messages,
-    interactionOutcomes: interactions
+    objective: rollover ? taskStateCapsule?.objective ?? issue.title.slice(0, 4_000) : objective,
+    messages: rollover ? [] : messages,
+    interactionOutcomes: rollover ? [] : interactions
       .filter((row) => row.status !== "pending")
       .map((row) => ({
         id: row.id,
@@ -340,14 +371,13 @@ export async function buildExecutionContinuation(input: {
         status: row.status,
         result: row.result,
       })),
-    completedWork: input.summary,
-    completedActions,
-    unresolvedInteractionIds: interactions
-      .filter((row) => row.status === "pending")
-      .map((row) => row.id),
+    completedWork: rollover ? null : input.summary,
+    completedActions: rollover ? [] : completedActions,
+    ...(taskStateCapsule ? { taskStateCapsule } : {}),
+    unresolvedInteractionIds,
     coverage: {
-      kind: "full_task_history",
-      throughCommentId: messages.at(-1)?.id ?? null,
+      kind: rollover ? "bounded_task_capsule" : "full_task_history",
+      throughCommentId: rollover ? null : messages.at(-1)?.id ?? null,
       summaryThroughCommentId: null,
     },
   };

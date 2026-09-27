@@ -16,6 +16,18 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import { buildExecutionContinuation, currentContinuationOrigins } from "./execution-continuation.js";
+import { buildTaskStateCapsule } from "./task-state-capsule.js";
+
+it.each([
+  "Slack transcript:\n[12:00] User: copied thread",
+  "Deploy with authorization: Bearer synthetic-secret",
+])("rejects untrusted transcript or credential text in a rollover goal", (objective) => {
+  expect(() => buildTaskStateCapsule({
+    issueId: randomUUID(), objective, completedWork: null,
+    completedActions: [], unresolvedInteractionIds: [], stateFingerprint: "state",
+  })).toThrow("continuation_capsule_unsafe_objective");
+});
+
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)(
   "authorized continuation context",
@@ -261,6 +273,63 @@ const support = await getEmbeddedPostgresTestSupport();
       );
       expect(freshPrompt).toContain("Read my Notion launch notes.");
       expect(freshPrompt).not.toContain('"resumeDelta"');
+    });
+    it("keeps ten fresh-session rollovers bounded and omits historical message bodies", async () => {
+      const sizes: number[] = [];
+      for (let cycle = 0; cycle < 10; cycle += 1) {
+        const context = await buildExecutionContinuation({
+          db,
+          companyId,
+          issueId,
+          agentId,
+          context: { wakeReason: "session_rollover_required" },
+          summary: "Notion read completed. Gmail verification remains.",
+          exposeLowTrustRaw: false,
+        });
+        expect(context.coverage.kind).toBe("bounded_task_capsule");
+        expect(context.messages).toEqual([]);
+        expect(context.completedActions).toEqual([]);
+        expect(context.taskStateCapsule?.version).toBe(1);
+        expect(context.taskStateCapsule?.issueId).toBe(issueId);
+        expect(context.taskStateCapsule?.nextAction).toContain("current issue");
+        expect(context.taskStateCapsule?.completedWork).toBeNull();
+        expect(JSON.stringify(context)).not.toContain("Read my Notion launch notes.");
+        sizes.push(JSON.stringify(context).length);
+      }
+      expect(new Set(sizes).size).toBe(1);
+    });
+    it("rejects an automatic rollover when the capsule hash did not change", async () => {
+      const context = await buildExecutionContinuation({
+        db,
+        companyId,
+        issueId,
+        agentId,
+        context: { wakeReason: "session_rollover_required" },
+        summary: "Notion read completed. Gmail verification remains.",
+        exposeLowTrustRaw: false,
+      });
+      await db
+        .update(heartbeatRuns)
+        .set({ contextSnapshot: { issueId, executionContinuation: context } })
+        .where(eq(heartbeatRuns.id, runId));
+      try {
+        await expect(
+          buildExecutionContinuation({
+            db,
+            companyId,
+            issueId,
+            agentId,
+            context: { wakeReason: "session_rollover_required" },
+            summary: "Notion read completed. Gmail verification remains.",
+            exposeLowTrustRaw: false,
+          }),
+        ).rejects.toThrow("continuation_capsule_unchanged");
+      } finally {
+        await db
+          .update(heartbeatRuns)
+          .set({ contextSnapshot: { issueId, commentId: gmailId } })
+          .where(eq(heartbeatRuns.id, runId));
+      }
     });
     it("fails closed when required originating context is missing", async () => {
       await expect(

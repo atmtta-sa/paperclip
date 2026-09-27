@@ -35,6 +35,23 @@ export interface ExecutionContinuationEnvelope {
   };
   recoveryOutcomes?: Array<{ recoveryActionId: string; decision: unknown }>;
   completedWork: string | null;
+  /** Bounded server-authored state used to start a clean provider session. */
+  taskStateCapsule?: {
+    version: 1;
+    hash: string;
+    issueId: string;
+    objective: string;
+    nextAction: string;
+    completedWork: string | null;
+    completedActionRefs: Array<{
+      runId: string;
+      receiptId: string;
+      operationId: string;
+    }>;
+    blockers: Array<{ kind: "interaction"; id: string }>;
+    artifactRefs: string[];
+    stateFingerprint: string;
+  };
   /** Start a new turn from history; never replay prior tool calls automatically. */
   interruptedRunId?: string;
   /** Completed mutations are context, never instructions to replay them. */
@@ -46,7 +63,7 @@ export interface ExecutionContinuationEnvelope {
   }>;
   unresolvedInteractionIds: string[];
   coverage: {
-    kind: "full_task_history" | "task_history_delta";
+    kind: "full_task_history" | "task_history_delta" | "bounded_task_capsule";
     baseRunId?: string;
     throughCommentId: string | null;
     summaryThroughCommentId: null;

@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import * as fs from "node:fs/promises";
 
 // Mock the adapter-utils server-utils module that execute.ts imports from.
 // We intercept runChildProcess so we can inspect its opts without spawning
@@ -38,7 +39,7 @@ vi.mock("node:fs/promises", () => ({
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
 }));
 
-import { execute } from "./execute.js";
+import { buildPrompt, execute } from "./execute.js";
 import * as serverUtils from "@paperclipai/adapter-utils/server-utils";
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
@@ -119,8 +120,132 @@ describe("hermes-local adapter onSpawn forwarding", () => {
 
     const mocked = vi.mocked(serverUtils.runChildProcess);
     const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
+    const args = lastCall[2] as string[];
     const opts = lastCall[3] as { env: Record<string, string> };
     expect(opts.env.HERMES_AUTONOMOUS_BUDGET_JSON).toBe(JSON.stringify(envelope));
+    expect(opts.env.HERMES_RUN_RESULT_FILE).toContain("test-run-1");
+    expect(args).toContain("-Q");
+  });
+
+  it("renders a bounded fresh rollover prompt without old wake or handoff bodies", async () => {
+    const { ctx } = makeCtx();
+    const historic = "HISTORICAL_TRANSCRIPT_MARKER ".repeat(10_000);
+    (ctx as any).context = {
+      issueId: "issue-1",
+      wakeReason: "session_rollover_required",
+      taskBody: historic,
+      paperclipTaskMarkdown: historic,
+      paperclipSessionHandoffMarkdown: historic,
+      paperclipWake: { reason: "session_rollover_required", issue: { description: historic } },
+      executionContinuation: {
+        coverage: { kind: "bounded_task_capsule" },
+        taskStateCapsule: {
+          version: 1,
+          hash: "capsule-hash",
+          issueId: "issue-1",
+          objective: "Finish the verified task",
+          nextAction: "Read the current issue and perform one authorized next action; stop if blocked.",
+          completedWork: null,
+          completedActionRefs: [],
+          blockers: [],
+          artifactRefs: [],
+          stateFingerprint: "state-one",
+        },
+      },
+    };
+    const prompt = buildPrompt(ctx as any, {}, { resumedSession: false });
+    expect(prompt).toContain("capsule-hash");
+    expect(prompt).toContain("issue-1");
+    expect(prompt).not.toContain("HISTORICAL_TRANSCRIPT_MARKER");
+    expect(prompt.length).toBeLessThan(20_000);
+    const lengths: number[] = [];
+    for (let cycle = 0; cycle < 10; cycle += 1) {
+      (ctx as any).context.taskBody = historic + String(cycle);
+      (ctx as any).context.executionContinuation.taskStateCapsule.hash = `capsule-hash-${cycle}`;
+      (ctx as any).context.executionContinuation.taskStateCapsule.stateFingerprint = `state-${cycle}`;
+      const nextPrompt = buildPrompt(ctx as any, {}, { resumedSession: false });
+      expect(nextPrompt).not.toContain("HISTORICAL_TRANSCRIPT_MARKER");
+      expect(nextPrompt.length).toBeLessThan(20_000);
+      lengths.push(nextPrompt.length);
+    }
+    expect(new Set(lengths).size).toBe(1);
+    const deliveredPrompt = buildPrompt(ctx as any, {}, { resumedSession: false });
+    await execute(ctx as any);
+    const calls = vi.mocked(serverUtils.runChildProcess).mock.calls;
+    const args = calls[calls.length - 1]?.[2] as string[];
+    expect(args[2]).toBe(deliveredPrompt);
+  });
+
+  it("fails closed when a rollover capsule is missing", () => {
+    const { ctx } = makeCtx();
+    (ctx as any).context.wakeReason = "session_rollover_required";
+    expect(() => buildPrompt(ctx as any, {})).toThrow("session_rollover_capsule_missing");
+  });
+
+  it("fails closed when a rollover capsule exceeds the prompt boundary", () => {
+    const { ctx } = makeCtx();
+    (ctx as any).context.wakeReason = "session_rollover_required";
+    (ctx as any).executionContinuation = {
+      issueId: "issue-1",
+      coverage: { kind: "bounded_task_capsule" },
+      taskStateCapsule: {
+        version: 1, issueId: "issue-1", hash: "hash", stateFingerprint: "state",
+        objective: "x".repeat(33_000), nextAction: "Read the current issue",
+        completedWork: null, completedActionRefs: [], blockers: [], artifactRefs: [],
+      },
+    };
+    expect(() => buildPrompt(ctx as any, {})).toThrow("session_rollover_capsule_oversized");
+  });
+
+  it("rejects a rollover capsule bound to a different issue", () => {
+    const { ctx } = makeCtx();
+    (ctx as any).context.wakeReason = "session_rollover_required";
+    (ctx as any).executionContinuation = {
+      coverage: { kind: "bounded_task_capsule" },
+      taskStateCapsule: {
+        version: 1,
+        issueId: "other-issue",
+        hash: "capsule-hash",
+        stateFingerprint: "state-one",
+        objective: "Other issue",
+        nextAction: "Read the current issue",
+        completedWork: null,
+        completedActionRefs: [],
+        blockers: [],
+        artifactRefs: [],
+      },
+    };
+    expect(() => buildPrompt(ctx as any, {})).toThrow("session_rollover_capsule_issue_mismatch");
+  });
+
+  it("transports a typed rollover result and clears the provider session", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({
+            version: 1,
+            failed: true,
+            partial: true,
+            stop_reason: "session_rollover_required",
+            turn_exit_reason: "session_rollover_required",
+          })
+        : "",
+    );
+    const { ctx } = makeCtx();
+    (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {
+      requestCount: 8,
+      inputTokens: 64_000,
+      outputTokens: 8_000,
+      runtimeMs: 300_000,
+      costMicrousd: 250_000,
+    };
+
+    const result = await execute(ctx as any);
+
+    expect(result.errorCode).toBe("session_rollover_required");
+    expect(result.clearSession).toBe(true);
+    expect(result.resultJson).toMatchObject({
+      turn_exit_reason: "session_rollover_required",
+    });
   });
 
   it("runChildProcess opts type includes onSpawn", () => {
