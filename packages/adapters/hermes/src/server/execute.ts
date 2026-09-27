@@ -18,6 +18,7 @@
  *   --source           session source tag for filtering
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 
@@ -55,6 +56,7 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
+import { hermesBudgetTelemetry } from "./budget-telemetry.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -277,17 +279,70 @@ interface ParsedOutput {
 }
 
 type HermesRunResult = {
-  version: 1;
+  version: 1 | 2;
   stop_reason?: string | null;
   turn_exit_reason?: string | null;
   failed?: boolean;
   partial?: boolean;
+  provider?: string | null;
+  model?: string | null;
+  endpoint_class?: string;
+  provider_request_ids?: string[];
+  api_calls?: number;
+  successful_provider_responses?: number;
+  usage_telemetry_complete?: boolean;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
+  estimated_cost_usd?: number | null;
+  cost_status?: string | null;
+  cost_source?: string | null;
+  cost_unavailable_reason?: string | null;
 };
+
+function validNonnegative(value: unknown, integer = true): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 &&
+    (!integer || Number.isSafeInteger(value));
+}
+
+function validQuietResult(value: Record<string, unknown>): boolean {
+  if (value.version === 1) return true; // Rollover-only legacy contract.
+  if (value.version !== 2) return false;
+  if ((value.failed != null && typeof value.failed !== "boolean") ||
+      (value.partial != null && typeof value.partial !== "boolean")) return false;
+  if (value.endpoint_class != null &&
+      !["unknown", "codex_app_server", "openrouter_api", "openai_api"].includes(String(value.endpoint_class))) return false;
+  if (value.cost_status != null &&
+      (typeof value.cost_status !== "string" ||
+        !["actual", "estimated", "included", "unknown"].includes(value.cost_status))) return false;
+  if (typeof value.usage_telemetry_complete !== "boolean") return false;
+  if (!validNonnegative(value.api_calls) ||
+      !validNonnegative(value.successful_provider_responses) ||
+      (value.successful_provider_responses as number) > (value.api_calls as number)) return false;
+  if (value.usage_telemetry_complete &&
+      value.successful_provider_responses !== value.api_calls) return false;
+  if (value.provider_request_ids !== undefined) {
+    if (!Array.isArray(value.provider_request_ids) ||
+        value.provider_request_ids.length > (value.successful_provider_responses as number) ||
+        value.provider_request_ids.some((id) => typeof id !== "string" ||
+          !/^[A-Za-z0-9._:-]{1,128}$/.test(id)) ||
+        new Set(value.provider_request_ids).size !== value.provider_request_ids.length) return false;
+  }
+  if (value.api_calls && (typeof value.provider !== "string" || !value.provider.trim() ||
+      typeof value.model !== "string" || !value.model.trim())) return false;
+  for (const key of ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]) {
+    if (value[key] != null && !validNonnegative(value[key])) return false;
+  }
+  if (value.usage_telemetry_complete && value.api_calls &&
+      (value.input_tokens == null || value.output_tokens == null)) return false;
+  return value.estimated_cost_usd == null || validNonnegative(value.estimated_cost_usd, false);
+}
 
 async function readHermesRunResult(resultPath: string): Promise<HermesRunResult | null> {
   try {
     const parsed = JSON.parse(await fs.readFile(resultPath, "utf-8")) as Record<string, unknown>;
-    return parsed.version === 1 ? (parsed as HermesRunResult) : null;
+    return validQuietResult(parsed) ? (parsed as HermesRunResult) : null;
   } catch {
     return null;
   } finally {
@@ -574,7 +629,7 @@ export async function execute(
   }
   const runResultPath = path.join(
     process.env.TMPDIR || "/tmp",
-    `paperclip-hermes-${ctx.runId}.result.json`,
+    `paperclip-hermes-${ctx.runId}-${randomUUID()}.result.json`,
   );
   env.HERMES_RUN_RESULT_FILE = runResultPath;
 
@@ -639,6 +694,7 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
+  const childStartedAt = performance.now();
   const result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
@@ -647,6 +703,7 @@ export async function execute(
     onLog: wrappedOnLog,
     onSpawn: ctx.onSpawn,
   });
+  const childRuntimeMs = Math.ceil(performance.now() - childStartedAt);
   const runResult = await readHermesRunResult(runResultPath);
 
   // ── Parse output ───────────────────────────────────────────────────────
@@ -665,8 +722,8 @@ export async function execute(
     exitCode: result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
-    provider: resolvedProvider,
-    model,
+    provider: runResult?.version === 2 ? cfgString(runResult.provider) || resolvedProvider : resolvedProvider,
+    model: runResult?.version === 2 ? cfgString(runResult.model) || model : model,
   };
   const turnExitReason =
     cfgString(runResult?.turn_exit_reason) || cfgString(runResult?.stop_reason);
@@ -679,15 +736,28 @@ export async function execute(
     executionResult.errorMessage = parsed.errorMessage;
   } else if (!result.timedOut && typeof result.exitCode === "number" && result.exitCode !== 0) {
     executionResult.errorMessage = `Hermes exited with code ${result.exitCode}`;
+  } else if (runResult?.version === 2 && runResult.failed === true) {
+    executionResult.errorMessage = "Hermes reported a failed run";
   }
 
-  if (parsed.usage) {
-    executionResult.usage = parsed.usage;
+  // Stdout is display-only: its numbers can be task text or a progress banner.
+  // Each spawned process reports its own counters, including on session resume.
+  if (runResult?.version === 2 && runResult.input_tokens != null &&
+      runResult.output_tokens != null && runResult.successful_provider_responses) {
+    executionResult.usage = {
+      inputTokens: runResult.input_tokens,
+      outputTokens: runResult.output_tokens,
+      ...(runResult.cache_read_tokens != null
+        ? { cachedInputTokens: runResult.cache_read_tokens } : {}),
+    };
+    // Each execute() spawns a new Hermes process; its counters start at zero
+    // even when the transcript/session ID is resumed.
+    executionResult.usageBasis = "per_run";
   }
-
-  if (parsed.costUsd !== undefined) {
-    executionResult.costUsd = parsed.costUsd;
+  if (runResult?.version === 2 && runResult.estimated_cost_usd != null) {
+    executionResult.costUsd = runResult.estimated_cost_usd;
   }
+  executionResult.budgetTelemetry = hermesBudgetTelemetry(runResult, childRuntimeMs);
 
   // Summary from agent response
   if (parsed.response) {
@@ -698,8 +768,21 @@ export async function execute(
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
-    usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
+    usage: executionResult.usage || null,
+    cost_usd: executionResult.costUsd ?? null,
+    ...(runResult?.version === 2 ? {
+      apiCalls: runResult.api_calls,
+      successfulProviderResponses: runResult.successful_provider_responses,
+      usageTelemetryComplete: runResult.usage_telemetry_complete,
+      costStatus: runResult.cost_status ?? null,
+      costUnavailableReason: runResult.cost_unavailable_reason ?? null,
+      endpointClass: runResult.endpoint_class ?? "unknown",
+      providerRequestIds: runResult.provider_request_ids ?? [],
+    } : {
+      successfulProviderResponses: 0,
+      usageTelemetryComplete: false,
+      costUnavailableReason: "run_result_unavailable",
+    }),
     ...(turnExitReason ? { turn_exit_reason: turnExitReason } : {}),
   };
 

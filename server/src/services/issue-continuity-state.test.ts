@@ -54,6 +54,13 @@ describe("issue continuity state", () => {
     );
   });
 
+  it("rejects an empty Hermes response as progress even when issue state changed", () => {
+    expect(transitionIssueContinuityState({
+      terminalStatus: "succeeded", fingerprintBefore: "before", fingerprintAfter: "after",
+      previousNoProgressStreak: 0, successfulProviderResponses: 1, hasVisibleResponse: false,
+    }).workOutcome).toBe("no_progress");
+  });
+
   it("opens the circuit on the second same-fingerprint no-progress outcome", () => {
     expect(
       transitionIssueContinuityState({
@@ -121,5 +128,16 @@ describe("issue continuity state", () => {
       circuitState: "closed",
       openedNow: false,
     });
+  });
+
+  it("does not call changed issue state productive without a verified provider response", () => {
+    const result = transitionIssueContinuityState({
+      terminalStatus: "succeeded",
+      fingerprintBefore: "before",
+      fingerprintAfter: "after",
+      previousNoProgressStreak: 0,
+      successfulProviderResponses: 0,
+    });
+    expect(result.workOutcome).toBe("no_progress");
   });
 });

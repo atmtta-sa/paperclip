@@ -12548,10 +12548,19 @@ export function heartbeatService(
     void emitAgentTaskRun(db, updated);
   }
 
+  function hermesVisibleResponseEvidence(resultJson: unknown): boolean | undefined {
+    const evidence = parseObject(resultJson);
+    return typeof evidence.usageTelemetryComplete === "boolean" && typeof evidence.result === "string"
+      ? evidence.result.trim().length > 0
+      : undefined;
+  }
+
   async function issueContinuityTerminalPatch(
     run: typeof heartbeatRuns.$inferSelect,
     status: string,
     forcedOutcome?: "telemetry_missing" | "budget_exhausted",
+    successfulProviderResponses?: number,
+    hasVisibleResponse?: boolean,
   ): Promise<Partial<typeof heartbeatRuns.$inferInsert>> {
     if (!isHeartbeatRunTerminalStatus(status)) return {};
     const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
@@ -12595,6 +12604,8 @@ export function heartbeatService(
       fingerprintBefore,
       fingerprintAfter,
       previousNoProgressStreak,
+      successfulProviderResponses,
+      hasVisibleResponse,
       authorizedHumanResume:
         parseObject(run.contextSnapshot).authorizedHumanResume === true,
       forcedOutcome,
@@ -12688,6 +12699,8 @@ export function heartbeatService(
             patch?.workOutcome === "budget_exhausted"
             ? patch.workOutcome
             : undefined,
+          parseObject(patch?.resultJson).successfulProviderResponses === 0 ? 0 : undefined,
+          hermesVisibleResponseEvidence(patch?.resultJson),
         )),
       };
     }
@@ -12791,6 +12804,8 @@ export function heartbeatService(
             patch?.workOutcome === "budget_exhausted"
             ? patch.workOutcome
             : undefined,
+          parseObject(patch?.resultJson).successfulProviderResponses === 0 ? 0 : undefined,
+          hermesVisibleResponseEvidence(patch?.resultJson),
         )),
       };
     }
@@ -24399,7 +24414,37 @@ export function heartbeatService(
           usageBasis: adapterResult.usageBasis ?? null,
         });
         const normalizedUsage = sessionUsageResolution.normalizedUsage;
-        const budgetTelemetry = adapterResult.budgetTelemetry ?? null;
+        // An explicit incomplete Hermes result cannot be repaired by a nominal
+        // adapter telemetry object; keep the reservation until reconciliation.
+        const resultEvidence = parseObject(adapterResult.resultJson);
+        const hermesCostNotVerified =
+          (typeof resultEvidence.usageTelemetryComplete === "boolean" &&
+            resultEvidence.costStatus !== "actual") ||
+          (typeof resultEvidence.costUnavailableReason === "string" &&
+            resultEvidence.costUnavailableReason.length > 0);
+        const hermesRequestMismatch = typeof resultEvidence.costStatus === "string" &&
+          (resultEvidence.apiCalls !== 1 ||
+            !Array.isArray(resultEvidence.providerRequestIds) ||
+            resultEvidence.providerRequestIds.length !== 1 ||
+            resultEvidence.providerRequestIds[0] !== adapterResult.budgetTelemetry?.providerRequestId ||
+            adapterResult.budgetTelemetry?.requestCount !== 1);
+        const hermesCostMismatch = resultEvidence.costStatus === "actual" &&
+          (typeof resultEvidence.cost_usd !== "number" ||
+            !Number.isFinite(resultEvidence.cost_usd) ||
+            resultEvidence.cost_usd < 0 ||
+            !Number.isSafeInteger(Math.round(resultEvidence.cost_usd * 1_000_000)) ||
+            Math.round(resultEvidence.cost_usd * 1_000_000) !==
+              adapterResult.budgetTelemetry?.costMicrousd);
+        const hermesUsageMismatch = typeof resultEvidence.usageTelemetryComplete === "boolean" &&
+          (adapterResult.usageBasis !== "per_run" || !rawUsage ||
+            rawUsage.inputTokens !== adapterResult.budgetTelemetry?.inputTokens ||
+            rawUsage.outputTokens !== adapterResult.budgetTelemetry?.outputTokens);
+        // Hermes token completeness does not prove its charge or request identity.
+        // This ledger has only one provider request ID; retain multi-call runs.
+        const budgetTelemetry = resultEvidence.usageTelemetryComplete === false ||
+          hermesCostNotVerified || hermesRequestMismatch || hermesCostMismatch || hermesUsageMismatch
+          ? null
+          : adapterResult.budgetTelemetry ?? null;
         const budgetReconciliation = await reconcileAutonomousBudget(db, {
           companyId: run.companyId,
           agentId: run.agentId,

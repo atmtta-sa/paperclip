@@ -11,6 +11,7 @@ import {
   budgetPolicies,
   companies,
   companySkills,
+  costEvents,
   createDb,
   environmentLeases,
   environments,
@@ -122,6 +123,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     for (let attempt = 0; ; attempt += 1) {
       try {
         await db.delete(environmentLeases);
+        await db.delete(costEvents);
         await db.delete(issueComments);
         await db.delete(issues);
         await db.delete(heartbeatRunEvents);
@@ -280,6 +282,216 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       runtimeMs: 300_000,
       costMicrousd: 250_000,
     });
+  });
+
+  it("does not classify exit-zero compression cooldown as productive when no provider answered", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await db.update(issues).set({ title: "Changed independently during cooldown" }).where(eq(issues.id, issueId));
+      return {
+        exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+        resultJson: { successfulProviderResponses: 0, apiCalls: 0,
+          usageTelemetryComplete: true, turn_exit_reason: "compression_cooldown" },
+        budgetTelemetry: {
+          providerRequestId: randomUUID(), requestCount: 0, inputTokens: 0,
+          outputTokens: 0, runtimeMs: 100, costMicrousd: 0, rateCardVersion: "test-v1",
+        },
+      };
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runs = await db.select({ status: heartbeatRuns.status, workOutcome: heartbeatRuns.workOutcome,
+      resultJson: heartbeatRuns.resultJson,
+      stateFingerprintBefore: heartbeatRuns.stateFingerprintBefore,
+      stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    const run = runs.find((row) => (row.resultJson as Record<string, unknown> | null)?.successfulProviderResponses === 0);
+    expect(run).toBeDefined();
+    expect(run?.stateFingerprintBefore).not.toBe(run?.stateFingerprintAfter);
+    expect(run?.status).toBe("failed");
+    expect(run?.workOutcome).toBe("telemetry_missing");
+  });
+
+  it("does not classify a response-free Hermes run as productive when issue state changes", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const providerRequestId = randomUUID();
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await db.update(issues).set({ title: "Changed independently during empty response" }).where(eq(issues.id, issueId));
+      return {
+        exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+        usage: { inputTokens: 10, outputTokens: 5 }, usageBasis: "per_run" as const,
+        resultJson: { result: "", apiCalls: 1, successfulProviderResponses: 1,
+          usageTelemetryComplete: true, costStatus: "actual", cost_usd: 0.000001,
+          providerRequestIds: [providerRequestId] },
+        budgetTelemetry: { providerRequestId, requestCount: 1, inputTokens: 10,
+          outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "test-v1" },
+      };
+    });
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runs = await db.select({ status: heartbeatRuns.status, workOutcome: heartbeatRuns.workOutcome,
+      resultJson: heartbeatRuns.resultJson, stateFingerprintBefore: heartbeatRuns.stateFingerprintBefore,
+      stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    const run = runs.find((row) => (row.resultJson as Record<string, unknown> | null)?.successfulProviderResponses === 1);
+    expect(run?.stateFingerprintBefore).not.toBe(run?.stateFingerprintAfter);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.workOutcome).toBe("no_progress");
+  });
+
+  it("keeps the budget reservation and blocks continuation when Hermes reports incomplete usage", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      resultJson: { apiCalls: 1, successfulProviderResponses: 1, usageTelemetryComplete: false },
+      budgetTelemetry: {
+        providerRequestId: randomUUID(), requestCount: 1, inputTokens: 10,
+        outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "test-v1",
+      },
+    }));
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runs = await db.select({ status: heartbeatRuns.status, workOutcome: heartbeatRuns.workOutcome,
+      resultJson: heartbeatRuns.resultJson,
+      errorCode: heartbeatRuns.errorCode, continuityCircuitState: heartbeatRuns.continuityCircuitState })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    const run = runs.find((row) => (row.resultJson as Record<string, unknown> | null)?.usageTelemetryComplete === false);
+    expect(run).toMatchObject({ status: "failed", workOutcome: "telemetry_missing",
+      errorCode: "telemetry_missing", continuityCircuitState: "open" });
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).not.toBe("reconciled");
+  });
+
+  it("retains the reservation when Hermes cost is estimated despite nominal budget telemetry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      resultJson: { result: "Finished", apiCalls: 1, successfulProviderResponses: 1,
+        usageTelemetryComplete: true, costStatus: "estimated", costUnavailableReason: null },
+      budgetTelemetry: { providerRequestId: randomUUID(), requestCount: 1, inputTokens: 10,
+        outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "test-v1" },
+    }));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("retained_missing_telemetry");
+    const runs = await db.select({ workOutcome: heartbeatRuns.workOutcome, errorCode: heartbeatRuns.errorCode,
+      resultJson: heartbeatRuns.resultJson }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    const run = runs.find((row) => (row.resultJson as Record<string, unknown> | null)?.costStatus === "estimated");
+    expect(run).toMatchObject({ workOutcome: "telemetry_missing", errorCode: "telemetry_missing" });
+  });
+
+  it("retains the reservation when budget telemetry names a different provider request", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      resultJson: { result: "Finished", apiCalls: 1, successfulProviderResponses: 1,
+        usageTelemetryComplete: true, costStatus: "actual", costUnavailableReason: null,
+        providerRequestIds: ["gen-response-actual"] },
+      budgetTelemetry: { providerRequestId: "gen-different", requestCount: 1, inputTokens: 10,
+        outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "test-v1" },
+    }));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("retained_missing_telemetry");
+  });
+
+  it("retains the reservation when Hermes reported cost differs from budget telemetry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      resultJson: { result: "Finished", apiCalls: 1, successfulProviderResponses: 1,
+        usageTelemetryComplete: true, costStatus: "actual", costUnavailableReason: null,
+        cost_usd: 0.002, providerRequestIds: ["gen-response-actual"] },
+      budgetTelemetry: { providerRequestId: "gen-response-actual", requestCount: 1,
+        inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 1,
+        rateCardVersion: "test-v1" },
+    }));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("retained_missing_telemetry");
+  });
+
+  it("retains the reservation when Hermes usage differs from budget telemetry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      usage: { inputTokens: 100, outputTokens: 5 }, usageBasis: "per_run",
+      resultJson: { result: "Finished", apiCalls: 1, successfulProviderResponses: 1,
+        usageTelemetryComplete: true, costStatus: "actual", costUnavailableReason: null,
+        cost_usd: 0.002, providerRequestIds: ["gen-response-actual"] },
+      budgetTelemetry: { providerRequestId: "gen-response-actual", requestCount: 1,
+        inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 2000,
+        rateCardVersion: "test-v1" },
+    }));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("retained_missing_telemetry");
+  });
+
+  it("reconciles one matching Hermes request only with actual cost evidence", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      usage: { inputTokens: 10, outputTokens: 5 }, usageBasis: "per_run",
+      resultJson: { result: "Finished", apiCalls: 1, successfulProviderResponses: 1,
+        usageTelemetryComplete: true, costStatus: "actual", costUnavailableReason: null,
+        cost_usd: 0.002, providerRequestIds: ["gen-response-actual"] },
+      budgetTelemetry: { providerRequestId: "gen-response-actual", requestCount: 1,
+        inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 2000,
+        rateCardVersion: "test-v1" },
+    }));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("reconciled");
+  });
+
+  it("retains the reservation when a Hermes response has no cost verdict", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      resultJson: { result: "Finished", apiCalls: 1, successfulProviderResponses: 1,
+        usageTelemetryComplete: true, costStatus: null, costUnavailableReason: null,
+        providerRequestIds: ["gen-response-actual"] },
+      budgetTelemetry: { providerRequestId: "gen-response-actual", requestCount: 1,
+        inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 2000,
+        rateCardVersion: "test-v1" },
+    }));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("retained_missing_telemetry");
+  });
+
+  it("retains the reservation when Hermes reports no provider calls despite nominal budget telemetry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
+      resultJson: { result: "Finished", apiCalls: 0, successfulProviderResponses: 0,
+        usageTelemetryComplete: true, costStatus: null, costUnavailableReason: null,
+        providerRequestIds: [] },
+      budgetTelemetry: { providerRequestId: "gen-nonexistent", requestCount: 1,
+        inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 2000,
+        rateCardVersion: "test-v1" },
+    }));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("retained_missing_telemetry");
   });
 
   it("starts one fresh rollover session and rejects the unchanged capsule before another run", async () => {

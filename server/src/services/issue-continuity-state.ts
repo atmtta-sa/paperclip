@@ -127,6 +127,10 @@ export function transitionIssueContinuityState(input: {
   fingerprintBefore: string;
   fingerprintAfter: string;
   previousNoProgressStreak: number;
+  /** Only an explicit zero from a validated adapter result denies provider work. */
+  successfulProviderResponses?: number;
+  /** An explicit empty Hermes result cannot establish useful work. */
+  hasVisibleResponse?: boolean;
   authorizedHumanResume?: boolean;
   forcedOutcome?: "telemetry_missing" | "budget_exhausted";
 }): {
@@ -159,7 +163,8 @@ export function transitionIssueContinuityState(input: {
       openedNow: false,
     };
   }
-  if (input.fingerprintBefore !== input.fingerprintAfter) {
+  if (input.fingerprintBefore !== input.fingerprintAfter &&
+      input.successfulProviderResponses !== 0 && input.hasVisibleResponse !== false) {
     return {
       workOutcome: "productive",
       noProgressStreak: 0,

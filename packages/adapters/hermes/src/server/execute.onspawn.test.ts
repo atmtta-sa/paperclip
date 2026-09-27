@@ -127,6 +127,28 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(args).toContain("-Q");
   });
 
+  it("allocates a distinct result file for each execution of the same run", async () => {
+    const { ctx } = makeCtx();
+    await execute(ctx as any);
+    await execute(ctx as any);
+    const paths = vi.mocked(serverUtils.runChildProcess).mock.calls.map(
+      (call) => (call[3] as { env: Record<string, string> }).env.HERMES_RUN_RESULT_FILE,
+    );
+    expect(paths).toHaveLength(2);
+    expect(paths[0]).not.toBe(paths[1]);
+    expect(paths.every((file) => file.includes("test-run-1"))).toBe(true);
+  });
+
+  it("does not verify provider work or usage when the result file is absent", async () => {
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+    expect(result.resultJson).toMatchObject({
+      successfulProviderResponses: 0,
+      usageTelemetryComplete: false,
+    });
+    expect(result.usage).toBeUndefined();
+  });
+
   it("renders a bounded fresh rollover prompt without old wake or handoff bodies", async () => {
     const { ctx } = makeCtx();
     const historic = "HISTORICAL_TRANSCRIPT_MARKER ".repeat(10_000);
@@ -246,6 +268,186 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(result.resultJson).toMatchObject({
       turn_exit_reason: "session_rollover_required",
     });
+  });
+
+  it("uses structured Hermes usage rather than untrusted stdout accounting", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({
+            version: 2, provider: "openrouter", model: "kimi", endpoint_class: "openrouter_api", api_calls: 1,
+            successful_provider_responses: 1, input_tokens: 123,
+            output_tokens: 45, cache_read_tokens: 10, cache_write_tokens: 0,
+            estimated_cost_usd: 0.002, cost_status: "estimated",
+            cost_unavailable_reason: null, usage_telemetry_complete: true,
+            provider_request_ids: ["gen-provider-1"],
+            failed: false, partial: false,
+          })
+        : "",
+    );
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: "tokens: 999 input 888 output cost: $999\nsession_id: session-1",
+      stderr: "",
+    } as any);
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.provider).toBe("openrouter");
+    expect(result.model).toBe("kimi");
+    expect(result.usage).toMatchObject({ inputTokens: 123, outputTokens: 45, cachedInputTokens: 10 });
+    expect(result.costUsd).toBe(0.002);
+    expect(result.usageBasis).toBe("per_run");
+    expect(result.resultJson).toMatchObject({ successfulProviderResponses: 1,
+      usageTelemetryComplete: true, endpointClass: "openrouter_api",
+      providerRequestIds: ["gen-provider-1"] });
+    expect(result.budgetTelemetry).toBeUndefined();
+  });
+
+  it("supplies budget telemetry only for one fully attributed OpenRouter charge", async () => {
+    for (const [costSource, requestId, expected] of [
+      ["provider_cost_api", "gen-provider-1", true],
+      ["official_docs_snapshot", "gen-provider-1", false],
+      ["provider_cost_api", "stream-fabricated", false],
+    ] as const) {
+      vi.mocked(fs.readFile).mockImplementation(async (file) =>
+        String(file).endsWith(".result.json") ? JSON.stringify({
+          version: 2, provider: "openrouter", model: "kimi", endpoint_class: "openrouter_api",
+          api_calls: 1, successful_provider_responses: 1, usage_telemetry_complete: true,
+          input_tokens: 123, output_tokens: 45, estimated_cost_usd: 0.002,
+          cost_status: "actual", cost_source: costSource,
+          provider_request_ids: [requestId], failed: false, partial: false,
+        }) : "",
+      );
+      const result = await execute(makeCtx().ctx as any);
+      if (expected) {
+        expect(result.budgetTelemetry).toMatchObject({
+          providerRequestId: requestId, requestCount: 1,
+          inputTokens: 123, outputTokens: 45, costMicrousd: 2000,
+        });
+        expect(result.budgetTelemetry?.runtimeMs).toBeGreaterThanOrEqual(0);
+      } else {
+        expect(result.budgetTelemetry).toBeUndefined();
+      }
+    }
+  });
+
+  it("rejects malformed structured usage without falling back to stdout", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, api_calls: 1, successful_provider_responses: 1,
+            usage_telemetry_complete: true,
+            input_tokens: -1, output_tokens: 45, provider: "openrouter", model: "kimi" })
+        : "",
+    );
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: "tokens: 999 input 888 output cost: $999", stderr: "",
+    } as any);
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+
+    expect(result.usage).toBeUndefined();
+    expect(result.costUsd).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ successfulProviderResponses: 0, usageTelemetryComplete: false });
+  });
+
+  it("does not treat exit zero as success when the validated Hermes result failed", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, failed: true, partial: false, api_calls: 0,
+            successful_provider_responses: 0, usage_telemetry_complete: false,
+            endpoint_class: "unknown" })
+        : "",
+    );
+    const result = await execute(makeCtx().ctx as any);
+    expect(result.exitCode).toBe(0);
+    expect(result.errorMessage).toBe("Hermes reported a failed run");
+  });
+
+  it("rejects non-boolean Hermes failure flags as malformed metadata", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, failed: "true", partial: false, api_calls: 1,
+            successful_provider_responses: 1, usage_telemetry_complete: true,
+            input_tokens: 100, output_tokens: 20, provider: "openrouter", model: "kimi" })
+        : "",
+    );
+    const result = await execute(makeCtx().ctx as any);
+    expect(result.usage).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ successfulProviderResponses: 0, usageTelemetryComplete: false });
+  });
+
+  it("rejects URL-like endpoint classes without persisting their text", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, api_calls: 1, successful_provider_responses: 1,
+            usage_telemetry_complete: true, input_tokens: 100, output_tokens: 20,
+            provider: "openrouter", model: "kimi", endpoint_class: "https://secret.example/key" })
+        : "",
+    );
+    const result = await execute(makeCtx().ctx as any);
+    expect(result.usage).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ successfulProviderResponses: 0, usageTelemetryComplete: false });
+    expect(JSON.stringify(result.resultJson)).not.toContain("secret.example");
+  });
+
+  it("rejects obsolete Hermes reported cost status as malformed metadata", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, api_calls: 1, successful_provider_responses: 1,
+            usage_telemetry_complete: true, input_tokens: 100, output_tokens: 20,
+            provider: "openrouter", model: "kimi", cost_status: "reported",
+            estimated_cost_usd: 0.002 })
+        : "",
+    );
+    const result = await execute(makeCtx().ctx as any);
+    expect(result.usage).toBeUndefined();
+    expect(result.costUsd).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ successfulProviderResponses: 0, usageTelemetryComplete: false });
+  });
+
+  it("rejects URL-like provider request ids without persisting their text", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, api_calls: 1, successful_provider_responses: 1,
+            usage_telemetry_complete: true, input_tokens: 100, output_tokens: 20,
+            provider: "openrouter", model: "kimi",
+            provider_request_ids: ["https://secret.example/token"] })
+        : "",
+    );
+    const result = await execute(makeCtx().ctx as any);
+    expect(result.usage).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ successfulProviderResponses: 0, usageTelemetryComplete: false });
+    expect(JSON.stringify(result.resultJson)).not.toContain("secret.example");
+  });
+
+  it("rejects version 2 accounting without an explicit completeness verdict", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, api_calls: 1, successful_provider_responses: 1,
+            input_tokens: 100, output_tokens: 20, provider: "openrouter", model: "kimi" })
+        : "",
+    );
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+    expect(result.usage).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ successfulProviderResponses: 0, usageTelemetryComplete: false });
+  });
+
+  it("retains token usage but not a fabricated cost when provider cost is unknown", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({ version: 2, api_calls: 1, successful_provider_responses: 1,
+            usage_telemetry_complete: true, input_tokens: 100, output_tokens: 20,
+            provider: "openai-codex", model: "gpt-test", estimated_cost_usd: null,
+            cost_status: "unknown", cost_unavailable_reason: "cost_not_reported" })
+        : "",
+    );
+    const { ctx } = makeCtx();
+    const result = await execute(ctx as any);
+    expect(result.usage).toMatchObject({ inputTokens: 100, outputTokens: 20 });
+    expect(result.costUsd).toBeUndefined();
+    expect(result.resultJson).toMatchObject({ costUnavailableReason: "cost_not_reported" });
   });
 
   it("runChildProcess opts type includes onSpawn", () => {

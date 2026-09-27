@@ -181,6 +181,31 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     });
   });
 
+  it("counts a verified overrun against the next admission", async () => {
+    const scope = await createCostBudgetFixture(100);
+    const runId = randomUUID();
+    await reserveAutonomousBudget(db, {
+      ...scope, runId,
+      requested: { requestCount: 1, inputTokens: 100, outputTokens: 10,
+        runtimeMs: 1_000, costCents: 60 },
+    });
+    await reconcileAutonomousBudget(db, {
+      ...scope, runId, providerActivityOccurred: true,
+      providerRequestId: "req-overrun-1",
+      actual: { requestCount: 1, inputTokens: 100, outputTokens: 10,
+        runtimeMs: 1_100, costCents: 110 },
+    });
+    const next = await reserveAutonomousBudget(db, {
+      ...scope, runId: randomUUID(),
+      requested: { requestCount: 1, inputTokens: 1, outputTokens: 1,
+        runtimeMs: 1, costCents: 1 },
+    });
+    const row = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, runId)).then((rows) => rows[0]);
+    expect(row).toMatchObject({ status: "reconciled", actualCostCents: 110, actualRuntimeMs: 1_100 });
+    expect(next).toMatchObject({ admitted: false, reason: "task_budget_exhausted" });
+  });
+
   it("retains the full reservation when provider telemetry is missing", async () => {
     const scope = await createCostBudgetFixture(200);
     const firstRunId = randomUUID();
