@@ -58,6 +58,13 @@ describeDb("autonomous continuity operator snapshot", () => {
       { companyId: first, actorId: "continuity-circuit-breaker", action: "issue.continuity_circuit_opened",
         entityType: "issue", entityId: task, agentId: a, runId: run,
         details: { stateFingerprint: "before", circuitOpenedAt: "2026-09-27T00:00:00.000Z" } },
+      { companyId: first, actorId: "autonomous-budget-reconciliation", action: "issue.continuity_prompt_growth",
+        entityType: "issue", entityId: task, agentId: a, runId: run,
+        details: { previousInputTokens: 10_000, actualInputTokens: 35_000, provider: "openrouter", model: "test-model" } },
+      { companyId: first, actorId: "autonomous-budget-reconciliation", action: "issue.continuity_prompt_growth",
+        entityType: "issue", entityId: task, agentId: a,
+        details: { sourceRunId: "orphan-run", previousInputTokens: 35_000,
+          actualInputTokens: 80_000, provider: "openrouter", model: "test-model" } },
       { companyId: second, actorId: "continuity-circuit-breaker", action: "issue.continuity_circuit_opened",
         entityType: "issue", entityId: randomUUID(), agentId: b,
         details: { stateFingerprint: "other", circuitOpenedAt: "2026-09-27T00:00:00.000Z" } },
@@ -73,6 +80,12 @@ describeDb("autonomous continuity operator snapshot", () => {
         circuitState: "open", stopReason: "missing_usage" })]),
       circuitAlerts: [expect.objectContaining({ issueId: task, agentId: a, runId: run,
         stateFingerprint: "before" })],
+      promptGrowthAlerts: expect.arrayContaining([
+        expect.objectContaining({ issueId: task, agentId: a, runId: run,
+          previousInputTokens: 10_000, actualInputTokens: 35_000 }),
+        expect.objectContaining({ issueId: task, runId: "orphan-run",
+          previousInputTokens: 35_000, actualInputTokens: 80_000 }),
+      ]),
     });
     expect(await autonomousContinuitySnapshot(db, randomUUID())).toBeNull();
     await db.update(companies).set({ status: "active", autonomousExecutionPaused: true })

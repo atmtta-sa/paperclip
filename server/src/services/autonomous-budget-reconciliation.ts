@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { autonomousBudgetReservations } from "@paperclipai/db";
+import { autonomousBudgetReservations, companies } from "@paperclipai/db";
+import { recordAutonomousPromptGrowthAlert } from "./autonomous-prompt-growth-alert.js";
 
 export type AutonomousBudgetReconciliationInput = {
   companyId: string;
@@ -91,6 +92,10 @@ export async function reconcileAutonomousBudget(
   const status = hasCompleteTelemetry ? "reconciled" : "retained_missing_telemetry";
 
   return db.transaction(async (tx) => {
+    // Match admission's lock order and serialize cross-run alert deduplication.
+    const [company] = await tx.select({ id: companies.id }).from(companies)
+      .where(eq(companies.id, input.companyId)).for("update");
+    if (!company) throw new Error("autonomous_budget_reconciliation_scope_mismatch");
     const row = await tx
       .select()
       .from(autonomousBudgetReservations)
@@ -137,6 +142,8 @@ export async function reconcileAutonomousBudget(
         updatedAt: new Date(),
       })
       .where(eq(autonomousBudgetReservations.id, row.id));
+
+    if (hasCompleteTelemetry) await recordAutonomousPromptGrowthAlert(tx, row, actual);
 
     return { status, replayed: false };
   });

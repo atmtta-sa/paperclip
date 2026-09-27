@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   autonomousBudgetReservations,
   budgetIncidents,
   budgetPolicies,
   companies,
   createDb,
+  heartbeatRuns,
   issues,
 } from "@paperclipai/db";
 import {
@@ -180,6 +182,78 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       actualInputTokens: 8_000,
       providerRequestId: "req-reconciled-1",
     });
+  });
+
+  it("alerts once on verified prompt growth but not on replay or missing telemetry", async () => {
+    const scope = await createCostBudgetFixture(1000);
+    const firstRunId = randomUUID();
+    const secondRunId = randomUUID();
+    const missingRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: secondRunId, companyId: scope.companyId,
+      agentId: scope.agentId, status: "completed" });
+    await db.insert(autonomousBudgetReservations).values([
+      { ...scope, runId: firstRunId, provider: "openrouter", model: "test-model",
+        status: "reconciled", actualRequestCount: 1, actualInputTokens: 10_000,
+        actualOutputTokens: 100, actualRuntimeMs: 1000, actualCostMicrousd: 10_000,
+        providerActivityOccurred: true, providerRequestId: "prompt-first", reconciledAt: new Date("2026-09-01T00:00:00Z") },
+      { ...scope, runId: secondRunId, provider: "openrouter", model: "test-model" },
+      { ...scope, runId: missingRunId, provider: "openrouter", model: "test-model" },
+    ]);
+    const input = { ...scope, runId: secondRunId, provider: "openrouter", model: "test-model",
+      providerActivityOccurred: true, providerRequestId: "prompt-second",
+      actual: { requestCount: 1, inputTokens: 35_000, outputTokens: 100,
+        runtimeMs: 1000, costMicrousd: 20_000 } };
+    expect(await reconcileAutonomousBudget(db, input)).toMatchObject({ status: "reconciled", replayed: false });
+    expect(await reconcileAutonomousBudget(db, input)).toMatchObject({ status: "reconciled", replayed: true });
+    expect(await reconcileAutonomousBudget(db, { ...input, runId: missingRunId,
+      providerActivityOccurred: false, providerRequestId: null, actual: null }))
+      .toMatchObject({ status: "retained_missing_telemetry" });
+    const alerts = await db.select().from(activityLog).where(eq(activityLog.companyId, scope.companyId));
+    expect(alerts.filter((row) => row.action === "issue.continuity_prompt_growth"))
+      .toMatchObject([{ runId: secondRunId, entityId: scope.issueId,
+        details: { previousInputTokens: 10_000, actualInputTokens: 35_000 } }]);
+    const orphanRunId = randomUUID();
+    await db.insert(autonomousBudgetReservations).values({ ...scope, runId: orphanRunId,
+      provider: "openrouter", model: "test-model" });
+    const orphanInput = { ...input, runId: orphanRunId, providerRequestId: "prompt-orphan",
+      actual: { ...input.actual, inputTokens: 80_000 } };
+    expect(await reconcileAutonomousBudget(db, orphanInput))
+      .toMatchObject({ status: "reconciled", replayed: false });
+    expect(await reconcileAutonomousBudget(db, orphanInput))
+      .toMatchObject({ status: "reconciled", replayed: true });
+    const growthAlerts = (await db.select().from(activityLog).where(eq(activityLog.companyId, scope.companyId)))
+      .filter((row) => row.action === "issue.continuity_prompt_growth");
+    expect(growthAlerts).toHaveLength(1);
+    expect(growthAlerts[0]).toMatchObject({ runId: secondRunId });
+    expect((await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, orphanRunId)))[0])
+      .toMatchObject({ status: "reconciled", actualInputTokens: 80_000 });
+
+    await db.update(activityLog).set({ createdAt: new Date(Date.now() - 16 * 60_000) })
+      .where(eq(activityLog.id, growthAlerts[0].id));
+    const laterRunId = randomUUID();
+    await db.insert(autonomousBudgetReservations).values({ ...scope, runId: laterRunId,
+      provider: "openrouter", model: "test-model" });
+    await reconcileAutonomousBudget(db, { ...input, runId: laterRunId,
+      providerRequestId: "prompt-later", actual: { ...input.actual, inputTokens: 170_000 } });
+    const laterAlerts = (await db.select().from(activityLog).where(eq(activityLog.companyId, scope.companyId)))
+      .filter((row) => row.action === "issue.continuity_prompt_growth");
+    expect(laterAlerts).toHaveLength(2);
+    expect(laterAlerts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId: null, details: expect.objectContaining({
+        sourceRunId: laterRunId, previousInputTokens: 80_000, actualInputTokens: 170_000,
+      }) }),
+    ]));
+    const concurrentRunIds = [randomUUID(), randomUUID()];
+    await db.insert(autonomousBudgetReservations).values(concurrentRunIds.map((runId) => ({
+      ...scope, runId, provider: "openrouter", model: "test-model",
+    })));
+    const concurrent = await Promise.all(concurrentRunIds.map((runId, index) =>
+      reconcileAutonomousBudget(db, { ...input, runId, providerRequestId: `prompt-parallel-${index}`,
+        actual: { ...input.actual, inputTokens: index === 0 ? 350_000 : 720_000 } })));
+    expect(concurrent.every((result) => result.status === "reconciled" && !result.replayed)).toBe(true);
+    expect((await db.select().from(activityLog).where(eq(activityLog.companyId, scope.companyId)))
+      .filter((entry) => entry.action === "issue.continuity_prompt_growth")).toHaveLength(2);
   });
 
   it("counts a verified overrun against the next admission", async () => {

@@ -10,6 +10,8 @@ const snapshot: AutonomousContinuitySnapshot = {
   circuitAlerts: [{ id: "alert-1", issueId: "task-1", agentId: "agent-1", runId: "run-1",
     stateFingerprint: "same", circuitOpenedAt: "2026-09-27T00:00:00Z",
     createdAt: "2026-09-27T00:00:00Z" }],
+  promptGrowthAlerts: [{ id: "growth-1", issueId: "task-1", agentId: "agent-1", runId: "run-1",
+    previousInputTokens: 10_000, actualInputTokens: 35_000, createdAt: "2026-09-27T00:00:00Z" }],
   recent: [{ runId: "run-1", agentId: "agent-1", issueId: "task-1",
     agentAutonomousPaused: false, taskAutonomousPaused: true,
     reservationStatus: "retained_missing_telemetry", reservedCostMicrousd: 250000,
@@ -25,6 +27,8 @@ describe("AutonomousContinuityCard", () => {
     expect(html).toContain("unverified");
     expect(html).toContain("circuit open");
     expect(html).toContain("Circuit opened alerts");
+    expect(html).toContain("Prompt growth alerts (in-app audit only");
+    expect(html).toContain("10,000 → 35,000");
     expect(html).toContain("task-1");
     expect(html).toContain("not externally delivered");
     expect(html).toContain("Effective execution state: Paused");

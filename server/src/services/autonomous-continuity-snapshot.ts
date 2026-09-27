@@ -65,6 +65,28 @@ export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
     circuitOpenedAt: typeof details?.circuitOpenedAt === "string" ? details.circuitOpenedAt : null,
   }));
 
+  const growthRows = await db.select({
+    id: activityLog.id,
+    issueId: activityLog.entityId,
+    agentId: activityLog.agentId,
+    runId: activityLog.runId,
+    details: activityLog.details,
+    createdAt: activityLog.createdAt,
+  }).from(activityLog)
+    .where(and(eq(activityLog.companyId, companyId),
+      eq(activityLog.action, "issue.continuity_prompt_growth"),
+      eq(activityLog.entityType, "issue")))
+    .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
+    .limit(25);
+  const promptGrowthAlerts = growthRows.flatMap(({ details, ...row }) => {
+    const previousInputTokens = details?.previousInputTokens;
+    const actualInputTokens = details?.actualInputTokens;
+    return typeof previousInputTokens === "number" && Number.isSafeInteger(previousInputTokens)
+      && typeof actualInputTokens === "number" && Number.isSafeInteger(actualInputTokens)
+      ? [{ ...row, runId: row.runId ?? (typeof details?.sourceRunId === "string" ? details.sourceRunId : null),
+        previousInputTokens, actualInputTokens }] : [];
+  });
+
   return { companyId, paused: company.status === "paused" || company.autonomousPaused,
-    autonomousPaused: company.autonomousPaused, totals, recent, circuitAlerts };
+    autonomousPaused: company.autonomousPaused, totals, recent, circuitAlerts, promptGrowthAlerts };
 }

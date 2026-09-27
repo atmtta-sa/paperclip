@@ -19,6 +19,10 @@ export type AutonomousContinuitySnapshot = {
     id: string; issueId: string; agentId: string | null; runId: string | null;
     stateFingerprint: string | null; circuitOpenedAt: string | null; createdAt: string;
   }>;
+  promptGrowthAlerts: Array<{
+    id: string; issueId: string; agentId: string | null; runId: string | null;
+    previousInputTokens: number; actualInputTokens: number; createdAt: string;
+  }>;
   recent: Array<{
     runId: string; agentId: string; issueId: string | null;
     agentAutonomousPaused: boolean | null; taskAutonomousPaused: boolean | null;
