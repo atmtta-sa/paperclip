@@ -52,6 +52,7 @@ export const THROTTLED_ISSUE_REWAKE_REASONS: ReadonlySet<string> = new Set([
   "issue_assignment_recovery",
   "issue_graph_liveness_backstop",
   "issue_blockers_resolved",
+  "issue_reopened_via_comment",
   "issue_children_completed",
   "issue_monitor_due",
   "process_lost_retry",

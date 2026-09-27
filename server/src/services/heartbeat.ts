@@ -26085,6 +26085,11 @@ export function heartbeatService(
       payload,
       taskKey,
     );
+    const authorizedHumanResume = Boolean(
+      explicitResumeSession && opts.requestedByActorType === "user" && opts.requestedByActorId &&
+      ((source === "on_demand" && triggerDetail === "manual") ||
+        (payload?.resumeIntent === true && wakeCommentId)),
+    );
     if (explicitResumeSession) {
       enrichedContextSnapshot.resumeFromRunId =
         explicitResumeSession.resumeFromRunId;
@@ -26110,8 +26115,7 @@ export function heartbeatService(
       ) {
         enrichedContextSnapshot.taskKey = explicitResumeSession.taskKey;
       }
-      enrichedContextSnapshot.authorizedHumanResume =
-        opts.requestedByActorType === "user";
+      enrichedContextSnapshot.authorizedHumanResume = authorizedHumanResume;
       issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueId;
     }
     const effectiveTaskKey =
@@ -27481,7 +27485,7 @@ export function heartbeatService(
               requestedByActorType: opts.requestedByActorType ?? null,
               forceFreshSession:
                 enrichedContextSnapshot.forceFreshSession === true,
-              hasExplicitResume: Boolean(explicitResumeSession),
+              hasExplicitResume: authorizedHumanResume,
             })
           ) {
             const throttleNow = new Date();

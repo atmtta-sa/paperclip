@@ -963,6 +963,24 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_throttled");
   });
 
+  it("does not treat a user-attributed session selection as explicit resume intent", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const resumeFromRunId = await seedTerminalRun({ companyId, agentId, issueId,
+      finishedSecondsAgo: 40, sessionIdAfter: randomUUID() });
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 10 });
+
+    const wake = await heartbeat.wakeup(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_reopened_via_comment",
+      payload: { issueId, resumeFromRunId },
+      contextSnapshot: { issueId, wakeReason: "issue_reopened_via_comment" },
+      requestedByActorType: "user", requestedByActorId: "board-user",
+    });
+
+    expect(wake).toBeNull();
+    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_throttled");
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
   it("does not throttle the wake that follows a failed run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 

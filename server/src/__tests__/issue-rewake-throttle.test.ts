@@ -83,6 +83,7 @@ describe("isThrottleCandidateIssueRewake", () => {
   it("keeps automated lifecycle events throttle-eligible", () => {
     for (const reason of [
       "issue_blockers_resolved",
+      "issue_reopened_via_comment",
       "issue_children_completed",
       "issue_monitor_due",
       "process_lost_retry",
@@ -90,6 +91,8 @@ describe("isThrottleCandidateIssueRewake", () => {
     ]) {
       expect(isThrottleCandidateIssueRewake({ ...base, reason })).toBe(true);
     }
+    expect(isThrottleCandidateIssueRewake({ ...base, reason: "issue_reopened_via_comment",
+      requestedByActorType: "user" })).toBe(true);
   });
 });
 
