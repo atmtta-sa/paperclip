@@ -468,11 +468,20 @@ export async function execute(
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
   const model = cfgString(config.model) || DEFAULT_MODEL;
-  const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
+  const configuredTimeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
+  const timeoutSec = ctx.autonomousBudgetEnvelope
+    ? Math.min(configuredTimeoutSec, 300, ctx.autonomousBudgetEnvelope.runtimeMs / 1_000)
+    : configuredTimeoutSec;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
-  const maxTurns = cfgNumber(config.maxTurnsPerRun);
+  const configuredMaxTurns = cfgNumber(config.maxTurnsPerRun);
+  const maxTurns = ctx.autonomousBudgetEnvelope
+    ? Math.min(configuredMaxTurns && configuredMaxTurns > 0 ? configuredMaxTurns : 8, 8)
+    : configuredMaxTurns;
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
+  if (ctx.autonomousBudgetEnvelope && extraArgs?.length) {
+    throw new Error("autonomous_hermes_extra_args_forbidden");
+  }
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;

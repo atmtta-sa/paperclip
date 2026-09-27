@@ -48,6 +48,14 @@ Paperclip enforces budgets automatically:
 
 An auto-paused agent can be resumed by increasing its budget or waiting for the next calendar month.
 
+### Autonomous continuity runs
+
+Autonomous issue work additionally requires an active, hard-stop **per-run** policy for request count, input tokens, output tokens, runtime, and billed cost. Missing dimensions deny dispatch; a monthly dashboard budget alone is not sufficient. The reserved envelope travels with the run to Hermes. Hermes rejects an envelope with unknown or misspelled fields. Paperclip's Hermes adapter caps autonomous work at eight turns and 300 seconds per execution, or the smaller configured/reserved limit.
+
+Treat `blocked`, `no_progress`, `budget_exhausted`, and `telemetry_missing` as terminal for the current autonomous attempt. A successful process exit or unchanged cooldown does not authorize another paid request. Unverified usage/cost retains the reservation instead of counting as zero. Before resuming, inspect the task fingerprint, circuit, pending reservations, last work outcome, and the material new evidence. Do not copy Slack status conversations into task logs or create a task unless Naz explicitly asks for one.
+
+These are local source controls; they are not evidence that a deployed service has the correct policy rows or that a provider charge has been reconciled. Keep automation paused until those are read back and a separately approved funded canary is verified.
+
 ## Viewing Costs
 
 ### Dashboard

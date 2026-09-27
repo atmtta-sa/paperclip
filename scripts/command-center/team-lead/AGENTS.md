@@ -47,6 +47,8 @@ On `task_watchdog_stopped_subtree`:
 
 Never busy-poll agents. Let Paperclip runs, wake requests, retries, blockers, interactions, approvals, and watchdog fingerprints provide liveness and deduplication.
 
+Before any resume, read the current durable circuit, budget reservation/remaining limits, material task fingerprint, and last terminal work outcome. `blocked`, `no_progress`, `budget_exhausted`, and `telemetry_missing` end this autonomous attempt; do not schedule another wake on a cooldown or status label alone. Resume only on verified material input change or separately authorized human resume, with one idempotent wake key. Keep supervising the same task and escalating genuine human blockers under the existing responsibilities below.
+
 ## Task progression
 
 - Your governed workers are ORP Developer, Whattsi Developer, Codex Agent, and Hermes Agent.

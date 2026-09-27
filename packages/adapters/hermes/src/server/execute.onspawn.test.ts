@@ -127,6 +127,35 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(args).toContain("-Q");
   });
 
+  it("caps autonomous runs at eight turns and 300 seconds despite looser config", async () => {
+    const { ctx } = makeCtx({ timeoutSec: 1800, maxTurnsPerRun: 50 });
+    (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {
+      requestCount: 12, inputTokens: 64_000, outputTokens: 8_000,
+      runtimeMs: 900_000, costMicrousd: 250_000,
+    };
+    await execute(ctx as any);
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const args = call[2] as string[];
+    expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "8"]);
+    expect((call[3] as { timeoutSec: number }).timeoutSec).toBe(300);
+  });
+
+  it("applies autonomous caps when config omits them, and rejects bypass args", async () => {
+    const { ctx } = makeCtx();
+    (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {
+      requestCount: 8, inputTokens: 64_000, outputTokens: 8_000,
+      runtimeMs: 120_000, costMicrousd: 250_000,
+    };
+    await execute(ctx as any);
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const args = call[2] as string[];
+    expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "8"]);
+    expect((call[3] as { timeoutSec: number }).timeoutSec).toBe(60);
+    (ctx.config as Record<string, unknown>).extraArgs = ["--max-turns", "100"];
+    await expect(execute(ctx as any)).rejects.toThrow("autonomous_hermes_extra_args_forbidden");
+    expect(vi.mocked(serverUtils.runChildProcess)).toHaveBeenCalledTimes(1);
+  });
+
   it("allocates a distinct result file for each execution of the same run", async () => {
     const { ctx } = makeCtx();
     await execute(ctx as any);
