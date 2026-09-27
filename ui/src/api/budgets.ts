@@ -28,6 +28,12 @@ export type AutonomousContinuitySnapshot = {
     committedCostMicrousd: number; dailyLimitMicrousd: number; windowMinutes: number;
     createdAt: string;
   }>;
+  policyLimits: Array<{
+    id: string; scopeType: "company" | "agent" | "task"; scopeId: string;
+    metric: "billed_cents" | "billed_microusd" | "request_count" | "input_tokens" | "output_tokens" | "runtime_ms";
+    windowKind: "per_run" | "calendar_day_utc" | "calendar_month_utc" | "lifetime";
+    amount: number; committed: number | null; remaining: number | null;
+  }>;
   recent: Array<{
     runId: string; agentId: string; issueId: string | null;
     agentAutonomousPaused: boolean | null; taskAutonomousPaused: boolean | null;

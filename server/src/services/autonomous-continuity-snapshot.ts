@@ -1,6 +1,7 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, agents, autonomousBudgetReservations, companies, heartbeatRuns, issues } from "@paperclipai/db";
+import { autonomousPolicyLimits } from "./autonomous-policy-limits.js";
 
 /** Read-only operator view. Totals are all-time ledger commitments, not provider billing. */
 export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
@@ -110,7 +111,8 @@ export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
         committedCostMicrousd: cost, dailyLimitMicrousd: limit, windowMinutes: minutes }] : [];
   });
 
+  const policyLimits = await autonomousPolicyLimits(db, companyId);
   return { companyId, paused: company.status === "paused" || company.autonomousPaused,
     autonomousPaused: company.autonomousPaused, totals, recent, circuitAlerts, promptGrowthAlerts,
-    costVelocityAlerts };
+    costVelocityAlerts, policyLimits };
 }

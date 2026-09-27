@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { activityLog, agents, autonomousBudgetReservations, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { activityLog, agents, autonomousBudgetReservations, budgetPolicies, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { autonomousContinuitySnapshot } from "../services/autonomous-continuity-snapshot.js";
 
@@ -54,6 +54,23 @@ describeDb("autonomous continuity operator snapshot", () => {
         actualInputTokens: 1000, reservedOutputTokens: 2000, actualOutputTokens: 100,
         reservedCostMicrousd: 50000, actualCostMicrousd: 20000 },
     ]);
+    const [companyPolicy, agentPolicy, taskPolicy, lifetimePolicy] = await db.insert(budgetPolicies).values([
+      { companyId: first, scopeType: "company", scopeId: first, metric: "billed_microusd",
+        windowKind: "calendar_month_utc", amount: 1_000_000 },
+      { companyId: first, scopeType: "agent", scopeId: a, metric: "input_tokens",
+        windowKind: "calendar_month_utc", amount: 100_000 },
+      { companyId: first, scopeType: "task", scopeId: task, metric: "request_count",
+        windowKind: "per_run", amount: 8 },
+      { companyId: first, scopeType: "task", scopeId: task, metric: "output_tokens",
+        windowKind: "lifetime", amount: 10_000 },
+      { companyId: second, scopeType: "company", scopeId: second, metric: "billed_microusd",
+        windowKind: "calendar_month_utc", amount: 1_000_000 },
+    ]).returning({ id: budgetPolicies.id });
+    await db.insert(autonomousBudgetReservations).values({
+      companyId: first, agentId: a, issueId: task, runId: randomUUID(),
+      status: "reserved", reservedRequestCount: 0, reservedOutputTokens: 900,
+      createdAt: new Date("2025-01-01T00:00:00.000Z"),
+    });
     await db.insert(activityLog).values([
       { companyId: first, actorId: "continuity-circuit-breaker", action: "issue.continuity_circuit_opened",
         entityType: "issue", entityId: task, agentId: a, runId: run,
@@ -80,8 +97,8 @@ describeDb("autonomous continuity operator snapshot", () => {
     const snapshot = await autonomousContinuitySnapshot(db, first);
     expect(snapshot).toMatchObject({
       companyId: first, paused: true,
-      totals: { runs: 2, requests: 9, inputTokens: 65000, outputTokens: 8100,
-        costMicrousd: 270000, held: 1, missingTelemetry: 1 },
+      totals: { runs: 3, requests: 9, inputTokens: 65000, outputTokens: 9000,
+        costMicrousd: 270000, held: 2, missingTelemetry: 1 },
       recent: expect.arrayContaining([expect.objectContaining({ runId: run, agentId: a, issueId: task,
         reservationStatus: "retained_missing_telemetry", workOutcome: "telemetry_missing",
         fingerprintBefore: "before", fingerprintAfter: "before", noProgressStreak: 2,
@@ -96,7 +113,18 @@ describeDb("autonomous continuity operator snapshot", () => {
       ]),
       costVelocityAlerts: [expect.objectContaining({ companyId: first, agentId: a, runId: run,
         committedCostMicrousd: 300_000, dailyLimitMicrousd: 1_000_000, windowMinutes: 15 })],
+      policyLimits: expect.arrayContaining([
+        expect.objectContaining({ id: companyPolicy.id, scopeType: "company", metric: "billed_microusd",
+          amount: 1_000_000, committed: 270_000, remaining: 730_000 }),
+        expect.objectContaining({ id: agentPolicy.id, scopeType: "agent", scopeId: a,
+          metric: "input_tokens", amount: 100_000, committed: 65_000, remaining: 35_000 }),
+        expect.objectContaining({ id: taskPolicy.id, scopeType: "task", scopeId: task,
+          metric: "request_count", amount: 8, committed: null, remaining: null }),
+        expect.objectContaining({ id: lifetimePolicy.id, windowKind: "lifetime", amount: 10_000,
+          committed: 9_000, remaining: 1_000 }),
+      ]),
     });
+    expect(snapshot?.policyLimits).toHaveLength(4);
     expect(await autonomousContinuitySnapshot(db, randomUUID())).toBeNull();
     await db.update(companies).set({ status: "active", autonomousExecutionPaused: true })
       .where(eq(companies.id, first));

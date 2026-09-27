@@ -15,6 +15,12 @@ const snapshot: AutonomousContinuitySnapshot = {
   costVelocityAlerts: [{ id: "velocity-1", companyId: "company-1", agentId: "agent-1",
     runId: "run-1", committedCostMicrousd: 300_000, dailyLimitMicrousd: 1_000_000,
     windowMinutes: 15, createdAt: "2026-09-27T00:00:00Z" }],
+  policyLimits: [
+    { id: "policy-1", scopeType: "company", scopeId: "company-1", metric: "billed_microusd",
+      windowKind: "calendar_day_utc", amount: 1_000_000, committed: 300_000, remaining: 700_000 },
+    { id: "policy-2", scopeType: "task", scopeId: "task-1", metric: "request_count",
+      windowKind: "per_run", amount: 8, committed: null, remaining: null },
+  ],
   recent: [{ runId: "run-1", agentId: "agent-1", issueId: "task-1",
     agentAutonomousPaused: false, taskAutonomousPaused: true,
     reservationStatus: "retained_missing_telemetry", reservedCostMicrousd: 250000,
@@ -34,6 +40,9 @@ describe("AutonomousContinuityCard", () => {
     expect(html).toContain("10,000 → 35,000");
     expect(html).toContain("Committed-cost velocity (in-app audit only");
     expect(html).toContain("$0.3000 of $1.0000 daily cap in 15 minutes");
+    expect(html).toContain("Remaining policy allowance (committed ledger, not provider billing)");
+    expect(html).toContain("$0.7000 remaining of $1.0000");
+    expect(html).toContain("8 requests per run (no cumulative remaining)");
     expect(html).toContain("task-1");
     expect(html).toContain("not externally delivered");
     expect(html).toContain("Effective execution state: Paused");

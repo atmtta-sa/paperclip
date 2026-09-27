@@ -4,6 +4,13 @@ function usd(microusd: number) {
   return `$${(microusd / 1_000_000).toFixed(4)}`;
 }
 
+function policyAmount(metric: AutonomousContinuitySnapshot["policyLimits"][number]["metric"], value: number) {
+  if (metric === "billed_cents") return usd(value * 10_000);
+  if (metric === "billed_microusd") return usd(value);
+  const unit = metric === "request_count" ? " requests" : metric === "runtime_ms" ? " ms" : " tokens";
+  return `${value.toLocaleString()}${unit}`;
+}
+
 export function AutonomousContinuityCard({ snapshot, loading, error, onPause, pausing, pauseError,
   onScopedPause, scopedPausePending, scopedPauseError }: {
   snapshot?: AutonomousContinuitySnapshot;
@@ -22,7 +29,7 @@ export function AutonomousContinuityCard({ snapshot, loading, error, onPause, pa
       {error ? <p role="alert" className="text-destructive">Continuity ledger unavailable. Do not assume zero usage.</p>
         : loading || !snapshot ? <p>Loading continuity ledger…</p>
         : <>
-          <p>Effective execution state: {snapshot.paused ? "Paused" : "Active"}. All-time ledger commitments, not verified provider billing or remaining allowance.</p>
+          <p>Effective execution state: {snapshot.paused ? "Paused" : "Active"}. All-time ledger commitments, not verified provider billing. Policy allowances below use current windows.</p>
           <p>New autonomous dispatches: {snapshot.autonomousPaused ? "Paused" : "Allowed by pause control"}. Already-running requests are not cancelled.</p>
           {!snapshot.autonomousPaused && onPause ? <button type="button" onClick={onPause} disabled={pausing}
             className="rounded border border-destructive px-3 py-1 text-destructive disabled:opacity-50">
@@ -33,6 +40,15 @@ export function AutonomousContinuityCard({ snapshot, loading, error, onPause, pa
           <p>Runs: {snapshot.totals.runs} · Requests: {snapshot.totals.requests} · Input: {snapshot.totals.inputTokens} · Output: {snapshot.totals.outputTokens} · Committed: {usd(snapshot.totals.costMicrousd)}</p>
           {snapshot.totals.missingTelemetry > 0 ? <p role="alert" className="text-destructive">Missing telemetry: {snapshot.totals.missingTelemetry} retained reservations. Automation must remain blocked.</p> : null}
           <p>Held reservations: {snapshot.totals.held}</p>
+          <div className="text-sm">
+            <p>Remaining policy allowance (committed ledger, not provider billing):</p>
+            {snapshot.policyLimits.length === 0 ? <p>No active hard-stop company/agent/task policies.</p> :
+              <ul>{snapshot.policyLimits.map((policy) => <li key={policy.id}>
+                {policy.scopeType} {policy.scopeId} · {policy.metric} · {policy.windowKind === "per_run"
+                  ? <>{policyAmount(policy.metric, policy.amount)} per run (no cumulative remaining)</>
+                  : <>{policyAmount(policy.metric, policy.remaining ?? 0)} remaining of {policyAmount(policy.metric, policy.amount)} · {policy.windowKind === "calendar_day_utc" ? "UTC day" : policy.windowKind === "calendar_month_utc" ? "UTC month" : "lifetime"} · committed {policyAmount(policy.metric, policy.committed ?? 0)}</>}
+              </li>)}</ul>}
+          </div>
           {snapshot.circuitAlerts.length > 0 ? <div role="alert" className="border border-destructive rounded p-2 text-sm">
             <p>Circuit opened alerts (in-app audit only; not externally delivered):</p>
             <ul>{snapshot.circuitAlerts.map((alert) => <li key={alert.id}>
