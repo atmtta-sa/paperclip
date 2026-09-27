@@ -15,6 +15,10 @@ export type AutonomousContinuitySnapshot = {
     runs: number; requests: number; inputTokens: number; outputTokens: number;
     costMicrousd: number; held: number; missingTelemetry: number;
   };
+  circuitAlerts: Array<{
+    id: string; issueId: string; agentId: string | null; runId: string | null;
+    stateFingerprint: string | null; circuitOpenedAt: string | null; createdAt: string;
+  }>;
   recent: Array<{
     runId: string; agentId: string; issueId: string | null;
     reservationStatus: string; reservedCostMicrousd: number; actualCostMicrousd: number | null;

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { agents, autonomousBudgetReservations, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { activityLog, agents, autonomousBudgetReservations, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { autonomousContinuitySnapshot } from "../services/autonomous-continuity-snapshot.js";
 
@@ -54,6 +54,14 @@ describeDb("autonomous continuity operator snapshot", () => {
         actualInputTokens: 1000, reservedOutputTokens: 2000, actualOutputTokens: 100,
         reservedCostMicrousd: 50000, actualCostMicrousd: 20000 },
     ]);
+    await db.insert(activityLog).values([
+      { companyId: first, actorId: "continuity-circuit-breaker", action: "issue.continuity_circuit_opened",
+        entityType: "issue", entityId: task, agentId: a, runId: run,
+        details: { stateFingerprint: "before", circuitOpenedAt: "2026-09-27T00:00:00.000Z" } },
+      { companyId: second, actorId: "continuity-circuit-breaker", action: "issue.continuity_circuit_opened",
+        entityType: "issue", entityId: randomUUID(), agentId: b,
+        details: { stateFingerprint: "other", circuitOpenedAt: "2026-09-27T00:00:00.000Z" } },
+    ]);
     const snapshot = await autonomousContinuitySnapshot(db, first);
     expect(snapshot).toMatchObject({
       companyId: first, paused: true,
@@ -63,6 +71,8 @@ describeDb("autonomous continuity operator snapshot", () => {
         reservationStatus: "retained_missing_telemetry", workOutcome: "telemetry_missing",
         fingerprintBefore: "before", fingerprintAfter: "before", noProgressStreak: 2,
         circuitState: "open", stopReason: "missing_usage" })]),
+      circuitAlerts: [expect.objectContaining({ issueId: task, agentId: a, runId: run,
+        stateFingerprint: "before" })],
     });
     expect(await autonomousContinuitySnapshot(db, randomUUID())).toBeNull();
     await db.update(companies).set({ status: "active", autonomousExecutionPaused: true })

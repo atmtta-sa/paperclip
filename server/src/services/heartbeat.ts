@@ -30,6 +30,7 @@ import {
   dispatchWithAutonomousBudgetReservation,
   isAutonomousBudgetAdmissionError,
 } from "./autonomous-budget-dispatch.js";
+import { recordContinuityCircuitAlert } from "./continuity-circuit-alert.js";
 import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
@@ -12628,51 +12629,9 @@ export function heartbeatService(
   async function emitIssueContinuityCircuitAlert(
     run: typeof heartbeatRuns.$inferSelect,
   ): Promise<void> {
-    if (
-      run.continuityCircuitState !== "open" ||
-      !run.continuityCircuitOpenedAt ||
-      run.continuityCircuitAlertedAt
-    ) {
-      return;
-    }
     const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
     if (!issueId) return;
-    const circuitOpenedAt = run.continuityCircuitOpenedAt;
-
-    await db.transaction(async (tx) => {
-      const alertedAt = new Date();
-      const claimed = await tx
-        .update(heartbeatRuns)
-        .set({ continuityCircuitAlertedAt: alertedAt, updatedAt: alertedAt })
-        .where(
-          and(
-            eq(heartbeatRuns.id, run.id),
-            eq(heartbeatRuns.continuityCircuitState, "open"),
-            isNull(heartbeatRuns.continuityCircuitAlertedAt),
-          ),
-        )
-        .returning({ id: heartbeatRuns.id })
-        .then((rows) => rows[0] ?? null);
-      if (!claimed) return;
-
-      await tx.insert(activityLog).values({
-        companyId: run.companyId,
-        actorType: "system",
-        actorId: "continuity-circuit-breaker",
-        action: "issue.continuity_circuit_opened",
-        entityType: "issue",
-        entityId: issueId,
-        agentId: run.agentId,
-        runId: run.id,
-        responsibleUserId: run.responsibleUserId,
-        details: {
-          stateFingerprint: run.stateFingerprintAfter,
-          noProgressStreak: run.noProgressStreak,
-          circuitOpenedAt: circuitOpenedAt.toISOString(),
-        },
-        createdAt: alertedAt,
-      });
-    });
+    await recordContinuityCircuitAlert(db, run, issueId);
   }
 
   async function setRunStatus(

@@ -1,6 +1,6 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { autonomousBudgetReservations, companies, heartbeatRuns } from "@paperclipai/db";
+import { activityLog, autonomousBudgetReservations, companies, heartbeatRuns } from "@paperclipai/db";
 
 /** Read-only operator view. Totals are all-time ledger commitments, not provider billing. */
 export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
@@ -42,6 +42,25 @@ export async function autonomousContinuitySnapshot(db: Db, companyId: string) {
     .orderBy(desc(autonomousBudgetReservations.createdAt), desc(autonomousBudgetReservations.id))
     .limit(25);
 
+  const alertRows = await db.select({
+    id: activityLog.id,
+    issueId: activityLog.entityId,
+    agentId: activityLog.agentId,
+    runId: activityLog.runId,
+    details: activityLog.details,
+    createdAt: activityLog.createdAt,
+  }).from(activityLog)
+    .where(and(eq(activityLog.companyId, companyId),
+      eq(activityLog.action, "issue.continuity_circuit_opened"),
+      eq(activityLog.entityType, "issue")))
+    .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
+    .limit(25);
+  const circuitAlerts = alertRows.map(({ details, ...row }) => ({
+    ...row,
+    stateFingerprint: typeof details?.stateFingerprint === "string" ? details.stateFingerprint : null,
+    circuitOpenedAt: typeof details?.circuitOpenedAt === "string" ? details.circuitOpenedAt : null,
+  }));
+
   return { companyId, paused: company.status === "paused" || company.autonomousPaused,
-    autonomousPaused: company.autonomousPaused, totals, recent };
+    autonomousPaused: company.autonomousPaused, totals, recent, circuitAlerts };
 }

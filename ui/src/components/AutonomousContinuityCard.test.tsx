@@ -7,6 +7,9 @@ const snapshot: AutonomousContinuitySnapshot = {
   companyId: "company-1", paused: true, autonomousPaused: true,
   totals: { runs: 1, requests: 8, inputTokens: 64000, outputTokens: 8000,
     costMicrousd: 250000, held: 1, missingTelemetry: 1 },
+  circuitAlerts: [{ id: "alert-1", issueId: "task-1", agentId: "agent-1", runId: "run-1",
+    stateFingerprint: "same", circuitOpenedAt: "2026-09-27T00:00:00Z",
+    createdAt: "2026-09-27T00:00:00Z" }],
   recent: [{ runId: "run-1", agentId: "agent-1", issueId: "task-1",
     reservationStatus: "retained_missing_telemetry", reservedCostMicrousd: 250000,
     actualCostMicrousd: null, workOutcome: "telemetry_missing", fingerprintBefore: "same",
@@ -20,6 +23,9 @@ describe("AutonomousContinuityCard", () => {
     expect(html).toContain("Missing telemetry: 1");
     expect(html).toContain("unverified");
     expect(html).toContain("circuit open");
+    expect(html).toContain("Circuit opened alerts");
+    expect(html).toContain("task-1");
+    expect(html).toContain("not externally delivered");
     expect(html).toContain("Effective execution state: Paused");
     expect(html).toContain("not verified provider billing");
   });

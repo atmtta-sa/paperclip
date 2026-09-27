@@ -28,6 +28,12 @@ export function AutonomousContinuityCard({ snapshot, loading, error, onPause, pa
           <p>Runs: {snapshot.totals.runs} · Requests: {snapshot.totals.requests} · Input: {snapshot.totals.inputTokens} · Output: {snapshot.totals.outputTokens} · Committed: {usd(snapshot.totals.costMicrousd)}</p>
           {snapshot.totals.missingTelemetry > 0 ? <p role="alert" className="text-destructive">Missing telemetry: {snapshot.totals.missingTelemetry} retained reservations. Automation must remain blocked.</p> : null}
           <p>Held reservations: {snapshot.totals.held}</p>
+          {snapshot.circuitAlerts.length > 0 ? <div role="alert" className="border border-destructive rounded p-2 text-sm">
+            <p>Circuit opened alerts (in-app audit only; not externally delivered):</p>
+            <ul>{snapshot.circuitAlerts.map((alert) => <li key={alert.id}>
+              Task {alert.issueId} · agent {alert.agentId ?? "unknown"} · run {alert.runId ?? "unknown"} · fingerprint {alert.stateFingerprint ?? "unknown"} · opened {alert.circuitOpenedAt ?? "unknown"}
+            </li>)}</ul>
+          </div> : null}
           <ul className="space-y-2">
             {snapshot.recent.map((run) => <li key={run.runId} className="border-t border-border pt-2 text-sm break-words">
               <span className="font-mono">{run.runId}</span> · agent {run.agentId} · task {run.issueId ?? "unlinked"} · {run.workOutcome ?? "outcome unknown"} · {run.reservationStatus} · circuit {run.circuitState ?? "unknown"} · streak {run.noProgressStreak ?? "unknown"}

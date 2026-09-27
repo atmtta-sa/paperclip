@@ -56,6 +56,8 @@ Treat `blocked`, `no_progress`, `budget_exhausted`, and `telemetry_missing` as t
 
 The Budgets continuity card offers a board-only, audited "Pause new autonomous dispatches" control. Migration `0283` initializes existing and new companies with autonomous execution paused; the migration has not been applied by this source change. The control denies both new reservations and replay admission for that company after the pause transaction commits, but does not cancel already-running requests. Its dedicated flag is separate from company lifecycle status. Read the continuity snapshot back to verify the flag; do not infer a live kill switch from source code or an HTTP success alone. Resume through an explicit, audited board action only after the release gates pass.
 
+The same card shows recent circuit-open audit events, deduplicated by company, agent, task, fingerprint, and circuit episode. These are in-app records only: they do not deliver a notification, wake an agent, or write Slack conversation into a task log. Prompt-growth and cost-velocity alert rules, external delivery, and delivery verification remain separate release work.
+
 These are local source controls; they are not evidence that a deployed service has the correct policy rows or that a provider charge has been reconciled. Keep automation paused until those are read back and a separately approved funded canary is verified.
 
 ## Viewing Costs
