@@ -24441,7 +24441,15 @@ export function heartbeatService(
                 );
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(latestRun?.errorCode);
-        const runErrorCode = telemetryMissing
+        // A verified pre-provider quota rejection has no usage receipt, so keep
+        // its reservation, but retain its retry classification. Missing usage
+        // must not hide the provider's reset-time signal.
+        const preProviderQuotaRejection = telemetryMissing &&
+          adapterResult.errorCode === "provider_quota" &&
+          adapterResult.errorFamily === "provider_quota" &&
+          adapterResult.executionRecovery?.kind === "bootstrap" &&
+          adapterResult.executionRecovery.providerWorkStarted === false;
+        const runErrorCode = telemetryMissing && !preProviderQuotaRejection
           ? "telemetry_missing"
           : outcome === "timed_out"
             ? "timeout"

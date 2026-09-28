@@ -5318,6 +5318,12 @@ export function recoveryService(
       companyId,
       companyCandidates,
     ] of candidatesByCompany.entries()) {
+      const [company] = await db.select({ paused: companies.autonomousExecutionPaused })
+        .from(companies).where(eq(companies.id, companyId));
+      if (!company || company.paused) {
+        result.pauseHoldSkipped += companyCandidates.length;
+        continue;
+      }
       const readinessMap = await issuesSvc.listDependencyReadiness(
         companyId,
         companyCandidates.map((candidate) => candidate.id),

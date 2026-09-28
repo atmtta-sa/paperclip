@@ -6,6 +6,9 @@ import {
   agents,
   agentRuntimeState,
   agentWakeupRequests,
+  autonomousBudgetReservations,
+  budgetIncidents,
+  budgetPolicies,
   companySkills,
   companies,
   createDb,
@@ -27,6 +30,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
@@ -39,6 +43,9 @@ const mockAdapterExecute = vi.hoisted(() =>
     summary: "Dependency-aware heartbeat test run.",
     provider: "test",
     model: "test-model",
+    budgetTelemetry: { providerRequestId: randomUUID(), requestCount: 1,
+      inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 1,
+      rateCardVersion: "synthetic-v1" },
   })),
 );
 
@@ -128,6 +135,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       summary: "Dependency-aware heartbeat test run.",
       provider: "test",
       model: "test-model",
+      budgetTelemetry: { providerRequestId: randomUUID(), requestCount: 1,
+        inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 1,
+        rateCardVersion: "synthetic-v1" },
     }));
     runningProcesses.clear();
     await db.delete(environmentLeases);
@@ -145,6 +155,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(autonomousBudgetReservations);
+    await db.delete(budgetIncidents);
+    await db.delete(budgetPolicies);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(environments);
@@ -179,6 +192,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       name: "Paperclip",
       issuePrefix: `N${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
+      autonomousExecutionPaused: false,
     });
     await db.insert(agents).values({
       id: agentId,
@@ -200,6 +214,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       assigneeAgentId: agentId,
       responsibleUserId: "responsible-user",
     });
+    await seedSyntheticCompanyBudgets(db, companyId);
     const nativeWakePayload = {
       issueId,
       taskId: issueId,
@@ -279,6 +294,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
+      autonomousExecutionPaused: false,
     });
     await db.insert(agents).values({
       id: agentId,
@@ -331,6 +347,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       type: "blocks",
     });
 
+    await seedSyntheticCompanyBudgets(db, companyId);
     const blockedWake = await heartbeat.wakeup(agentId, {
       source: "assignment",
       triggerDetail: "system",
@@ -426,6 +443,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         summary: "Ready dependency scheduling run complete.",
         provider: "test",
         model: "test-model",
+        budgetTelemetry: { providerRequestId: randomUUID(), requestCount: 1,
+          inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 1,
+          rateCardVersion: "synthetic-v1" },
       };
     });
 
@@ -658,6 +678,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         summary: "First assignment run completed.",
         provider: "test",
         model: "test-model",
+        budgetTelemetry: { providerRequestId: randomUUID(), requestCount: 1,
+          inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 1,
+          rateCardVersion: "synthetic-v1" },
       };
     });
 
@@ -667,6 +690,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
+      autonomousExecutionPaused: false,
     });
     await db.insert(agents).values({
       id: agentId,
@@ -705,6 +729,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       },
     ]);
 
+    await seedSyntheticCompanyBudgets(db, companyId);
     try {
       const firstWake = await heartbeat.wakeup(agentId, {
         source: "assignment",
@@ -804,6 +829,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
+      autonomousExecutionPaused: false,
     });
     await db.insert(agents).values({
       id: agentId,
@@ -855,6 +881,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       relatedIssueId: blockedIssueId,
       type: "blocks",
     });
+    await seedSyntheticCompanyBudgets(db, companyId);
     await db.insert(agentWakeupRequests).values([
       {
         id: blockedWakeupRequestId,

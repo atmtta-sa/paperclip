@@ -10,6 +10,8 @@ import {
   agentWakeupRequests,
   activityLog,
   budgetPolicies,
+  budgetIncidents,
+  autonomousBudgetReservations,
   companies,
   companySkills,
   createDb,
@@ -26,6 +28,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 import { registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 
@@ -174,6 +177,8 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(autonomousBudgetReservations);
+    await db.delete(budgetIncidents);
     await db.delete(budgetPolicies);
     await db.delete(agents);
     await db.delete(companySkills);
@@ -281,6 +286,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
   it("records pre-provider quota rejection, schedules the reset-time retry, and leaves the agent idle", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
+    const issueId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -288,6 +294,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
+      autonomousExecutionPaused: false,
     });
 
     await db.insert(agents).values({
@@ -307,13 +314,21 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       permissions: {},
     });
 
-    const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Synthetic quota retry work", status: "todo",
+      priority: "high", assigneeAgentId: agentId, responsibleUserId: "responsible-user",
+    });
+    await seedSyntheticCompanyBudgets(db, companyId);
+    const run = await heartbeat.invoke(agentId, "on_demand", { issueId }, "manual");
     expect(run).not.toBeNull();
 
     const failedRun = await waitForRunToFinish(heartbeat, run!.id);
     expect(failedRun?.status).toBe("failed");
     expect(failedRun?.errorCode).toBe("provider_quota");
     expect((failedRun?.resultJson as Record<string, unknown> | null)?.errorFamily).toBe("provider_quota");
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.runId, run!.id));
+    expect(reservation?.status).toBe("retained_missing_telemetry");
 
     await expect
       .poll(

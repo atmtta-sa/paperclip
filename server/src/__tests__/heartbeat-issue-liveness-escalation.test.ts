@@ -6,6 +6,8 @@ import {
   agents,
   agentWakeupRequests,
   agentRuntimeState,
+  autonomousBudgetReservations,
+  budgetIncidents,
   budgetPolicies,
   companies,
   companyMemberships,
@@ -29,6 +31,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -39,11 +42,15 @@ const mockAdapterExecute = vi.hoisted(() =>
     summary: "Acknowledged liveness escalation.",
     provider: "test",
     model: "test-model",
+    budgetTelemetry: {
+      providerRequestId: randomUUID(), requestCount: 1, inputTokens: 10,
+      outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "synthetic-v1",
+    },
   })),
 );
 
 vi.mock("../telemetry.ts", () => ({
-  getTelemetryClient: () => ({ track: vi.fn() }),
+  getTelemetryClient: () => ({ track: vi.fn(), hashPrivateRef: (id: string) => `synthetic:${id}` }),
 }));
 
 vi.mock("@paperclipai/shared/telemetry", async () => {
@@ -122,6 +129,8 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(autonomousBudgetReservations);
+    await db.delete(budgetIncidents);
     await db.delete(budgetPolicies);
     await db.delete(agents);
     await db.delete(companyMemberships);
@@ -225,6 +234,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
   async function seedResolvedDependencyBackstopFixture(opts: {
     workspaceState?: "none" | "not_finalized" | "finalized";
     assignee?: "agent" | null;
+    autonomousPaused?: boolean;
   } = {}) {
     const workspaceState = opts.workspaceState ?? "none";
     const companyId = randomUUID();
@@ -242,6 +252,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       name: "Paperclip",
       issuePrefix,
       requireBoardApprovalForNewAgents: false,
+      autonomousExecutionPaused: opts.autonomousPaused ?? false,
     });
     await db.insert(companyMemberships).values({
       companyId,
@@ -319,6 +330,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       type: "blocks",
     });
 
+    await seedSyntheticCompanyBudgets(db, companyId);
     if (workspaceState === "not_finalized") {
       await db.insert(workspaceOperations).values({
         companyId,
@@ -353,6 +365,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       issuePrefix,
       defaultResponsibleUserId: "responsible-user",
       requireBoardApprovalForNewAgents: false,
+      autonomousExecutionPaused: false,
     });
     await db.insert(agents).values({
       id: agentId,
@@ -378,6 +391,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     });
 
     const heartbeat = heartbeatService(db);
+    await seedSyntheticCompanyBudgets(db, companyId);
     const followUpRun = await heartbeat.wakeup(agentId, {
       source: "automation",
       triggerDetail: "system",
@@ -431,6 +445,21 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
         expect.objectContaining({ id: "choose_review_path", label: "Choose review path" }),
       ]),
     });
+  });
+
+  it("does not enqueue dependency wakes while autonomous execution is paused", async () => {
+    const { companyId, blockedIssueId } = await seedResolvedDependencyBackstopFixture({ autonomousPaused: true });
+    const heartbeat = heartbeatService(db);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await db.update(issues)
+        .set({ blockedTransitionAt: new Date(Date.now() + attempt * 1_000) })
+        .where(eq(issues.id, blockedIssueId));
+      expect((await heartbeat.reconcileResolvedDependencyWakes()).healed).toBe(0);
+    }
+    expect(await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(0);
   });
 
   it("keeps resolved dependency wake reconciliation active", async () => {
@@ -669,7 +698,9 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     mockAdapterExecute.mockImplementationOnce(async () => {
       await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockedIssueId));
       return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
-        summary: "Finished the dependency-ready task.", provider: "test", model: "test-model" };
+        summary: "Finished the dependency-ready task.", provider: "test", model: "test-model",
+        budgetTelemetry: { providerRequestId: randomUUID(), requestCount: 1, inputTokens: 10,
+          outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "synthetic-v1" } };
     });
     await db.update(issueRecoveryActions).set({ status: "resolved", evidence: {} }).where(eq(issueRecoveryActions.id, action.id));
     expect((await heartbeat.reconcileResolvedDependencyWakes()).healed).toBe(1);

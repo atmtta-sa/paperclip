@@ -6,6 +6,9 @@ import {
   agents,
   agentWakeupRequests,
   agentRuntimeState,
+  autonomousBudgetReservations,
+  budgetIncidents,
+  budgetPolicies,
   companySkills,
   companies,
   createDb,
@@ -23,6 +26,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 import { heartbeatService, resolveHeartbeatSchedulingSuppression } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
@@ -84,6 +88,9 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(agentRuntimeState);
+    await db.delete(autonomousBudgetReservations);
+    await db.delete(budgetIncidents);
+    await db.delete(budgetPolicies);
     await db.delete(companySkills);
     await db.delete(agents);
     await db.delete(companies);
@@ -304,8 +311,10 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await heartbeat.waitForRunExecutionDrain(userRun!.id);
   }, 10_000);
 
-  it("still creates live-plane assignment runs when suppression is not active", async () => {
-    const { agentId, issueId } = await insertAgentAndIssue();
+  it("creates live-plane assignment runs but fails closed without usage evidence", async () => {
+    const { companyId, agentId, issueId } = await insertAgentAndIssue();
+    await db.update(companies).set({ autonomousExecutionPaused: false }).where(eq(companies.id, companyId));
+    await seedSyntheticCompanyBudgets(db, companyId);
     await db
       .update(issues)
       .set({ status: "in_review", updatedAt: new Date() })
@@ -326,7 +335,10 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     expect(run).not.toBeNull();
     const terminalStatus = await waitForCompletedRun(run!.id, agentId);
     await heartbeat.waitForRunExecutionDrain(run!.id);
-    expect(terminalStatus).toBe("succeeded");
+    expect(terminalStatus).toBe("failed");
+    const [failedRun] = await db.select({ errorCode: heartbeatRuns.errorCode,
+      workOutcome: heartbeatRuns.workOutcome }).from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+    expect(failedRun).toMatchObject({ errorCode: "telemetry_missing", workOutcome: "telemetry_missing" });
 
     const runs = await db
       .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
@@ -334,7 +346,6 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       .orderBy(heartbeatRuns.createdAt);
     expect(runs.map((entry) => entry.contextSnapshot?.wakeReason)).toEqual([
       "issue_assigned",
-      "issue_review_path_lost",
     ]);
   }, 10_000);
 
