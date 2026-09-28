@@ -7,6 +7,7 @@ import {
   agentWakeupRequests,
   agents,
   autonomousBudgetReservations,
+  autonomousProviderCircuits,
   budgetIncidents,
   budgetPolicies,
   companies,
@@ -33,6 +34,7 @@ import {
 import { loadIssueTaskStateFingerprint } from "../services/issue-continuity-state.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { runningProcesses } from "../adapters/index.ts";
+import { recordAutonomousProviderCircuitOutcome } from "../services/autonomous-provider-circuit.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -719,6 +721,142 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       continuityCircuitState: "open",
     });
     expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("blocks provider dispatch and recovery while the provider circuit is open", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await recordAutonomousProviderCircuitOutcome(db, {
+        companyId,
+        provider: "codex_local",
+        credentialIdentifierHash: null,
+        runId: randomUUID(),
+        outcome: "transient_failure",
+      });
+    }
+    mockAdapterExecute.mockClear();
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db
+      .select({
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        workOutcome: heartbeatRuns.workOutcome,
+        resultJson: heartbeatRuns.resultJson,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      errorCode: "provider_circuit_open",
+      workOutcome: "blocked",
+      resultJson: {
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      },
+    });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(
+      await db
+        .select()
+        .from(autonomousBudgetReservations)
+        .where(eq(autonomousBudgetReservations.companyId, companyId)),
+    ).toHaveLength(0);
+  });
+
+  it("closes a half-open provider circuit only after productive provider work", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await recordAutonomousProviderCircuitOutcome(db, {
+      companyId,
+      provider: "codex_local",
+      credentialIdentifierHash: null,
+      runId: randomUUID(),
+      outcome: "provider_quota",
+      now: new Date("2020-01-01T00:00:00.000Z"),
+    });
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await db
+        .update(issues)
+        .set({ description: "Verified provider progress" })
+        .where(eq(issues.id, issueId));
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Completed verified work.",
+        provider: "test",
+        model: "test-model",
+        budgetTelemetry: {
+          providerRequestId: randomUUID(),
+          requestCount: 1,
+          inputTokens: 10,
+          outputTokens: 5,
+          runtimeMs: 100,
+          costMicrousd: 1,
+          rateCardVersion: "test-v1",
+        },
+      };
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const [run] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.workOutcome, "productive"),
+        ),
+      );
+    expect(run).toMatchObject({ status: "succeeded", workOutcome: "productive" });
+    const [providerCircuit] = await db
+      .select()
+      .from(autonomousProviderCircuits)
+      .where(eq(autonomousProviderCircuits.companyId, companyId));
+    expect(providerCircuit).toMatchObject({
+      state: "closed",
+      consecutiveFailureCount: 0,
+      lastSuccessRunId: run.id,
+      probeRunId: null,
+    });
+  });
+
+  it("reopens a nonproductive half-open probe without counting a provider failure", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const lastFailureRunId = randomUUID();
+    await recordAutonomousProviderCircuitOutcome(db, {
+      companyId,
+      provider: "codex_local",
+      credentialIdentifierHash: null,
+      runId: lastFailureRunId,
+      outcome: "provider_quota",
+      now: new Date("2020-01-01T00:00:00.000Z"),
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const [run] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(run).toMatchObject({ status: "succeeded", workOutcome: "no_progress" });
+    const [providerCircuit] = await db
+      .select()
+      .from(autonomousProviderCircuits)
+      .where(eq(autonomousProviderCircuits.companyId, companyId));
+    expect(providerCircuit).toMatchObject({
+      state: "open",
+      consecutiveFailureCount: 1,
+      lastFailureRunId,
+      probeRunId: null,
+    });
+    expect(providerCircuit.nextProbeAt!.getTime()).toBeGreaterThan(Date.now());
   });
 
   it("skips event-free re-wakes after consecutive no-progress runs and admits them again on new input", async () => {

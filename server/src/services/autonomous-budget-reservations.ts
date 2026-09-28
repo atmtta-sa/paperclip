@@ -10,6 +10,7 @@ import {
 } from "@paperclipai/db";
 import type { BudgetMetric, BudgetScopeType, BudgetWindowKind } from "@paperclipai/shared";
 import { recordAutonomousCostVelocityAlert } from "./autonomous-cost-velocity-alert.js";
+import { acquireAutonomousProviderCircuitPermitWithLockedCompany } from "./autonomous-provider-circuit.js";
 
 export type AutonomousBudgetRequest = {
   requestCount: number;
@@ -221,6 +222,11 @@ export async function reserveAutonomousBudget(
     }
   | { admitted: false; reason: BudgetBlockReason; policyId: string }
   | { admitted: false; reason: "autonomous_execution_paused" }
+  | {
+      admitted: false;
+      reason: "provider_circuit_open" | "provider_circuit_probe_in_flight";
+      retryAt: Date | null;
+    }
 > {
   return db.transaction(async (tx) => {
     // Serialize pause and admission on the company row, including replay.
@@ -239,6 +245,17 @@ export async function reserveAutonomousBudget(
     if (agent.paused || issue.paused) {
       return { admitted: false as const, reason: "autonomous_execution_paused" as const };
     }
+    const acquireProviderCircuitDenial = async () => {
+      if (!input.provider?.trim()) return null;
+      const circuitPermit =
+        await acquireAutonomousProviderCircuitPermitWithLockedCompany(tx, {
+          companyId: input.companyId,
+          provider: input.provider,
+          credentialIdentifierHash: input.credentialIdentifierHash,
+          runId: input.runId,
+        });
+      return circuitPermit.admitted ? null : circuitPermit;
+    };
     const policies = await tx
       .select()
       .from(budgetPolicies)
@@ -289,6 +306,8 @@ export async function reserveAutonomousBudget(
       ) {
         throw new Error("autonomous_budget_reservation_scope_mismatch");
       }
+      const circuitDenial = await acquireProviderCircuitDenial();
+      if (circuitDenial) return circuitDenial;
       return {
         admitted: true as const,
         reservationId: existing.id,
@@ -415,6 +434,8 @@ export async function reserveAutonomousBudget(
       }
     }
 
+    const circuitDenial = await acquireProviderCircuitDenial();
+    if (circuitDenial) return circuitDenial;
     const reservation = await tx
       .insert(autonomousBudgetReservations)
       .values({

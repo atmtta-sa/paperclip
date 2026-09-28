@@ -27,9 +27,11 @@ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import {
   AutonomousExecutionPausedError,
+  AutonomousProviderCircuitAdmissionError,
   dispatchWithAutonomousBudgetReservation,
   isAutonomousBudgetAdmissionError,
 } from "./autonomous-budget-dispatch.js";
+import { recordAutonomousProviderCircuitOutcome } from "./autonomous-provider-circuit.js";
 import { recordContinuityCircuitAlert } from "./continuity-circuit-alert.js";
 import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
@@ -24745,6 +24747,42 @@ export function heartbeatService(
             );
           }
           const livenessRun = finalizedRun;
+          const providerCircuitFailure =
+            outcome === "failed"
+              ? readTransientRecoveryContractFromRun(livenessRun)
+              : null;
+          if (providerCircuitFailure) {
+            await recordAutonomousProviderCircuitOutcome(db, {
+              companyId: livenessRun.companyId,
+              provider:
+                readNonEmptyString(runtimeConfig.provider) ?? agent.adapterType,
+              credentialIdentifierHash: null,
+              runId: livenessRun.id,
+              outcome:
+                providerCircuitFailure.errorFamily === "provider_quota"
+                  ? "provider_quota"
+                  : "transient_failure",
+              retryNotBefore: providerCircuitFailure.retryNotBefore,
+            });
+          } else if (livenessRun.workOutcome === "productive") {
+            await recordAutonomousProviderCircuitOutcome(db, {
+              companyId: livenessRun.companyId,
+              provider:
+                readNonEmptyString(runtimeConfig.provider) ?? agent.adapterType,
+              credentialIdentifierHash: null,
+              runId: livenessRun.id,
+              outcome: "verified_success",
+            });
+          } else {
+            await recordAutonomousProviderCircuitOutcome(db, {
+              companyId: livenessRun.companyId,
+              provider:
+                readNonEmptyString(runtimeConfig.provider) ?? agent.adapterType,
+              credentialIdentifierHash: null,
+              runId: livenessRun.id,
+              outcome: "probe_inconclusive",
+            });
+          }
           await refreshContinuationSummaryForRun(livenessRun, agent);
           const skipRunIssueComment =
             parseObject(livenessRun.contextSnapshot).skipIssueComment === true;
@@ -25191,6 +25229,8 @@ export function heartbeatService(
           ? err
           : null;
         const autonomousPauseFailure = err instanceof AutonomousExecutionPausedError;
+        const providerCircuitFailure =
+          err instanceof AutonomousProviderCircuitAdmissionError ? err : null;
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(
             (await getRun(run.id).catch(() => null))?.errorCode,
@@ -25218,6 +25258,7 @@ export function heartbeatService(
           .catch(() => null);
         const failureErrorCode =
           (autonomousPauseFailure ? "autonomous_execution_paused" : null) ??
+          providerCircuitFailure?.reason ??
           (budgetAdmissionFailure ? "budget_exhausted" : null) ??
           workspaceValidationFailure?.code ??
           configurationIncompleteFailure?.code ??
@@ -25261,7 +25302,9 @@ export function heartbeatService(
           errorCode: stopSnapshot?.errorCode ?? failureErrorCode,
           ...(budgetAdmissionFailure
             ? { workOutcome: "budget_exhausted" as const }
-            : autonomousPauseFailure ? { workOutcome: "blocked" as const } : {}),
+            : autonomousPauseFailure || providerCircuitFailure
+              ? { workOutcome: "blocked" as const }
+              : {}),
           finishedAt: new Date(),
           resultJson: mergeRunStopMetadataForAgent(agent, failureOutcome, {
             errorCode: failureErrorCode,
@@ -25271,6 +25314,14 @@ export function heartbeatService(
               ...(workspaceValidationFailure?.resultJson ??
                 configurationIncompleteFailure?.resultJson ??
                 {}),
+              ...(providerCircuitFailure
+                ? {
+                    providerCircuit: {
+                      reason: providerCircuitFailure.reason,
+                      retryAt: providerCircuitFailure.retryAt?.toISOString() ?? null,
+                    },
+                  }
+                : {}),
               ...(!budgetAdmissionFailure &&
               !legacyAdapterEntered &&
               run.runtimeMode !== "native"
@@ -25342,7 +25393,11 @@ export function heartbeatService(
           ) {
             await finalizeIssueCommentPolicy(livenessRun, agent);
           }
-          if (!budgetAdmissionFailure && !autonomousPauseFailure) {
+          if (
+            !budgetAdmissionFailure &&
+            !autonomousPauseFailure &&
+            !providerCircuitFailure
+          ) {
             await scheduleInteractionContinuationInfrastructureRetryIfEligible(
               livenessRun,
               agent,
@@ -25354,7 +25409,10 @@ export function heartbeatService(
             // terminal failure, generic issue recovery must not create a
             // replacement retryOfRunId chain for the same provider work.
             suppressImmediateRecovery:
-              nativeTerminalFailureCode !== null || budgetAdmissionFailure !== null || autonomousPauseFailure,
+              nativeTerminalFailureCode !== null ||
+              budgetAdmissionFailure !== null ||
+              autonomousPauseFailure ||
+              providerCircuitFailure !== null,
           });
           await handleIssueReviewPathDisposition(livenessRun);
 

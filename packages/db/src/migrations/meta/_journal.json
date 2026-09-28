@@ -1989,6 +1989,13 @@
       "when": 1790588021037,
       "tag": "0285_cheerful_strong_guy",
       "breakpoints": true
+    },
+    {
+      "idx": 286,
+      "version": "7",
+      "when": 1790596285229,
+      "tag": "0286_overjoyed_lorna_dane",
+      "breakpoints": true
     }
   ]
 }

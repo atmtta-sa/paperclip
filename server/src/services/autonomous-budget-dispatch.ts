@@ -26,6 +26,21 @@ export class AutonomousExecutionPausedError extends Error {
   }
 }
 
+export class AutonomousProviderCircuitAdmissionError extends Error {
+  readonly reason: "provider_circuit_open" | "provider_circuit_probe_in_flight";
+  readonly retryAt: Date | null;
+
+  constructor(
+    reason: "provider_circuit_open" | "provider_circuit_probe_in_flight",
+    retryAt: Date | null,
+  ) {
+    super(reason);
+    this.name = "AutonomousProviderCircuitAdmissionError";
+    this.reason = reason;
+    this.retryAt = retryAt;
+  }
+}
+
 export function isAutonomousBudgetAdmissionError(
   error: unknown,
 ): error is AutonomousBudgetAdmissionError {
@@ -46,7 +61,19 @@ export async function dispatchWithAutonomousBudgetReservation<T>(
     if (reservation.reason === "autonomous_execution_paused") {
       throw new AutonomousExecutionPausedError();
     }
-    throw new AutonomousBudgetAdmissionError(reservation.reason, reservation.policyId);
+    if (
+      reservation.reason === "provider_circuit_open" ||
+      reservation.reason === "provider_circuit_probe_in_flight"
+    ) {
+      throw new AutonomousProviderCircuitAdmissionError(
+        reservation.reason,
+        reservation.retryAt,
+      );
+    }
+    if ("policyId" in reservation) {
+      throw new AutonomousBudgetAdmissionError(reservation.reason, reservation.policyId);
+    }
+    throw new Error(`Unhandled autonomous admission denial: ${reservation.reason}`);
   }
   return dispatch({
     reservationId: reservation.reservationId,

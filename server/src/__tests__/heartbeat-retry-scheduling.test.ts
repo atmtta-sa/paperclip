@@ -12,6 +12,7 @@ import {
   budgetPolicies,
   budgetIncidents,
   autonomousBudgetReservations,
+  autonomousProviderCircuits,
   companies,
   companySkills,
   createDb,
@@ -358,6 +359,27 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
       .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.runId, run!.id));
     expect(reservation?.status).toBe("retained_missing_telemetry");
+    await expect
+      .poll(
+        () =>
+          db
+            .select()
+            .from(autonomousProviderCircuits)
+            .where(
+              and(
+                eq(autonomousProviderCircuits.companyId, companyId),
+                eq(autonomousProviderCircuits.provider, PROVIDER_QUOTA_TEST_ADAPTER),
+              ),
+            )
+            .then((rows) => rows[0] ?? null),
+        { timeout: 5_000, interval: 50 },
+      )
+      .toMatchObject({
+        state: "open",
+        consecutiveFailureCount: 1,
+        nextProbeAt: new Date("2030-04-22T21:00:00.000Z"),
+        lastFailureRunId: run!.id,
+      });
 
     await expect
       .poll(
