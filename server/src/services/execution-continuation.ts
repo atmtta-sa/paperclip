@@ -328,7 +328,7 @@ export async function buildExecutionContinuation(input: {
   const taskStateCapsule = rollover && stateFingerprint
     ? buildTaskStateCapsule({
         issueId,
-        objective: issue.title,
+        objective,
         completedWork: null,
         completedActions,
         unresolvedInteractionIds,

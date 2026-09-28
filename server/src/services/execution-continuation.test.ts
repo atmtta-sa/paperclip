@@ -293,6 +293,8 @@ const support = await getEmbeddedPostgresTestSupport();
         expect(context.taskStateCapsule?.issueId).toBe(issueId);
         expect(context.taskStateCapsule?.nextAction).toContain("current issue");
         expect(context.taskStateCapsule?.completedWork).toBeNull();
+        expect(context.taskStateCapsule?.objective).toBe(context.objective);
+        expect(context.objective).not.toBe("Read Notion");
         expect(JSON.stringify(context)).not.toContain("Read my Notion launch notes.");
         sizes.push(JSON.stringify(context).length);
       }
