@@ -24429,6 +24429,14 @@ export function heartbeatService(
         const providerRequestIds = Array.isArray(resultEvidence.providerRequestIds)
           ? resultEvidence.providerRequestIds
           : [];
+        const preProviderSessionRollover =
+          isSessionRolloverRequiredRun({
+            errorCode: adapterResult.errorCode,
+            resultJson: adapterResult.resultJson,
+          }) &&
+          resultEvidence.apiCalls === 0 &&
+          resultEvidence.successfulProviderResponses === 0 &&
+          providerRequestIds.length === 0;
         const requestCountValid = codexSubscriptionEvidence
           ? Number.isSafeInteger(resultEvidence.apiCalls) &&
             Number.isSafeInteger(resultEvidence.successfulProviderResponses) &&
@@ -24466,7 +24474,10 @@ export function heartbeatService(
           agentId: run.agentId,
           issueId: issueId!,
           runId: run.id,
-          providerActivityOccurred: nativeDispatchStarted || legacyAdapterEntered,
+          providerActivityOccurred:
+            (nativeDispatchStarted || legacyAdapterEntered) &&
+            !preProviderSessionRollover,
+          verifiedNoProviderActivity: preProviderSessionRollover,
           providerRequestId: budgetTelemetry?.providerRequestId ?? null,
           actual: budgetTelemetry
             ? {

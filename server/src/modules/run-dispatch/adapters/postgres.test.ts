@@ -700,6 +700,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       agentId: string;
       issueId: string;
       now: Date;
+      scheduledRetryReason?: string;
     }) {
       await db.insert(heartbeatRuns).values({
         id: input.runId,
@@ -709,7 +710,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         status: "scheduled_retry",
         scheduledRetryAttempt: 1,
         scheduledRetryAt: input.now,
-        scheduledRetryReason: "max_turns_continuation",
+        scheduledRetryReason: input.scheduledRetryReason ?? "max_turns_continuation",
         contextSnapshot: { issueId: input.issueId },
         updatedAt: input.now,
         createdAt: input.now,
@@ -735,6 +736,50 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       expect(outcome.outcome).toBe("promoted");
       const [row] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
       expect(row?.status).toBe("queued");
+    });
+
+    it("defers a due conversation rollover until its predecessor releases process ownership", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      const sourceRunId = randomUUID();
+      const retryRunId = randomUUID();
+      const now = new Date();
+      await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+      await db.insert(heartbeatRuns).values({
+        id: sourceRunId,
+        companyId,
+        agentId,
+        status: "failed",
+        processPid: process.pid,
+        contextSnapshot: { issueId },
+        resultJson: { conversationContinuation: "continue_conversation_v1" },
+        createdAt: new Date(now.getTime() - 1_000),
+        updatedAt: now,
+      });
+      await seedScheduledRetryRun({
+        runId: retryRunId,
+        companyId,
+        agentId,
+        issueId,
+        now,
+        scheduledRetryReason: "session_rollover",
+      });
+      await db.update(issues).set({ executionRunId: retryRunId }).where(eq(issues.id, issueId));
+
+      const adapter = createPostgresRunDispatchAdapter(db);
+      expect(await adapter.promoteOrCancelDueRetry({ runId: retryRunId, companyId, now }))
+        .toMatchObject({ outcome: "not_promoted" });
+      expect((await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, retryRunId)))[0]?.status).toBe("scheduled_retry");
+
+      await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, sourceRunId));
+      expect(await adapter.promoteOrCancelDueRetry({
+        runId: retryRunId,
+        companyId,
+        now: new Date(now.getTime() + 1),
+      })).toMatchObject({ outcome: "promoted" });
+      expect((await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, retryRunId)))[0]?.status).toBe("queued");
     });
 
     it("cancels a due retry a pause hold blocks", async () => {

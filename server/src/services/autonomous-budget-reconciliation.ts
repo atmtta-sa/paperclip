@@ -9,6 +9,7 @@ export type AutonomousBudgetReconciliationInput = {
   issueId: string;
   runId: string;
   providerActivityOccurred: boolean;
+  verifiedNoProviderActivity?: boolean;
   providerRequestId: string | null;
   actual: {
     requestCount: number;
@@ -68,7 +69,7 @@ function reconciliationMatches(
   row: typeof autonomousBudgetReservations.$inferSelect,
   input: AutonomousBudgetReconciliationInput,
   actual: NormalizedActual | null,
-  status: "reconciled" | "retained_missing_telemetry",
+  status: "reconciled" | "retained_missing_telemetry" | "released",
 ): boolean {
   return (
     row.status === status &&
@@ -85,11 +86,20 @@ function reconciliationMatches(
 export async function reconcileAutonomousBudget(
   db: Db,
   input: AutonomousBudgetReconciliationInput,
-): Promise<{ status: "reconciled" | "retained_missing_telemetry"; replayed: boolean }> {
+): Promise<{ status: "reconciled" | "retained_missing_telemetry" | "released"; replayed: boolean }> {
   const actual = input.actual ? normalizeActual(input.actual) : null;
   const hasCompleteTelemetry =
     input.providerActivityOccurred && actual !== null && Boolean(input.providerRequestId?.trim());
-  const status = hasCompleteTelemetry ? "reconciled" : "retained_missing_telemetry";
+  const verifiedNoProviderActivity =
+    input.verifiedNoProviderActivity === true &&
+    !input.providerActivityOccurred &&
+    actual === null &&
+    input.providerRequestId === null;
+  const status = verifiedNoProviderActivity
+    ? "released"
+    : hasCompleteTelemetry
+      ? "reconciled"
+      : "retained_missing_telemetry";
 
   return db.transaction(async (tx) => {
     // Match admission's lock order and serialize cross-run alert deduplication.
