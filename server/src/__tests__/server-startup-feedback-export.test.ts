@@ -645,11 +645,16 @@ describe("startServer feedback export wiring", () => {
       // reaped at startup and on the interval.
       expect(heartbeatServiceFactoryMock).toHaveBeenCalledTimes(1);
       expect(heartbeatServiceMock.sweepPendingCleanupLeases).toHaveBeenCalled();
+      expect(heartbeatServiceMock.promoteDueScheduledRetries).toHaveBeenCalledTimes(1);
+      expect(heartbeatServiceMock.resumeQueuedRuns).toHaveBeenCalledTimes(1);
       expect(intervalCallback).not.toBeNull();
       intervalCallback?.();
       await Promise.resolve();
       await Promise.resolve();
+      await Promise.resolve();
 
+      expect(heartbeatServiceMock.promoteDueScheduledRetries).toHaveBeenCalledTimes(2);
+      expect(heartbeatServiceMock.resumeQueuedRuns).toHaveBeenCalledTimes(2);
       expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(1);
       expect(routineServiceMock.tickScheduledTriggers).not.toHaveBeenCalled();
       expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).not.toHaveBeenCalled();

@@ -32,6 +32,7 @@ export type AutonomousBudgetReservationInput = {
   agentId: string;
   issueId: string;
   runId: string;
+  previousRunId?: string | null;
   requested?: AutonomousBudgetRequest;
   provider?: string | null;
   model?: string | null;
@@ -146,6 +147,25 @@ function recordedMetric(
   }
 }
 
+function remainingChainEnvelope(
+  envelope: NormalizedAutonomousBudgetRequest,
+  rows: Array<typeof autonomousBudgetReservations.$inferSelect>,
+): NormalizedAutonomousBudgetRequest {
+  const remaining = (metric: BudgetMetric) =>
+    Math.max(
+      0,
+      requestedMetric(envelope, metric) -
+        rows.reduce((total, row) => total + recordedMetric(row, metric), 0),
+    );
+  return {
+    requestCount: remaining("request_count"),
+    inputTokens: remaining("input_tokens"),
+    outputTokens: remaining("output_tokens"),
+    runtimeMs: remaining("runtime_ms"),
+    costMicrousd: remaining("billed_microusd"),
+  };
+}
+
 function windowStart(windowKind: BudgetWindowKind, now: Date): Date | null {
   if (windowKind === "calendar_day_utc") {
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -249,6 +269,9 @@ export async function reserveAutonomousBudget(
     const existing = await tx
       .select({
         id: autonomousBudgetReservations.id,
+        companyId: autonomousBudgetReservations.companyId,
+        agentId: autonomousBudgetReservations.agentId,
+        issueId: autonomousBudgetReservations.issueId,
         requestCount: autonomousBudgetReservations.reservedRequestCount,
         inputTokens: autonomousBudgetReservations.reservedInputTokens,
         outputTokens: autonomousBudgetReservations.reservedOutputTokens,
@@ -259,6 +282,13 @@ export async function reserveAutonomousBudget(
       .where(eq(autonomousBudgetReservations.runId, input.runId))
       .then((rows) => rows[0] ?? null);
     if (existing) {
+      if (
+        existing.companyId !== input.companyId ||
+        existing.agentId !== input.agentId ||
+        existing.issueId !== input.issueId
+      ) {
+        throw new Error("autonomous_budget_reservation_scope_mismatch");
+      }
       return {
         admitted: true as const,
         reservationId: existing.id,
@@ -273,9 +303,48 @@ export async function reserveAutonomousBudget(
       };
     }
     if (policies.length === 0) throw new Error("autonomous_budget_policy_missing");
+    let chainRootRunId = input.runId;
+    if (input.previousRunId) {
+      const predecessor = await tx
+        .select({
+          companyId: autonomousBudgetReservations.companyId,
+          agentId: autonomousBudgetReservations.agentId,
+          issueId: autonomousBudgetReservations.issueId,
+          chainRootRunId: autonomousBudgetReservations.chainRootRunId,
+        })
+        .from(autonomousBudgetReservations)
+        .where(eq(autonomousBudgetReservations.runId, input.previousRunId))
+        .then((rows) => rows[0] ?? null);
+      if (
+        !predecessor ||
+        predecessor.companyId !== input.companyId ||
+        predecessor.agentId !== input.agentId ||
+        predecessor.issueId !== input.issueId
+      ) {
+        throw new Error("autonomous_budget_chain_predecessor_mismatch");
+      }
+      chainRootRunId = predecessor.chainRootRunId;
+    }
+
+    const chainRows = await tx
+      .select()
+      .from(autonomousBudgetReservations)
+      .where(
+        and(
+          eq(autonomousBudgetReservations.companyId, input.companyId),
+          eq(autonomousBudgetReservations.chainRootRunId, chainRootRunId),
+          inArray(autonomousBudgetReservations.status, [
+            "reserved",
+            "reconciled",
+            "retained_missing_telemetry",
+          ]),
+        ),
+      );
     const requested = input.requested
       ? normalizeBudgetRequest(input.requested)
-      : deriveRunEnvelope(policies);
+      : input.previousRunId
+        ? remainingChainEnvelope(deriveRunEnvelope(policies), chainRows)
+        : deriveRunEnvelope(policies);
 
     const now = new Date();
     const crossedThresholds: Array<{
@@ -302,7 +371,7 @@ export async function reserveAutonomousBudget(
               );
       const rows =
         policy.windowKind === "per_run"
-          ? []
+          ? chainRows
           : await tx
               .select()
               .from(autonomousBudgetReservations)
@@ -321,7 +390,15 @@ export async function reserveAutonomousBudget(
         (total, row) => total + recordedMetric(row, policy.metric),
         0,
       );
-      const projected = observed + requestedMetric(requested, policy.metric);
+      const requestedAmount = requestedMetric(requested, policy.metric);
+      if (policy.windowKind === "per_run" && requestedAmount === 0 && observed >= policy.amount) {
+        return {
+          admitted: false as const,
+          reason: scopeReason(policy.scopeType),
+          policyId: policy.id,
+        };
+      }
+      const projected = observed + requestedAmount;
       if (projected > policy.amount) {
         return {
           admitted: false as const,
@@ -345,6 +422,7 @@ export async function reserveAutonomousBudget(
         agentId: input.agentId,
         issueId: input.issueId,
         runId: input.runId,
+        chainRootRunId,
         status: "reserved",
         reservedRequestCount: requested.requestCount,
         reservedInputTokens: requested.inputTokens,

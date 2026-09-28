@@ -60,6 +60,9 @@ vi.mock("../services/heartbeat-run-events.js", async (importOriginal) => {
 import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
 import {
   BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS,
+  SESSION_ROLLOVER_RETRY_DELAYS_MS,
+  computeBoundedTransientHeartbeatRetrySchedule,
+  computeSessionRolloverRetrySchedule,
   INTERACTION_CONTINUATION_INFRA_RETRY_REASON,
   INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
   MAX_TURN_CONTINUATION_RETRY_REASON,
@@ -184,6 +187,32 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     await db.delete(companySkills);
     await db.delete(companies);
   }
+
+  it("uses exponential full-jitter caps for transient retries", () => {
+    const now = new Date("2026-09-28T10:00:00.000Z");
+
+    const first = computeBoundedTransientHeartbeatRetrySchedule(1, now, () => 0.5);
+    const second = computeBoundedTransientHeartbeatRetrySchedule(2, now, () => 0.5);
+
+    expect(BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS).toEqual([30_000, 120_000]);
+    expect(first).toMatchObject({ attempt: 1, baseDelayMs: 30_000, delayMs: 15_000 });
+    expect(first?.dueAt.toISOString()).toBe("2026-09-28T10:00:15.000Z");
+    expect(second).toMatchObject({ attempt: 2, baseDelayMs: 120_000, delayMs: 60_000 });
+    expect(second?.dueAt.toISOString()).toBe("2026-09-28T10:01:00.000Z");
+  });
+
+  it("bounds session rollover to three exponential full-jitter retries", () => {
+    const now = new Date("2026-09-28T10:00:00.000Z");
+
+    expect(SESSION_ROLLOVER_RETRY_DELAYS_MS).toEqual([5_000, 30_000, 120_000]);
+    expect(computeSessionRolloverRetrySchedule(1, now, () => 0.5))
+      .toMatchObject({ attempt: 1, baseDelayMs: 5_000, delayMs: 2_500, maxAttempts: 3 });
+    expect(computeSessionRolloverRetrySchedule(2, now, () => 0.5))
+      .toMatchObject({ attempt: 2, baseDelayMs: 30_000, delayMs: 15_000, maxAttempts: 3 });
+    expect(computeSessionRolloverRetrySchedule(3, now, () => 0.5))
+      .toMatchObject({ attempt: 3, baseDelayMs: 120_000, delayMs: 60_000, maxAttempts: 3 });
+    expect(computeSessionRolloverRetrySchedule(4, now, () => 0.5)).toBeNull();
+  });
 
   async function seedRetryFixture(input: {
     runId: string;
@@ -602,7 +631,9 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect(scheduled.outcome).toBe("scheduled");
     if (scheduled.outcome !== "scheduled") return;
 
-    const expectedDueAt = new Date(now.getTime() + BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS[0]);
+    const expectedDueAt = new Date(
+      now.getTime() + BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS[0] * 0.5,
+    );
     expect(scheduled.attempt).toBe(1);
     expect(scheduled.dueAt.toISOString()).toBe(expectedDueAt.toISOString());
 

@@ -104,6 +104,8 @@ chat shortcut above applies:
 
 **Step 3 — Get assignments.** Prefer `GET /api/agents/me/inbox-lite` for the normal heartbeat inbox. It returns the compact assignment list you need for prioritization. Fall back to `GET /api/companies/{companyId}/issues?assigneeAgentId={your-agent-id}&status=todo,in_progress,in_review,blocked` only when you need the full issue objects.
 
+**Cross-agent assignment/status lookups.** When asked to report another agent's current work, query each target directly with `GET /api/companies/{companyId}/issues?assigneeAgentId={target-agent-id}&status=todo,in_progress,in_review,blocked&view=compact&limit=20`. Never fetch the unfiltered company issue collection for assignment or status reporting. If more than 20 matching items exist, paginate that same filtered compact query rather than removing its filters.
+
 **Step 4 — Pick work.** Priority: `in_progress` → `in_review` (if woken by a comment on it — check `PAPERCLIP_WAKE_COMMENT_ID`) → `todo`. Skip `blocked` unless you can unblock.
 
 Overrides and special cases:

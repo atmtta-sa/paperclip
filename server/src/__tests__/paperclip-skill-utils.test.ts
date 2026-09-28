@@ -294,6 +294,15 @@ describe("paperclip skill utils", () => {
     await expect(fs.access(path.resolve("scripts/paperclip-upload-artifact.sh"))).rejects.toThrow();
   });
 
+  it("requires bounded compact queries for cross-agent assignment reporting", async () => {
+    const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
+
+    expect(skillBody).toContain("Cross-agent assignment/status lookups");
+    expect(skillBody).toContain("assigneeAgentId={target-agent-id}");
+    expect(skillBody).toContain("view=compact");
+    expect(skillBody).toContain("Never fetch the unfiltered company issue collection");
+  });
+
   it("keeps the external-chat shortcut behind the server-verified harness boundary", async () => {
     const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
     const shortcut = skillBody.match(

@@ -366,6 +366,41 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(reservation?.status).not.toBe("reconciled");
   });
 
+  it("reconciles an attributed OpenAI Codex subscription response without metered cost", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0, signal: null, timedOut: false,
+      provider: "openai-codex", model: "gpt-5.6-sol",
+      usage: { inputTokens: 35_643, outputTokens: 468 }, usageBasis: "per_run",
+      resultJson: {
+        result: "Finished", provider: "openai-codex", billingType: "subscription",
+        apiCalls: 7, successfulProviderResponses: 6,
+        usageTelemetryComplete: false, budgetTelemetryComplete: true,
+        costStatus: "included", costUnavailableReason: null, cost_usd: 0,
+        providerRequestIds: [
+          "resp_subscription_1", "resp_subscription_2", "resp_subscription_3",
+          "resp_subscription_4", "resp_subscription_5", "resp_subscription_6",
+        ],
+      },
+      budgetTelemetry: {
+        providerRequestId: "resp_subscription_1", requestCount: 7,
+        inputTokens: 35_643, outputTokens: 468, runtimeMs: 100, costMicrousd: 0,
+        rateCardVersion: "openai-codex-subscription-v1",
+      },
+    }));
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservation?.status).toBe("reconciled");
+    const runs = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode,
+      resultJson: heartbeatRuns.resultJson }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    const run = runs.find((row) =>
+      (row.resultJson as Record<string, unknown> | null)?.billingType === "subscription");
+    expect(run).toMatchObject({ status: "succeeded", errorCode: null });
+  });
+
   it("retains the reservation when Hermes cost is estimated despite nominal budget telemetry", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     mockAdapterExecute.mockImplementationOnce(async () => ({
@@ -523,9 +558,45 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       .mockImplementationOnce(async () => rolloverResult())
       .mockImplementationOnce(async () => rolloverResult());
 
-    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    const inheritedFingerprint = await loadIssueTaskStateFingerprint({
+      db,
+      companyId,
+      issueId,
+    });
+    expect(
+      await heartbeat.wakeup(agentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "external_chat_message",
+        payload: { issueId },
+        contextSnapshot: {
+          issueId,
+          wakeReason: "External chat message received",
+          executionContinuation: {
+            taskStateCapsule: {
+              hash: "inherited-from-an-older-rollover-chain",
+              stateFingerprint: inheritedFingerprint,
+            },
+          },
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "test",
+      }),
+    ).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
-    await heartbeat.promoteDueScheduledRetries();
+    const [scheduledRollover] = await db
+      .select({ scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.scheduledRetryReason, SESSION_ROLLOVER_RETRY_REASON),
+        ),
+      );
+    expect(scheduledRollover?.scheduledRetryAt).toBeInstanceOf(Date);
+    await heartbeat.promoteDueScheduledRetries(
+      new Date(scheduledRollover!.scheduledRetryAt!.getTime() + 1),
+    );
     await heartbeat.resumeQueuedRuns();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
 

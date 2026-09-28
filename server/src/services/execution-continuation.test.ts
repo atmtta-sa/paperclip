@@ -298,7 +298,49 @@ const support = await getEmbeddedPostgresTestSupport();
       }
       expect(new Set(sizes).size).toBe(1);
     });
-    it("rejects an automatic rollover when the capsule hash did not change", async () => {
+
+    it("starts a new rollover chain after an external root inherited an old capsule", async () => {
+      const historical = await buildExecutionContinuation({
+        db,
+        companyId,
+        issueId,
+        agentId,
+        context: { wakeReason: "session_rollover_required" },
+        summary: "Notion read completed. Gmail verification remains.",
+        exposeLowTrustRaw: false,
+      });
+      await db
+        .update(heartbeatRuns)
+        .set({
+          contextSnapshot: {
+            issueId,
+            wakeReason: "External chat message received",
+            executionContinuation: historical,
+          },
+        })
+        .where(eq(heartbeatRuns.id, runId));
+      try {
+        await expect(
+          buildExecutionContinuation({
+            db,
+            companyId,
+            issueId,
+            agentId,
+            context: { wakeReason: "session_rollover_required" },
+            previousContextRunId: runId,
+            summary: "Notion read completed. Gmail verification remains.",
+            exposeLowTrustRaw: false,
+          }),
+        ).resolves.toMatchObject({ coverage: { kind: "bounded_task_capsule" } });
+      } finally {
+        await db
+          .update(heartbeatRuns)
+          .set({ contextSnapshot: { issueId, commentId: gmailId } })
+          .where(eq(heartbeatRuns.id, runId));
+      }
+    });
+
+    it("rejects an automatic rollover when its predecessor capsule did not change", async () => {
       const context = await buildExecutionContinuation({
         db,
         companyId,
@@ -310,7 +352,13 @@ const support = await getEmbeddedPostgresTestSupport();
       });
       await db
         .update(heartbeatRuns)
-        .set({ contextSnapshot: { issueId, executionContinuation: context } })
+        .set({
+          contextSnapshot: {
+            issueId,
+            wakeReason: "session_rollover_required",
+            executionContinuation: context,
+          },
+        })
         .where(eq(heartbeatRuns.id, runId));
       try {
         await expect(
@@ -320,6 +368,7 @@ const support = await getEmbeddedPostgresTestSupport();
             issueId,
             agentId,
             context: { wakeReason: "session_rollover_required" },
+            previousContextRunId: runId,
             summary: "Notion read completed. Gmail verification remains.",
             exposeLowTrustRaw: false,
           }),

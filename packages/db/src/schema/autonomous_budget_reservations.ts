@@ -21,6 +21,7 @@ export const autonomousBudgetReservations = pgTable(
     agentId: uuid("agent_id").notNull().references(() => agents.id),
     issueId: uuid("issue_id").references(() => issues.id, { onDelete: "set null" }),
     runId: uuid("run_id").notNull(),
+    chainRootRunId: uuid("chain_root_run_id").notNull(),
     status: text("status")
       .$type<"reserved" | "reconciled" | "retained_missing_telemetry" | "released">()
       .notNull()
@@ -49,6 +50,10 @@ export const autonomousBudgetReservations = pgTable(
   },
   (table) => ({
     runUniqueIdx: uniqueIndex("autonomous_budget_reservations_run_uq").on(table.runId),
+    chainRootIdx: index("autonomous_budget_reservations_chain_root_idx").on(
+      table.companyId,
+      table.chainRootRunId,
+    ),
     companyCreatedIdx: index("autonomous_budget_reservations_company_created_idx").on(
       table.companyId,
       table.createdAt,

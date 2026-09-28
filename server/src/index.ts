@@ -1808,16 +1808,44 @@ async function startServerWithDatabaseTeardown(
       }));
     });
   } else {
-    // The heartbeat scheduler is disabled, but the orphan-sandbox cleanup sweep
-    // is still required. A failed acquire can leak a paid provider sandbox, so
-    // this path retries the teardown at startup and on the interval, exactly as
-    // the enabled path does.
+    // Periodic assignment heartbeats are disabled, but already-authorized queued
+    // executions and bounded retries still need a driver. External chat and API
+    // requests can create these runs independently of timer-based heartbeats.
+    const runDisabledSchedulerExecutionRecovery = async () => {
+      if ((await environmentLeaseCleanupHeartbeat.resolveSchedulingSuppression()).suppressed) return;
+      const promotion = await environmentLeaseCleanupHeartbeat.promoteDueScheduledRetries();
+      await environmentLeaseCleanupHeartbeat.resumeQueuedRuns();
+      if (promotion.promoted > 0) {
+        logger.warn(
+          {
+            promotedScheduledRetries: promotion.promoted,
+            promotedScheduledRetryRunIds: promotion.runIds,
+          },
+          "disabled heartbeat scheduler promoted authorized execution retries",
+        );
+      }
+    };
+
+    // Orphan-sandbox cleanup remains independent for the same reason: a failed
+    // acquire can leak a paid provider sandbox even when timer heartbeats are off.
+    drainHeartbeatRunsForShutdown = (signal, runIds) => (
+      environmentLeaseCleanupHeartbeat.drainRunningRunsForShutdown(signal, new Date(), runIds)
+    );
+    drainHeartbeatExecutionFinalizers = () =>
+      environmentLeaseCleanupHeartbeat.drainActiveRunExecutions();
+    prepareHotRestartShutdown = environmentLeaseCleanupHeartbeat.prepareHotRestartShutdown;
     await runEnvironmentLeaseCleanupSweep(0);
+    await runDisabledSchedulerExecutionRecovery();
     startHeartbeatSchedulerInterval(() => {
       scheduleExternalObjectRefreshSweep(new Date());
       scheduleEnvironmentLeaseCleanupSweep();
       scheduleGitHubConnectionEventPoll();
       scheduleGitHubConnectionContinuitySweep();
+      trackHeartbeatSchedulerWork(
+        runDisabledSchedulerExecutionRecovery().catch((err) => {
+          logger.error({ err }, "disabled heartbeat scheduler execution recovery failed");
+        }),
+      );
     });
   }
   

@@ -102,6 +102,106 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     expect(results.filter((result) => !result.admitted)).toHaveLength(1);
   });
 
+  it("rejects replaying a run reservation through a different scope", async () => {
+    const original = await createCostBudgetFixture(500);
+    const other = await createCostBudgetFixture(500);
+    const runId = randomUUID();
+    const requested = {
+      requestCount: 1,
+      inputTokens: 1_000,
+      outputTokens: 100,
+      runtimeMs: 10_000,
+      costMicrousd: 10_000,
+    };
+    await reserveAutonomousBudget(db, { ...original, runId, requested });
+
+    await expect(reserveAutonomousBudget(db, {
+      ...other,
+      runId,
+      requested,
+    })).rejects.toThrow("autonomous_budget_reservation_scope_mismatch");
+  });
+
+  it("atomically bounds concurrent continuations by one chain envelope", async () => {
+    const scope = await createCostBudgetFixture(500);
+    await db.insert(budgetPolicies).values([
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "request_count", windowKind: "per_run", amount: 8 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "input_tokens", windowKind: "per_run", amount: 64_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "output_tokens", windowKind: "per_run", amount: 8_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "runtime_ms", windowKind: "per_run", amount: 300_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "billed_microusd", windowKind: "per_run", amount: 250_000 },
+    ]);
+    const rootRunId = randomUUID();
+    const halfEnvelope = {
+      requestCount: 4,
+      inputTokens: 32_000,
+      outputTokens: 4_000,
+      runtimeMs: 150_000,
+      costMicrousd: 125_000,
+    };
+    expect(await reserveAutonomousBudget(db, {
+      ...scope,
+      runId: rootRunId,
+      requested: halfEnvelope,
+    })).toMatchObject({ admitted: true });
+
+    const continuations = await Promise.all([
+      reserveAutonomousBudget(db, {
+        ...scope,
+        runId: randomUUID(),
+        previousRunId: rootRunId,
+        requested: halfEnvelope,
+      }),
+      reserveAutonomousBudget(db, {
+        ...scope,
+        runId: randomUUID(),
+        previousRunId: rootRunId,
+        requested: halfEnvelope,
+      }),
+    ]);
+
+    expect(continuations.filter((result) => result.admitted)).toHaveLength(1);
+    expect(continuations.filter((result) => !result.admitted)).toHaveLength(1);
+    const reservations = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, scope.companyId));
+    expect(new Set(reservations.map((row) => row.chainRootRunId))).toEqual(new Set([rootRunId]));
+  });
+
+  it("allocates only the remaining envelope to a continuation", async () => {
+    const scope = await createCostBudgetFixture(500);
+    await db.insert(budgetPolicies).values([
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "request_count", windowKind: "per_run", amount: 8 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "input_tokens", windowKind: "per_run", amount: 64_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "output_tokens", windowKind: "per_run", amount: 8_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "runtime_ms", windowKind: "per_run", amount: 300_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "billed_microusd", windowKind: "per_run", amount: 250_000 },
+    ]);
+    const rootRunId = randomUUID();
+    const halfEnvelope = {
+      requestCount: 4,
+      inputTokens: 32_000,
+      outputTokens: 4_000,
+      runtimeMs: 150_000,
+      costMicrousd: 125_000,
+    };
+    await reserveAutonomousBudget(db, {
+      ...scope,
+      runId: rootRunId,
+      requested: halfEnvelope,
+    });
+
+    const continuation = await reserveAutonomousBudget(db, {
+      ...scope,
+      runId: randomUUID(),
+      previousRunId: rootRunId,
+    });
+
+    expect(continuation).toMatchObject({
+      admitted: true,
+      envelope: halfEnvelope,
+    });
+  });
+
   it("derives the maximum run envelope from five explicit per-run policies", async () => {
     const scope = await createCostBudgetFixture(500);
     await db.insert(budgetPolicies).values([

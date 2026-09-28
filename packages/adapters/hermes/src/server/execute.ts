@@ -767,6 +767,11 @@ export async function execute(
     executionResult.costUsd = runResult.estimated_cost_usd;
   }
   executionResult.budgetTelemetry = hermesBudgetTelemetry(runResult, childRuntimeMs);
+  const codexSubscriptionTelemetryComplete = Boolean(
+    executionResult.budgetTelemetry && runResult?.version === 2 &&
+    runResult.provider === "openai-codex" && runResult.cost_status === "included" &&
+    runResult.cost_source === "none",
+  );
 
   // Summary from agent response
   if (parsed.response) {
@@ -780,10 +785,18 @@ export async function execute(
     usage: executionResult.usage || null,
     cost_usd: executionResult.costUsd ?? null,
     ...(runResult?.version === 2 ? {
+      provider: runResult.provider ?? null,
+      billingType: codexSubscriptionTelemetryComplete
+        ? "subscription"
+        : runResult.provider === "openrouter" ? "metered" : "unknown",
+      budgetTelemetryComplete: Boolean(
+        runResult.usage_telemetry_complete || codexSubscriptionTelemetryComplete,
+      ),
       apiCalls: runResult.api_calls,
       successfulProviderResponses: runResult.successful_provider_responses,
       usageTelemetryComplete: runResult.usage_telemetry_complete,
       costStatus: runResult.cost_status ?? null,
+      costSource: runResult.cost_source ?? null,
       costUnavailableReason: runResult.cost_unavailable_reason ?? null,
       endpointClass: runResult.endpoint_class ?? "unknown",
       providerRequestIds: runResult.provider_request_ids ?? [],

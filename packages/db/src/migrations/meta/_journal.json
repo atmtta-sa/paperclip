@@ -1982,6 +1982,13 @@
       "when": 1790518444774,
       "tag": "0284_polite_speed",
       "breakpoints": true
+    },
+    {
+      "idx": 285,
+      "version": "7",
+      "when": 1790588021037,
+      "tag": "0285_cheerful_strong_guy",
+      "breakpoints": true
     }
   ]
 }

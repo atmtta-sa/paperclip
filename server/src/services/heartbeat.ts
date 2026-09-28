@@ -764,9 +764,8 @@ export {
 export const ACTIVE_RUN_OUTPUT_PROGRESS_FLUSH_INTERVAL_MS = 60 * 1000;
 export const ACTIVE_RUN_LOG_RUNTIME_STATUS_REFRESH_INTERVAL_MS = 5 * 1000;
 export const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS = [
-  30_000, 30_000,
+  30_000, 120_000,
 ] as const;
-const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_JITTER_RATIO = 0;
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON = "transient_failure";
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON = "transient_failure_retry";
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS =
@@ -846,7 +845,10 @@ export { MAX_TURN_CONTINUATION_RETRY_REASON };
 export const MAX_TURN_CONTINUATION_WAKE_REASON = "max_turns_continuation_retry";
 export const SESSION_ROLLOVER_RETRY_REASON = "session_rollover";
 export const SESSION_ROLLOVER_WAKE_REASON = "session_rollover_required";
-const SESSION_ROLLOVER_MAX_ATTEMPTS = 10;
+export const SESSION_ROLLOVER_RETRY_DELAYS_MS = [
+  5_000, 30_000, 120_000,
+] as const;
+const SESSION_ROLLOVER_MAX_ATTEMPTS = SESSION_ROLLOVER_RETRY_DELAYS_MS.length;
 
 export function isSessionRolloverRequiredRun(input: {
   errorCode?: string | null;
@@ -1946,15 +1948,32 @@ export function computeBoundedTransientHeartbeatRetrySchedule(
   const baseDelayMs = BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS[attempt - 1];
   if (typeof baseDelayMs !== "number") return null;
   const sample = Math.min(1, Math.max(0, random()));
-  const jitterMultiplier =
-    1 + (sample * 2 - 1) * BOUNDED_TRANSIENT_HEARTBEAT_RETRY_JITTER_RATIO;
-  const delayMs = Math.max(1_000, Math.round(baseDelayMs * jitterMultiplier));
+  const delayMs = Math.max(1_000, Math.round(baseDelayMs * sample));
   return {
     attempt,
     baseDelayMs,
     delayMs,
     dueAt: new Date(now.getTime() + delayMs),
     maxAttempts: BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
+  };
+}
+
+export function computeSessionRolloverRetrySchedule(
+  attempt: number,
+  now = new Date(),
+  random: () => number = Math.random,
+) {
+  if (!Number.isInteger(attempt) || attempt <= 0) return null;
+  const baseDelayMs = SESSION_ROLLOVER_RETRY_DELAYS_MS[attempt - 1];
+  if (typeof baseDelayMs !== "number") return null;
+  const sample = Math.min(1, Math.max(0, random()));
+  const delayMs = Math.max(1_000, Math.round(baseDelayMs * sample));
+  return {
+    attempt,
+    baseDelayMs,
+    delayMs,
+    dueAt: new Date(now.getTime() + delayMs),
+    maxAttempts: SESSION_ROLLOVER_MAX_ATTEMPTS,
   };
 }
 
@@ -9355,7 +9374,6 @@ export function heartbeatService(
               retryReason: SESSION_ROLLOVER_RETRY_REASON,
               wakeReason: SESSION_ROLLOVER_WAKE_REASON,
               maxAttempts: SESSION_ROLLOVER_MAX_ATTEMPTS,
-              delayMs: 0,
             }
           : undefined,
       );
@@ -9568,7 +9586,6 @@ export function heartbeatService(
             retryReason: SESSION_ROLLOVER_RETRY_REASON,
             wakeReason: SESSION_ROLLOVER_WAKE_REASON,
             maxAttempts: SESSION_ROLLOVER_MAX_ATTEMPTS,
-            delayMs: 0,
           } : undefined);
         }
       } else if (effect.kind === "run_queued") {
@@ -15192,25 +15209,29 @@ export function heartbeatService(
         ? (run.scheduledRetryAttempt ?? 0)
         : executionFailureRetryCount(run)) + 1;
     const computedBaseSchedule =
-      opts?.delayMs != null
+      retryReason === SESSION_ROLLOVER_RETRY_REASON
         ? nextAttempt <= maxAttempts
-          ? {
-              attempt: nextAttempt,
-              baseDelayMs: Math.max(0, Math.floor(opts.delayMs)),
-              delayMs: Math.max(0, Math.floor(opts.delayMs)),
-              dueAt: new Date(
-                now.getTime() + Math.max(0, Math.floor(opts.delayMs)),
-              ),
-              maxAttempts,
-            }
+          ? computeSessionRolloverRetrySchedule(nextAttempt, now, opts?.random)
           : null
-        : nextAttempt <= maxAttempts
-          ? computeBoundedTransientHeartbeatRetrySchedule(
-              nextAttempt,
-              now,
-              opts?.random,
-            )
-          : null;
+        : opts?.delayMs != null
+          ? nextAttempt <= maxAttempts
+            ? {
+                attempt: nextAttempt,
+                baseDelayMs: Math.max(0, Math.floor(opts.delayMs)),
+                delayMs: Math.max(0, Math.floor(opts.delayMs)),
+                dueAt: new Date(
+                  now.getTime() + Math.max(0, Math.floor(opts.delayMs)),
+                ),
+                maxAttempts,
+              }
+            : null
+          : nextAttempt <= maxAttempts
+            ? computeBoundedTransientHeartbeatRetrySchedule(
+                nextAttempt,
+                now,
+                opts?.random,
+              )
+            : null;
     const baseSchedule = computedBaseSchedule
       ? { ...computedBaseSchedule, maxAttempts }
       : null;
@@ -15427,7 +15448,12 @@ export function heartbeatService(
       const hasCompletedAction = Object.values(
         parseObject(parseObject(run.resultJson).apiToolReceipts),
       ).some((receipt) => parseObject(receipt).state === "completed");
+      const continuingRolloverChain =
+        run.scheduledRetryReason === SESSION_ROLLOVER_RETRY_REASON ||
+        readNonEmptyString(contextSnapshot.wakeReason) ===
+          SESSION_ROLLOVER_WAKE_REASON;
       if (
+        continuingRolloverChain &&
         readNonEmptyString(priorCapsule.hash) &&
         readNonEmptyString(priorCapsule.stateFingerprint) ===
           run.stateFingerprintAfter &&
@@ -23753,6 +23779,7 @@ export function heartbeatService(
                     agentId: agent.id,
                     issueId,
                     runId: run.id,
+                    previousRunId: run.retryOfRunId,
                     provider:
                       readNonEmptyString(runtimeConfig.provider) ??
                       agent.adapterType,
@@ -24379,18 +24406,42 @@ export function heartbeatService(
         // An explicit incomplete Hermes result cannot be repaired by a nominal
         // adapter telemetry object; keep the reservation until reconciliation.
         const resultEvidence = parseObject(adapterResult.resultJson);
+        const codexSubscriptionEvidence =
+          resultEvidence.provider === "openai-codex" &&
+          resultEvidence.billingType === "subscription" &&
+          resultEvidence.budgetTelemetryComplete === true &&
+          resultEvidence.costStatus === "included" &&
+          resultEvidence.costUnavailableReason == null &&
+          resultEvidence.cost_usd === 0;
+        const hasHermesUsageEvidence =
+          typeof resultEvidence.usageTelemetryComplete === "boolean";
+        const budgetEvidenceComplete = !hasHermesUsageEvidence ||
+          resultEvidence.budgetTelemetryComplete === true ||
+          (resultEvidence.budgetTelemetryComplete == null &&
+            resultEvidence.usageTelemetryComplete === true);
         const hermesCostNotVerified =
           (typeof resultEvidence.usageTelemetryComplete === "boolean" &&
-            resultEvidence.costStatus !== "actual") ||
+            resultEvidence.costStatus !== "actual" && !codexSubscriptionEvidence) ||
           (typeof resultEvidence.costUnavailableReason === "string" &&
             resultEvidence.costUnavailableReason.length > 0);
+        const providerRequestIds = Array.isArray(resultEvidence.providerRequestIds)
+          ? resultEvidence.providerRequestIds
+          : [];
+        const requestCountValid = codexSubscriptionEvidence
+          ? Number.isSafeInteger(resultEvidence.apiCalls) &&
+            Number.isSafeInteger(resultEvidence.successfulProviderResponses) &&
+            (resultEvidence.successfulProviderResponses as number) >= 1 &&
+            (resultEvidence.apiCalls as number) >=
+              (resultEvidence.successfulProviderResponses as number) &&
+            providerRequestIds.length === resultEvidence.successfulProviderResponses &&
+            adapterResult.budgetTelemetry?.requestCount === resultEvidence.apiCalls
+          : resultEvidence.apiCalls === 1 && providerRequestIds.length === 1 &&
+            adapterResult.budgetTelemetry?.requestCount === 1;
         const hermesRequestMismatch = typeof resultEvidence.costStatus === "string" &&
-          (resultEvidence.apiCalls !== 1 ||
-            !Array.isArray(resultEvidence.providerRequestIds) ||
-            resultEvidence.providerRequestIds.length !== 1 ||
-            resultEvidence.providerRequestIds[0] !== adapterResult.budgetTelemetry?.providerRequestId ||
-            adapterResult.budgetTelemetry?.requestCount !== 1);
-        const hermesCostMismatch = resultEvidence.costStatus === "actual" &&
+          (!requestCountValid ||
+            providerRequestIds[0] !== adapterResult.budgetTelemetry?.providerRequestId);
+        const hermesCostMismatch = (resultEvidence.costStatus === "actual" ||
+          codexSubscriptionEvidence) &&
           (typeof resultEvidence.cost_usd !== "number" ||
             !Number.isFinite(resultEvidence.cost_usd) ||
             resultEvidence.cost_usd < 0 ||
@@ -24402,9 +24453,10 @@ export function heartbeatService(
             rawUsage.inputTokens !== adapterResult.budgetTelemetry?.inputTokens ||
             rawUsage.outputTokens !== adapterResult.budgetTelemetry?.outputTokens);
         // Hermes token completeness does not prove its charge or request identity.
-        // This ledger has only one provider request ID; retain multi-call runs.
-        const budgetTelemetry = resultEvidence.usageTelemetryComplete === false ||
-          hermesCostNotVerified || hermesRequestMismatch || hermesCostMismatch || hermesUsageMismatch
+        // Subscription-backed Codex has no metered cost, but still requires a
+        // provider response ID and exact per-run token evidence.
+        const budgetTelemetry = !budgetEvidenceComplete || hermesCostNotVerified ||
+          hermesRequestMismatch || hermesCostMismatch || hermesUsageMismatch
           ? null
           : adapterResult.budgetTelemetry ?? null;
         const budgetReconciliation = await reconcileAutonomousBudget(db, {
@@ -24836,7 +24888,6 @@ export function heartbeatService(
               retryReason: SESSION_ROLLOVER_RETRY_REASON,
               wakeReason: SESSION_ROLLOVER_WAKE_REASON,
               maxAttempts: SESSION_ROLLOVER_MAX_ATTEMPTS,
-              delayMs: 0,
             });
           } else if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
             const policy = parseMaxTurnContinuationPolicy(agent);

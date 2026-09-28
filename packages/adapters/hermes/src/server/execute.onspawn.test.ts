@@ -360,6 +360,33 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     }
   });
 
+  it("supplies zero-cost budget telemetry for an attributed OpenAI Codex subscription response", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json") ? JSON.stringify({
+        version: 2, provider: "openai-codex", model: "gpt-5.6-sol",
+        endpoint_class: "unknown", api_calls: 7, successful_provider_responses: 6,
+        usage_telemetry_complete: false, input_tokens: 35_643, output_tokens: 468,
+        estimated_cost_usd: 0, cost_status: "included", cost_source: "none",
+        cost_unavailable_reason: null,
+        provider_request_ids: [
+          "resp_subscription_1", "resp_subscription_2", "resp_subscription_3",
+          "resp_subscription_4", "resp_subscription_5", "resp_subscription_6",
+        ], failed: false, partial: false,
+      }) : "",
+    );
+
+    const result = await execute(makeCtx({ provider: "openai-codex" }).ctx as any);
+
+    expect(result.budgetTelemetry).toMatchObject({
+      providerRequestId: "resp_subscription_1", requestCount: 7,
+      inputTokens: 35_643, outputTokens: 468, costMicrousd: 0,
+    });
+    expect(result.resultJson).toMatchObject({
+      provider: "openai-codex", billingType: "subscription",
+      budgetTelemetryComplete: true, usageTelemetryComplete: false, costSource: "none",
+    });
+  });
+
   it("rejects malformed structured usage without falling back to stdout", async () => {
     vi.mocked(fs.readFile).mockImplementation(async (file) =>
       String(file).endsWith(".result.json")

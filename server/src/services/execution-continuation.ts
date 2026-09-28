@@ -336,11 +336,10 @@ export async function buildExecutionContinuation(input: {
       })
     : undefined;
   if (taskStateCapsule) {
-    const priorHash = priorRuns
-      .map((run) => object(object(run.context).executionContinuation))
-      .map((continuation) => object(continuation.taskStateCapsule))
-      .map((capsule) => string(capsule.hash))
-      .findLast((hash): hash is string => hash !== null);
+    const previousWakeReason = string(object(previousRun?.context).wakeReason);
+    const priorHash = previousWakeReason === "session_rollover_required"
+      ? string(object(priorEnvelope.taskStateCapsule).hash)
+      : null;
     assertTaskStateCapsuleAdvanced(taskStateCapsule, priorHash);
   }
   return {
