@@ -632,6 +632,98 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     });
   });
 
+  it("does not misclassify a pre-provider session rollover as missing telemetry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockClear();
+    mockAdapterExecute
+      .mockImplementationOnce(async () => ({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "Session rollover required",
+        errorCode: SESSION_ROLLOVER_WAKE_REASON,
+        clearSession: true,
+        provider: "openai-codex",
+        model: "test-model",
+        resultJson: {
+          turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON,
+          apiCalls: 0,
+          successfulProviderResponses: 0,
+          providerRequestIds: [],
+          usageTelemetryComplete: false,
+        },
+      }))
+      .mockImplementationOnce(async () => ({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        provider: "openai-codex",
+        model: "test-model",
+        resultJson: {
+          result: "Completed after fresh-session rollover",
+          provider: "openai-codex",
+          billingType: "subscription",
+          budgetTelemetryComplete: true,
+          costStatus: "included",
+          costUnavailableReason: null,
+          cost_usd: 0,
+          apiCalls: 1,
+          successfulProviderResponses: 1,
+          providerRequestIds: ["rollover-success-request"],
+          usageTelemetryComplete: true,
+        },
+        usage: { inputTokens: 10, outputTokens: 5 },
+        usageBasis: "per_run" as const,
+        budgetTelemetry: {
+          providerRequestId: "rollover-success-request",
+          requestCount: 1,
+          inputTokens: 10,
+          outputTokens: 5,
+          runtimeMs: 100,
+          costMicrousd: 0,
+          rateCardVersion: "test-v1",
+        },
+      }));
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db.select({
+      id: heartbeatRuns.id,
+      status: heartbeatRuns.status,
+      errorCode: heartbeatRuns.errorCode,
+      scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
+      scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+    }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))
+      .orderBy(heartbeatRuns.createdAt);
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      errorCode: SESSION_ROLLOVER_WAKE_REASON,
+    });
+    expect(runs[1]).toMatchObject({
+      status: "scheduled_retry",
+      scheduledRetryReason: SESSION_ROLLOVER_RETRY_REASON,
+    });
+
+    const reservations = await db.select({ status: autonomousBudgetReservations.status })
+      .from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId))
+      .orderBy(autonomousBudgetReservations.createdAt);
+    expect(reservations[0]?.status).toBe("released");
+
+    await db.update(heartbeatRuns).set({ processPid: null, processGroupId: null })
+      .where(eq(heartbeatRuns.id, runs[0]!.id));
+    await heartbeat.promoteDueScheduledRetries(
+      new Date(runs[1]!.scheduledRetryAt!.getTime() + 1),
+    );
+    await heartbeat.resumeQueuedRuns();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [completedRollover] = await db.select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, runs[1]!.id));
+    expect(completedRollover?.status).toBe("succeeded");
+  });
+
   it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 

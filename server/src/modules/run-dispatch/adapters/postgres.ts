@@ -712,13 +712,22 @@ export function createPostgresRunDispatchAdapter(
       ) {
         return { outcome: { outcome: "not_promoted" as const }, telemetryRun: null };
       }
+      const contextSnapshot = parseObject(run.contextSnapshot);
+      const issueId = readNonEmptyString(contextSnapshot.issueId);
+      if (run.scheduledRetryReason === "session_rollover" && issueId) {
+        const blocker = await getExecutionBlocker(tx, run.companyId, issueId);
+        if (blocker?.cause === "execution_owner_active") {
+          return { outcome: { outcome: "not_promoted" as const }, telemetryRun: null };
+        }
+      }
+
       const factsResult = await loadGateFacts(
         {
           runId: run.id,
           companyId: run.companyId,
           agentId: run.agentId,
           conversationContinuation: run.runtimeMode === "legacy" && hasConversationContinuationPolicy(run.resultJson),
-          contextSnapshot: parseObject(run.contextSnapshot),
+          contextSnapshot,
           scheduledRetryReason: run.scheduledRetryReason,
           retryReasonOverride: run.scheduledRetryReason,
           wakeupRequestId: run.wakeupRequestId,
