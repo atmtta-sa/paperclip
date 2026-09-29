@@ -3968,6 +3968,42 @@ export function recoveryService(
     return updated;
   }
 
+  async function escalateLogicalExecutionExhaustion(runId: string) {
+    const run = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    const issueId = run && typeof run.contextSnapshot?.issueId === "string"
+      ? run.contextSnapshot.issueId
+      : null;
+    if (!run || !issueId) return null;
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.id, issueId),
+          eq(issues.companyId, run.companyId),
+          eq(issues.assigneeAgentId, run.agentId),
+          inArray(issues.status, ["todo", "in_progress", "in_review"]),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    if (!issue) return null;
+
+    return escalateStrandedAssignedIssue({
+      issue,
+      previousStatus: issue.status as StrandedPreviousStatus,
+      latestRun: run,
+      recoveryCause: "stranded_assigned_issue",
+      comment:
+        "Paperclip exhausted the logical execution's two-provider-attempt budget. " +
+        "No further automatic continuation was created; the board must review the failure before execution can resume.",
+    });
+  }
+
   async function persistAdapterFailureRecoveryClassification(
     latestRun: NonNullable<LatestIssueRun>,
     classification: NonNullable<AdapterFailureRecoveryClassification>,
@@ -5871,6 +5907,7 @@ export function recoveryService(
 
   return {
     buildRunOutputSilence,
+    escalateLogicalExecutionExhaustion,
     escalateStrandedRecoveryIssueInPlace,
     escalateStrandedAssignedIssue,
     recordWatchdogDecision,

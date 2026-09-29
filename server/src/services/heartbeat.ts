@@ -15307,6 +15307,7 @@ export function heartbeatService(
           retryReason,
         },
       });
+      await recovery.escalateLogicalExecutionExhaustion(run.id);
       return {
         outcome: "retry_exhausted" as const,
         attempt: nextAttempt,

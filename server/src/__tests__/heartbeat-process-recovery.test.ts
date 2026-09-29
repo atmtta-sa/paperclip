@@ -12129,9 +12129,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   it.each(["native", "legacy_pre_provider", "legacy_unknown"] as const)("retains closed chat ancestry and current retry authority: %s", async (mode) => {
     const source = await seedCommittedChatControlStop();
     const child = await seedChatAutomaticChild(source, { status: "succeeded" });
+    const [childRun] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, child.runId));
     await db
       .update(heartbeatRuns)
       .set({
+        contextSnapshot: {
+          ...childRun!.contextSnapshot,
+          logicalExecution: {
+            key: `issue:${source.issueId}:generation:${source.runId}`,
+            rootRunId: source.runId,
+            providerAttempt: 1,
+          },
+        },
         status: "failed",
         errorCode: "workspace_busy",
         error: "Workspace occupied",

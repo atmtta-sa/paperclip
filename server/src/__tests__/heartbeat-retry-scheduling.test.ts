@@ -20,6 +20,7 @@ import {
   executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueRecoveryActions,
   issueRelations,
   issues,
   projects,
@@ -353,21 +354,43 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       })
       .where(eq(heartbeatRuns.id, firstRetry.run.id));
 
-    await expect(
+    const exhausted = await Promise.all([
       heartbeat.scheduleBoundedRetry(firstRetry.run.id, {
         now,
         random: () => 0,
       }),
-    ).resolves.toMatchObject({
-      outcome: "retry_exhausted",
-      reason: "logical_execution_provider_attempt_budget_exhausted",
-    });
+      heartbeat.scheduleBoundedRetry(firstRetry.run.id, {
+        now,
+        random: () => 0,
+      }),
+    ]);
+    expect(exhausted).toEqual([
+      expect.objectContaining({
+        outcome: "retry_exhausted",
+        reason: "logical_execution_provider_attempt_budget_exhausted",
+      }),
+      expect.objectContaining({
+        outcome: "retry_exhausted",
+        reason: "logical_execution_provider_attempt_budget_exhausted",
+      }),
+    ]);
     expect(
       await db
         .select()
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.retryOfRunId, firstRetry.run.id)),
     ).toHaveLength(0);
+    await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toEqual([
+      expect.objectContaining({ status: "blocked" }),
+    ]);
+    await expect(
+      db
+        .select()
+        .from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, issueId)),
+    ).resolves.toEqual([
+      expect.objectContaining({ status: "active", ownerType: "board" }),
+    ]);
   });
 
   it("retains the failure budget after many pre-provider workspace waits", async () => {
