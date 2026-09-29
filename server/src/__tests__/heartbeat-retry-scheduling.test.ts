@@ -296,9 +296,10 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     const runId = randomUUID(), companyId = randomUUID(), agentId = randomUUID();
     const now = new Date("2026-04-20T12:00:00.000Z");
     await seedRetryFixture({ runId, companyId, agentId, now, errorCode: "adapter_failed" });
+    const competingHeartbeat = heartbeatService(db);
     const outcomes = await Promise.all([
       heartbeat.scheduleBoundedRetry(runId, { now, random: () => 0 }),
-      heartbeat.scheduleBoundedRetry(runId, { now, random: () => 0 }),
+      competingHeartbeat.scheduleBoundedRetry(runId, { now, random: () => 0 }),
     ]);
     expect(outcomes.every((outcome) => outcome.outcome === "scheduled")).toBe(true);
     const children = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId));
