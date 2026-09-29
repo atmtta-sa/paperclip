@@ -20,6 +20,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueRecoveryActions,
   issues,
 } from "@paperclipai/db";
 import {
@@ -126,6 +127,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       try {
         await db.delete(environmentLeases);
         await db.delete(costEvents);
+        await db.delete(issueRecoveryActions);
         await db.delete(issueComments);
         await db.delete(issues);
         await db.delete(heartbeatRunEvents);
@@ -270,6 +272,94 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       .limit(1)
       .then((rows) => rows[0] ?? null);
   }
+
+  it("contains a failing fake provider within one logical execution", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementation(async () => {
+      const providerRequestId = randomUUID();
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "overloaded",
+        errorFamily: "transient_upstream",
+        errorMessage: "Synthetic upstream overload",
+        provider: "test",
+        model: "test-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+        usageBasis: "per_run" as const,
+        executionRecovery: { kind: "provider", providerWorkStarted: true },
+        resultJson: {
+          errorFamily: "transient_upstream",
+          conversationContinuation: "continue_conversation_v1",
+          executionRecovery: { kind: "provider", providerWorkStarted: true },
+          apiCalls: 1,
+          successfulProviderResponses: 0,
+          usageTelemetryComplete: true,
+          costStatus: "actual",
+          cost_usd: 0.000001,
+          providerRequestIds: [providerRequestId],
+        },
+        budgetTelemetry: {
+          providerRequestId,
+          requestCount: 1,
+          inputTokens: 10,
+          outputTokens: 5,
+          runtimeMs: 100,
+          costMicrousd: 1,
+          rateCardVersion: "test-v1",
+        },
+      };
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const firstPassRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(firstPassRuns).toHaveLength(2);
+    const rootRun = firstPassRuns.find((run) => run.retryOfRunId === null);
+    const retryRun = firstPassRuns.find((run) => run.retryOfRunId === rootRun?.id);
+    expect(rootRun).toMatchObject({ status: "failed", errorCode: "overloaded" });
+    expect(retryRun).toMatchObject({
+      status: "scheduled_retry",
+      contextSnapshot: {
+        logicalExecution: {
+          key: `issue:${issueId}:generation:${rootRun?.id}`,
+          rootRunId: rootRun?.id,
+          providerAttempt: 2,
+        },
+      },
+    });
+
+    await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 300_000));
+    await heartbeat.resumeQueuedRuns();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const finalRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(finalRuns).toHaveLength(2);
+    expect(finalRuns.every((run) => run.status === "failed")).toBe(true);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+    await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toEqual([
+      expect.objectContaining({ status: "blocked" }),
+    ]);
+    await expect(
+      db
+        .select()
+        .from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, issueId)),
+    ).resolves.toEqual([
+      expect.objectContaining({ status: "active", ownerType: "board" }),
+    ]);
+    await expect(
+      db.select().from(costEvents).where(eq(costEvents.companyId, companyId)),
+    ).resolves.toHaveLength(2);
+  });
 
   it("passes the committed run envelope to the adapter context", async () => {
     const { agentId, issueId } = await seedCompanyAgentIssue();

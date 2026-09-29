@@ -107,13 +107,19 @@ function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
 }
 
 function isUniqueRecoveryActionConflict(error: unknown) {
-  const maybe = error as { code?: string; constraint?: string; message?: string } | null;
+  const maybe = error as {
+    code?: string;
+    constraint?: string;
+    constraint_name?: string;
+    message?: string;
+  } | null;
+  const constraint = maybe?.constraint ?? maybe?.constraint_name;
   return Boolean(
     maybe &&
       maybe.code === "23505" &&
       (
-        maybe.constraint === "issue_recovery_actions_active_source_uq" ||
-        maybe.constraint === "issue_recovery_actions_active_fingerprint_uq" ||
+        constraint === "issue_recovery_actions_active_source_uq" ||
+        constraint === "issue_recovery_actions_active_fingerprint_uq" ||
         typeof maybe.message === "string" && (
           maybe.message.includes("issue_recovery_actions_active_source_uq") ||
           maybe.message.includes("issue_recovery_actions_active_fingerprint_uq")

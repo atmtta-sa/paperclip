@@ -120,6 +120,58 @@ describe("issueRecoveryActionService", () => {
     expect(fakeDb.update).toHaveBeenCalledTimes(1);
     expect(fakeDb.insert).toHaveBeenCalledTimes(1);
   });
+
+  it("retries postgres-js constraint_name conflicts by reading the committed winner", async () => {
+    const winner = makeRecoveryActionRow({ id: "winner-action" });
+    const selectResults = [[], [winner]];
+    const fakeDb = {
+      select: vi.fn(() => ({
+        from() {
+          return this;
+        },
+        where() {
+          return this;
+        },
+        orderBy() {
+          return this;
+        },
+        limit() {
+          return Promise.resolve(selectResults.shift() ?? []);
+        },
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: vi.fn(async () => {
+            throw Object.assign(new Error("duplicate key value violates unique constraint"), {
+              code: "23505",
+              constraint_name: "issue_recovery_actions_active_source_uq",
+            });
+          }),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => [winner]),
+          })),
+        })),
+      })),
+    };
+
+    await expect(
+      issueRecoveryActionService(fakeDb as never).upsertSourceScoped({
+        companyId: "company-1",
+        sourceIssueId: "source-1",
+        kind: "missing_disposition",
+        ownerType: "agent",
+        ownerAgentId: "agent-1",
+        cause: "successful_run_missing_issue_disposition",
+        fingerprint: "missing-disposition:fingerprint",
+        nextAction: "Choose a valid issue disposition.",
+        preserveExistingOwner: true,
+      }),
+    ).resolves.toMatchObject({ id: "winner-action", status: "active" });
+  });
 });
 
 if (!embeddedPostgresSupport.supported) {
@@ -275,6 +327,35 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(second.evidence).toMatchObject({ latestRunId: "run-2" });
     expect(await svc.getActiveForIssue(companyId, sourceIssueId)).toMatchObject({ id: first.id });
     expect(await svc.getActiveForIssue(randomUUID(), sourceIssueId)).toBeNull();
+  });
+
+  it("deduplicates concurrent source-scoped inserts across service instances", async () => {
+    const { companyId, managerId, sourceIssueId } = await seedCompany();
+    const input = {
+      companyId,
+      sourceIssueId,
+      kind: "stranded_assigned_issue" as const,
+      ownerType: "agent" as const,
+      ownerAgentId: managerId,
+      cause: "stranded_assigned_issue",
+      fingerprint: "recovery:cross-controller",
+      evidence: { latestRunId: "run-1" },
+      nextAction: "Restore a live execution path.",
+      wakePolicy: { type: "wake_owner" },
+    };
+
+    const [first, second] = await Promise.all([
+      issueRecoveryActionService(db).upsertSourceScoped(input),
+      issueRecoveryActionService(db).upsertSourceScoped(input),
+    ]);
+
+    expect(second.id).toBe(first.id);
+    await expect(
+      db
+        .select()
+        .from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId)),
+    ).resolves.toHaveLength(1);
   });
 
   it("enforces maxAttempts once and removes every automatic recovery path", async () => {
