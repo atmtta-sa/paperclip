@@ -535,6 +535,7 @@ import {
 import { resolveRequiredSuccessfulRunHandoffOnValidPath } from "./successful-run-handoff-state.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
+import { claimAgentRunSlot } from "./agent-run-admission.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -17539,6 +17540,16 @@ export function heartbeatService(
                 };
               }
 
+              const hasRunSlot = await claimAgentRunSlot(
+                tx as unknown as Db,
+                {
+                  agentId: lockedRun.agentId,
+                  maxConcurrentRuns:
+                    parseHeartbeatPolicy(agent).maxConcurrentRuns,
+                },
+              );
+              if (!hasRunSlot) return { kind: "stale" as const, run: null };
+
               await tx
                 .update(agentWakeupRequests)
                 .set({
@@ -17616,28 +17627,38 @@ export function heartbeatService(
       void emitAgentTaskRun(db, queuedCommentClaim.run);
       return null;
     }
+    const claimWithAgentSlot = async (tx: Db) => {
+      const hasRunSlot = await claimAgentRunSlot(tx, {
+        agentId: run.agentId,
+        maxConcurrentRuns: parseHeartbeatPolicy(agent).maxConcurrentRuns,
+      });
+      if (!hasRunSlot) return null;
+      return tx
+        .update(heartbeatRuns)
+        .set({
+          status: "running",
+          runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+          ...legacyControllerClaim(run.runtimeMode),
+          responsibleUserId,
+          startedAt: run.startedAt ?? claimedAt,
+          updatedAt: claimedAt,
+        })
+        .where(
+          and(
+            eq(heartbeatRuns.id, run.id),
+            eq(heartbeatRuns.status, "queued"),
+          ),
+        )
+        .returning()
+        .then((rows) => rows[0] ?? null);
+    };
     const claimed = queuedCommentClaim
       ? queuedCommentClaim.run
-      : await withChatControlRecoveryGate(run, "claim", async (tx) =>
-          tx
-            .update(heartbeatRuns)
-            .set({
-              status: "running",
-              runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-                    ...legacyControllerClaim(run.runtimeMode),
-              responsibleUserId,
-              startedAt: run.startedAt ?? claimedAt,
-              updatedAt: claimedAt,
-            })
-            .where(
-              and(
-                eq(heartbeatRuns.id, run.id),
-                eq(heartbeatRuns.status, "queued"),
-              ),
-            )
-            .returning()
-            .then((rows) => rows[0] ?? null),
-        );
+      : issueId && run.invocationSource === "automation"
+        ? await withChatControlRecoveryGate(run, "claim", claimWithAgentSlot)
+        : await db.transaction((tx) =>
+            claimWithAgentSlot(tx as unknown as Db),
+          );
     if (!claimed) return null;
 
     publishLiveEvent({
