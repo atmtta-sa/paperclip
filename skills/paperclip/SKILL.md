@@ -108,6 +108,38 @@ chat shortcut above applies:
 
 **Duplicate checks before task creation.** For each proposed task, search by its exact title phrase with `GET /api/companies/{companyId}/issues?q={exact-title-phrase}&view=compact&limit=20`, then compare returned titles and project IDs exactly before creating anything. Do not fetch the unfiltered company issue collection for duplicate detection. If a targeted search returns more than 20 candidates, paginate that same `q` query rather than removing its filters. Keep each create idempotent with a stable `idempotencyKey` derived from the project and intended task identity.
 
+### Multi-task creation within a bounded run
+
+When an explicit request requires several ordinary tasks and their project and assignee
+IDs are known, use `scripts/paperclip-bulk-create-tasks.py` instead of spending tool
+iterations rediscovering the create schema. Do not probe OpenAPI paths or search the
+workspace for route definitions; the helper is the documented creation path.
+
+In one terminal tool invocation, write a temporary JSON manifest, invoke the helper
+with `python3`, and remove the temporary file. The manifest has this shape:
+
+```json
+{
+  "tasks": [
+    {
+      "title": "Exact task title",
+      "description": "Task scope and acceptance criteria",
+      "projectId": "project-id",
+      "assigneeAgentId": "agent-id",
+      "status": "todo",
+      "initialPlan": "Approved implementation plan",
+      "idempotencyKey": "stable-project-and-task-identity"
+    }
+  ]
+}
+```
+
+The helper validates every manifest entry, performs all bounded exact-title searches
+before any write, compares exact title plus project, creates only missing tasks, and
+reads every target back before returning. Treat a nonzero exit or a result without all
+expected `created`/`reused` entries as failure. Do not retry manually with an
+unfiltered issue listing; correct the manifest or reported API error instead.
+
 **Step 4 — Pick work.** Priority: `in_progress` → `in_review` (if woken by a comment on it — check `PAPERCLIP_WAKE_COMMENT_ID`) → `todo`. Skip `blocked` unless you can unblock.
 
 Overrides and special cases:
