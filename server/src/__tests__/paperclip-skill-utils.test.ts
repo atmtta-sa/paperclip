@@ -303,6 +303,15 @@ describe("paperclip skill utils", () => {
     expect(skillBody).toContain("Never fetch the unfiltered company issue collection");
   });
 
+  it("requires bounded title searches before creating non-duplicate tasks", async () => {
+    const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
+
+    expect(skillBody).toContain("Duplicate checks before task creation");
+    expect(skillBody).toContain("q={exact-title-phrase}");
+    expect(skillBody).toContain("view=compact&limit=20");
+    expect(skillBody).toContain("Do not fetch the unfiltered company issue collection for duplicate detection");
+  });
+
   it("keeps the external-chat shortcut behind the server-verified harness boundary", async () => {
     const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
     const shortcut = skillBody.match(
