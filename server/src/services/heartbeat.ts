@@ -24,6 +24,10 @@ import {
   waitForAdapterStop,
 } from "./adapter-execution-control.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
+import {
+  LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT,
+  nextLogicalExecutionIdentity,
+} from "./logical-execution.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import {
   AutonomousExecutionPausedError,
@@ -15284,6 +15288,33 @@ export function heartbeatService(
       };
     }
 
+    const logicalExecution = nextLogicalExecutionIdentity(run, issueId);
+    if (
+      logicalExecution.providerAttempt >
+      LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT
+    ) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message:
+          "Logical execution exhausted its provider-attempt budget; no further automatic retry will be queued",
+        payload: {
+          logicalExecutionKey: logicalExecution.key,
+          rootRunId: logicalExecution.rootRunId,
+          providerAttempt: logicalExecution.providerAttempt,
+          providerAttemptLimit: LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT,
+          retryReason,
+        },
+      });
+      return {
+        outcome: "retry_exhausted" as const,
+        attempt: nextAttempt,
+        maxAttempts,
+        reason: "logical_execution_provider_attempt_budget_exhausted" as const,
+      };
+    }
+
     if (legacyExecutionNeedsReconciliation(run)) {
       return {
         outcome: "not_scheduled" as const,
@@ -15396,6 +15427,7 @@ export function heartbeatService(
     const retryContextSnapshot: Record<string, unknown> = withRecoveryContext(
       {
         ...contextSnapshot,
+        logicalExecution,
         retryOfRunId: run.id,
         wakeReason,
         retryReason,
