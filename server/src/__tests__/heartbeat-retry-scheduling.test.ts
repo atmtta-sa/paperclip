@@ -202,17 +202,13 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect(second?.dueAt.toISOString()).toBe("2026-09-28T10:01:00.000Z");
   });
 
-  it("bounds session rollover to three exponential full-jitter retries", () => {
+  it("bounds session rollover to one full-jitter continuation", () => {
     const now = new Date("2026-09-28T10:00:00.000Z");
 
-    expect(SESSION_ROLLOVER_RETRY_DELAYS_MS).toEqual([5_000, 30_000, 120_000]);
+    expect(SESSION_ROLLOVER_RETRY_DELAYS_MS).toEqual([5_000]);
     expect(computeSessionRolloverRetrySchedule(1, now, () => 0.5))
-      .toMatchObject({ attempt: 1, baseDelayMs: 5_000, delayMs: 2_500, maxAttempts: 3 });
-    expect(computeSessionRolloverRetrySchedule(2, now, () => 0.5))
-      .toMatchObject({ attempt: 2, baseDelayMs: 30_000, delayMs: 15_000, maxAttempts: 3 });
-    expect(computeSessionRolloverRetrySchedule(3, now, () => 0.5))
-      .toMatchObject({ attempt: 3, baseDelayMs: 120_000, delayMs: 60_000, maxAttempts: 3 });
-    expect(computeSessionRolloverRetrySchedule(4, now, () => 0.5)).toBeNull();
+      .toMatchObject({ attempt: 1, baseDelayMs: 5_000, delayMs: 2_500, maxAttempts: 1 });
+    expect(computeSessionRolloverRetrySchedule(2, now, () => 0.5)).toBeNull();
   });
 
   async function seedRetryFixture(input: {

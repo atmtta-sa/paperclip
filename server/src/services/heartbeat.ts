@@ -848,9 +848,7 @@ export { MAX_TURN_CONTINUATION_RETRY_REASON };
 export const MAX_TURN_CONTINUATION_WAKE_REASON = "max_turns_continuation_retry";
 export const SESSION_ROLLOVER_RETRY_REASON = "session_rollover";
 export const SESSION_ROLLOVER_WAKE_REASON = "session_rollover_required";
-export const SESSION_ROLLOVER_RETRY_DELAYS_MS = [
-  5_000, 30_000, 120_000,
-] as const;
+export const SESSION_ROLLOVER_RETRY_DELAYS_MS = [5_000] as const;
 const SESSION_ROLLOVER_MAX_ATTEMPTS = SESSION_ROLLOVER_RETRY_DELAYS_MS.length;
 
 export function isSessionRolloverRequiredRun(input: {
