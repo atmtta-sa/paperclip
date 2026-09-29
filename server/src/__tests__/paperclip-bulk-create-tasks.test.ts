@@ -71,8 +71,10 @@ async function makeHarness() {
   await fs.writeFile(manifestPath, JSON.stringify({ tasks }), "utf8");
 
   const issues: Array<Record<string, unknown>> = [];
+  const userAgents: string[] = [];
   let posts = 0;
   const server = http.createServer(async (req, res) => {
+    userAgents.push(req.headers["user-agent"] ?? "");
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     res.setHeader("Content-Type", "application/json");
     if (
@@ -139,7 +141,7 @@ async function makeHarness() {
     };
   };
 
-  return { run, issues, getPosts: () => posts, tasks };
+  return { run, issues, getPosts: () => posts, tasks, userAgents };
 }
 
 describe("paperclip bulk task creation helper", () => {
@@ -165,6 +167,10 @@ describe("paperclip bulk task creation helper", () => {
     expect(result.tasks).toHaveLength(4);
     expect(harness.getPosts()).toBe(4);
     expect(harness.issues).toHaveLength(4);
+    expect(harness.userAgents.length).toBeGreaterThan(0);
+    expect(new Set(harness.userAgents)).toEqual(
+      new Set(["Paperclip-Bulk-Task-Helper/1.0"]),
+    );
   });
 
   it("reuses exact project/title matches on a safe rerun", async () => {

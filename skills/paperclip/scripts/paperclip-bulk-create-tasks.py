@@ -63,6 +63,7 @@ def request_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {token}",
+        "User-Agent": "Paperclip-Bulk-Task-Helper/1.0",
     }
     data = None
     if payload is not None:
