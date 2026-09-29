@@ -106,6 +106,8 @@ chat shortcut above applies:
 
 **Cross-agent assignment/status lookups.** When asked to report another agent's current work, query each target directly with `GET /api/companies/{companyId}/issues?assigneeAgentId={target-agent-id}&status=todo,in_progress,in_review,blocked&view=compact&limit=20`. Never fetch the unfiltered company issue collection for assignment or status reporting. If more than 20 matching items exist, paginate that same filtered compact query rather than removing its filters.
 
+**Duplicate checks before task creation.** For each proposed task, search by its exact title phrase with `GET /api/companies/{companyId}/issues?q={exact-title-phrase}&view=compact&limit=20`, then compare returned titles and project IDs exactly before creating anything. Do not fetch the unfiltered company issue collection for duplicate detection. If a targeted search returns more than 20 candidates, paginate that same `q` query rather than removing its filters. Keep each create idempotent with a stable `idempotencyKey` derived from the project and intended task identity.
+
 **Step 4 — Pick work.** Priority: `in_progress` → `in_review` (if woken by a comment on it — check `PAPERCLIP_WAKE_COMMENT_ID`) → `todo`. Skip `blocked` unless you can unblock.
 
 Overrides and special cases:
