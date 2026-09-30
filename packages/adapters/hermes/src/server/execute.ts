@@ -660,7 +660,10 @@ export async function execute(
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
-    cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
+    cfgString((ctx.context?.paperclipWorkspace as Record<string, unknown> | undefined)?.cwd) ||
+    cfgString(config.cwd) ||
+    cfgString(ctx.config?.workspaceDir) ||
+    ".";
   try {
     await ensureAbsoluteDirectory(cwd);
   } catch {

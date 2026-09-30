@@ -105,6 +105,20 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(opts.onSpawn).toBe(onSpawn);
   });
 
+  it("uses the authoritative execution workspace as the Hermes working directory", async () => {
+    const { ctx } = makeCtx({ cwd: "/srv/paperclip" });
+    (ctx as any).context.paperclipWorkspace = {
+      cwd: "/srv/projects/orchestration-platform",
+      source: "project",
+      mode: "shared_workspace",
+    };
+
+    await execute(ctx as any);
+
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    expect((call[3] as { cwd: string }).cwd).toBe("/srv/projects/orchestration-platform");
+  });
+
   it("injects the reserved autonomous budget envelope into Hermes", async () => {
     const { ctx } = makeCtx();
     const envelope = {
