@@ -757,6 +757,8 @@ export async function execute(
   if (turnExitReason === "session_rollover_required") {
     executionResult.errorCode = turnExitReason;
     executionResult.clearSession = true;
+  } else if (turnExitReason === "context_budget_exceeded") {
+    executionResult.errorCode = turnExitReason;
   }
 
   if (parsed.errorMessage) {

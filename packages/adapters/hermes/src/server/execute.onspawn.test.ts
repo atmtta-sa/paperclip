@@ -313,6 +313,34 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     });
   });
 
+  it("transports a typed final-request budget denial without clearing the session", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({
+            version: 2,
+            failed: true,
+            partial: false,
+            stop_reason: "context_budget_exceeded",
+            turn_exit_reason: "context_budget_exceeded",
+            api_calls: 0,
+            successful_provider_responses: 0,
+            usage_telemetry_complete: false,
+          })
+        : "",
+    );
+    const { ctx } = makeCtx();
+
+    const result = await execute(ctx as any);
+
+    expect(result.errorCode).toBe("context_budget_exceeded");
+    expect(result.clearSession).toBeUndefined();
+    expect(result.resultJson).toMatchObject({
+      turn_exit_reason: "context_budget_exceeded",
+      apiCalls: 0,
+      successfulProviderResponses: 0,
+    });
+  });
+
   it("uses structured Hermes usage rather than untrusted stdout accounting", async () => {
     vi.mocked(fs.readFile).mockImplementation(async (file) =>
       String(file).endsWith(".result.json")
