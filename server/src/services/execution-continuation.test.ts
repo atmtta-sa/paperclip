@@ -28,6 +28,19 @@ it.each([
   })).toThrow("continuation_capsule_unsafe_objective");
 });
 
+it("preserves a multiline issue objective in a rollover capsule", () => {
+  const objective = [
+    "Create the project-shared architecture graph model and scanner.",
+    "",
+    "Acceptance: preserve unrelated work and attach exact evidence.",
+  ].join("\n");
+
+  expect(buildTaskStateCapsule({
+    issueId: randomUUID(), objective, completedWork: null,
+    completedActions: [], unresolvedInteractionIds: [], stateFingerprint: "state",
+  }).objective).toBe(objective);
+});
+
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)(
   "authorized continuation context",

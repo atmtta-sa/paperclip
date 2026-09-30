@@ -40,8 +40,8 @@ export function buildTaskStateCapsule(input: {
   unresolvedInteractionIds: string[];
   stateFingerprint: string;
 }): TaskStateCapsule {
-  // Rollover goals must not carry pasted chat or recognizable credentials.
-  if (/[\r\n]|slack transcript|authorization:\s*bearer|xox[baprs]-|sk-[A-Za-z0-9]{16,}|-----BEGIN .* PRIVATE KEY-----/i.test(input.objective)) {
+  // Multiline issue descriptions are safe; recognizable pasted chat and credentials are not.
+  if (/slack transcript|authorization:\s*bearer|xox[baprs]-|sk-[A-Za-z0-9]{16,}|-----BEGIN .* PRIVATE KEY-----/i.test(input.objective)) {
     throw new Error("continuation_capsule_unsafe_objective");
   }
   const payload = {

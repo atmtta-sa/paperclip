@@ -624,6 +624,16 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("starts one fresh rollover session and rejects the unchanged capsule before another run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db
+      .update(issues)
+      .set({
+        description: [
+          "Create the project-shared architecture graph model and scanner.",
+          "",
+          "Acceptance: preserve unrelated work and attach exact evidence.",
+        ].join("\n"),
+      })
+      .where(eq(issues.id, issueId));
     const rolloverResult = () => ({
       exitCode: 1,
       signal: null,
