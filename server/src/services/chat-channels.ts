@@ -1,4 +1,11 @@
 import { takePhotonCompanion } from "./photon/attachments.js";
+import {
+  chatTaskDispatchService,
+  formatChatTaskDispatchResult,
+  parseStartNextTaskCommand,
+} from "./chat-task-dispatch.js";
+import { createChatTaskDispatchRepository } from "./chat-task-dispatch-repository.js";
+import { authorizationService } from "./authorization.js";
 import { writePhotonCheckpoint } from "./photon/receiver.js";
 import { PhotonState } from "./photon/state.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
@@ -2939,6 +2946,24 @@ export async function hydrateOutboundAttachment(input: {
 
 export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   const runtime = options.runtime ?? createChatSdkRuntime();
+  const access = authorizationService(db);
+  const taskDispatch = chatTaskDispatchService(
+    createChatTaskDispatchRepository(db),
+    options.heartbeat,
+    async ({ companyId, userId, agentId }) =>
+      (
+        await access.decide({
+          actor: {
+            type: "board",
+            source: "cloud_tenant",
+            userId,
+            companyIds: [companyId],
+          },
+          action: "agent:wake",
+          resource: { type: "agent", companyId, agentId },
+        })
+      ).allowed,
+  );
   const runtimeVersions = new Map<string, string>();
   const runtimeLocalEpochs = new Map<string, number>();
   // One bounded publication lane per endpoint; credential/reconnect fencing
@@ -15393,6 +15418,10 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         isLinear || endpoint.provider === "telegram"
           ? linearControlCommand(message.text)
           : null;
+      const startNextTaskCommand =
+        endpoint.provider === "slack"
+          ? parseStartNextTaskCommand(message.text)
+          : null;
       const guidanceCommand =
         endpoint.provider === "telegram"
           ? telegramGuidanceCommand(message.text)
@@ -15596,6 +15625,57 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               effect: "thread_message",
               threadId: thread.id,
               text: "Please include a request after mentioning me.",
+              settleDelivery: true,
+              resourceId: resource.id,
+            },
+            runtimeContext: effectContext,
+          }),
+        );
+        if (!effect) throw new Error("Provider effect was not persisted");
+        if ((await processProviderEffect(effect.id, thread)) !== "processed")
+          return;
+        if (receiptReactionSupported) {
+          await addReceiptReaction({
+            deliveryId: activeDelivery.id,
+            endpoint,
+            message,
+            runtimeContext,
+            thread,
+          });
+        }
+        return;
+      }
+
+      if (startNextTaskCommand) {
+        const responseText = principalResolution.userId
+          ? formatChatTaskDispatchResult(
+              await taskDispatch.startNext({
+                companyId: endpoint.companyId,
+                requestedByUserId: principalResolution.userId,
+                agentName: startNextTaskCommand.agentName,
+                idempotencyKey: `chat-start-next:${activeDelivery.id}`,
+              }),
+            )
+          : "Link your Slack identity to a Paperclip user before starting another agent. Nothing was started.";
+        const effectContext =
+          runtimeContext ??
+          runtimeContextForRecord(
+            (await endpointRecord(endpoint.id)) ??
+              (() => {
+                throw new Error("Chat endpoint is unavailable");
+              })(),
+          );
+        const effect = await db.transaction((tx) =>
+          stageProviderEffect(tx, {
+            endpoint,
+            deliveryId: activeDelivery.id,
+            principalId: principalResolution.principal.id,
+            providerActionId: `provider_effect:delivery:${activeDelivery.id}`,
+            payload: {
+              version: 1,
+              effect: "thread_message",
+              threadId: thread.id,
+              text: responseText,
               settleDelivery: true,
               resourceId: resource.id,
             },

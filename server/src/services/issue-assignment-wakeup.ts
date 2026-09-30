@@ -13,6 +13,7 @@ export interface IssueAssignmentWakeupDeps {
       reason?: string | null;
       payload?: Record<string, unknown> | null;
       idempotencyKey?: string | null;
+      manualUserWake?: boolean;
       allowRunCoalescing?: boolean;
       requestedByActorType?: "user" | "agent" | "system";
       requestedByActorId?: string | null;

@@ -70042,4 +70042,122 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       },
     );
   });
+
+  it("starts exactly one ready developer task from an authorized Slack command without reusing chat context", async () => {
+    const fixture = await seedCompany();
+    const runId = randomUUID();
+    const configured = await configuredSlackEndpoint(fixture, {
+      wakeup: async () => ({ id: runId }),
+    });
+    const { callbacks, endpoint, service, wakeup } = configured;
+    const targetAgentId = randomUUID();
+    const targetIssueId = randomUUID();
+    const targetIdentifier = `NEXT-${randomUUID().slice(0, 8)}`;
+    await db.insert(agents).values({
+      id: targetAgentId,
+      companyId: fixture.companyId,
+      name: "Visualization Tool Developer",
+      status: "idle",
+      adapterType: "paperclip_runner",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: targetIssueId,
+      companyId: fixture.companyId,
+      identifier: targetIdentifier,
+      title: "Inspect repository and establish isolated worktree",
+      status: "in_progress",
+      assigneeAgentId: targetAgentId,
+    });
+    const currentEndpoint = await service.get(endpoint.id);
+    if (!currentEndpoint.providerAccountId) {
+      throw new Error("Configured Slack endpoint has no provider account");
+    }
+    const [principal] = await db
+      .insert(chatExternalPrincipals)
+      .values({
+        companyId: fixture.companyId,
+        provider: "slack",
+        providerAccountId: currentEndpoint.providerAccountId,
+        externalId: "U-START-NEXT",
+        kind: "user",
+        displayName: "Owner",
+      })
+      .returning();
+    await db.insert(chatIdentityLinks).values({
+      companyId: fixture.companyId,
+      endpointId: endpoint.id,
+      principalId: principal!.id,
+      paperclipUserId: "owner-user",
+      status: "linked",
+      confirmedAt: new Date(),
+    });
+    const dm = makeThread({
+      channelId: "D-START-NEXT",
+      id: "slack:D-START-NEXT",
+      isDM: true,
+      name: "start-next",
+    });
+
+    await deliverMessage({
+      callbacks,
+      endpointId: endpoint.id,
+      thread: dm.thread,
+      message: makeMessage({
+        id: "71000.1",
+        text: "Give me the current developer status",
+        userId: "U-START-NEXT",
+      }),
+      trigger: "direct_message",
+    });
+    const [staleConversation] = await service.listConversations(endpoint.id);
+    if (!staleConversation) throw new Error("Expected the stale status conversation");
+    const staleCommentIds = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, staleConversation.issueId));
+    wakeup.mockClear();
+
+    await deliverMessage({
+      callbacks,
+      endpointId: endpoint.id,
+      thread: dm.thread,
+      message: makeMessage({
+        id: "71001.1",
+        text: "/start-next Visualization Tool Developer",
+        userId: "U-START-NEXT",
+      }),
+      trigger: "direct_message",
+    });
+
+    expect(wakeup).toHaveBeenCalledOnce();
+    expect(wakeup).toHaveBeenCalledWith(
+      targetAgentId,
+      expect.objectContaining({
+        manualUserWake: true,
+        reason: "user_directed_task_start",
+        requestedByActorType: "user",
+        requestedByActorId: "owner-user",
+        idempotencyKey: expect.stringMatching(/^chat-start-next:/),
+        payload: expect.objectContaining({ issueId: targetIssueId }),
+      }),
+    );
+    await expect(service.listConversations(endpoint.id)).resolves.toEqual([
+      expect.objectContaining({
+        id: staleConversation.id,
+        issueId: staleConversation.issueId,
+      }),
+    ]);
+    await expect(
+      db
+        .select({ id: issueComments.id })
+        .from(issueComments)
+        .where(eq(issueComments.issueId, staleConversation.issueId)),
+    ).resolves.toEqual(staleCommentIds);
+    expect(dm.post).toHaveBeenCalledWith(
+      `Started ${targetIdentifier}: Inspect repository and establish isolated worktree with Visualization Tool Developer.`,
+    );
+  });
 });
