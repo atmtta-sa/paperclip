@@ -40,6 +40,7 @@ import { recordContinuityCircuitAlert } from "./continuity-circuit-alert.js";
 import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
+import { installHeartbeatHermesContext } from "./paperclip-hermes-context.js";
 import {
   loadIssueTaskStateFingerprint,
   transitionIssueContinuityState,
@@ -20700,6 +20701,45 @@ export function heartbeatService(
           context.paperclipTaskMarkdownCompact =
             redactedWakeContext.paperclipTaskMarkdownCompact;
         }
+      }
+      if (issueRef && !isConversation(issueContext)) {
+        const redactedIssue = parseObject(context.paperclipIssue);
+        const redactedWakeComment = parseObject(context.paperclipWakeComment);
+        const redactedWakeCommentId = readNonEmptyString(redactedWakeComment.id);
+        const redactedWakeCommentBody = readNonEmptyString(redactedWakeComment.body);
+        installHeartbeatHermesContext(context, {
+          companyId: agent.companyId,
+          agentId: agent.id,
+          runId: run.id,
+          issue: {
+            id: issueRef.id,
+            title: readNonEmptyString(redactedIssue.title) ?? issueRef.title,
+            description:
+              typeof redactedIssue.description === "string"
+                ? redactedIssue.description
+                : null,
+            workMode: issueRef.workMode,
+            projectWorkspaceId: issueRef.projectWorkspaceId,
+            executionWorkspaceId: issueRef.executionWorkspaceId,
+          },
+          wakeReason: readNonEmptyString(context.wakeReason),
+          wakeEventId:
+            wakeCommentId ?? readNonEmptyString(context.interactionId) ?? run.id,
+          wakeComment:
+            redactedWakeCommentId && redactedWakeCommentBody
+              ? { id: redactedWakeCommentId, body: redactedWakeCommentBody }
+              : null,
+          interactionStatus: readNonEmptyString(context.interactionStatus),
+          continuationSummary: safeContinuationSummary
+            ? {
+                id: safeContinuationSummary.key,
+                body: safeContinuationSummary.body,
+              }
+            : null,
+          executionContinuation,
+        });
+      } else {
+        delete context.paperclipHermesContext;
       }
       // A native run's execution input is immutable once persisted. Recovery must therefore
       // restore the workspace bound to that input rather than consulting the issue's current

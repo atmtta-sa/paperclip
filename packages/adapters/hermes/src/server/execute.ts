@@ -42,6 +42,10 @@ import {
   stringifyPaperclipWakePayload,
   isPaperclipRecoveryWakePayload,
 } from "@paperclipai/adapter-utils/server-utils";
+import {
+  assertPaperclipHermesContextV1,
+  renderPaperclipHermesContext,
+} from "@paperclipai/adapter-utils/paperclip-hermes-context";
 
 import {
   HERMES_CLI,
@@ -75,6 +79,24 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+type PaperclipContextRenderer = "legacy" | "structured_v1";
+
+function resolvePaperclipContextRenderer(
+  config: Record<string, unknown>,
+): PaperclipContextRenderer {
+  const configured = cfgString(config.paperclipContextRenderer);
+  if (!configured || configured === "legacy") return "legacy";
+  if (configured === "structured_v1") return configured;
+  throw new Error(`paperclip_context_renderer_unsupported:${configured}`);
+}
+
+function renderStructuredPaperclipContext(context: Record<string, unknown>): string {
+  const structured = context.paperclipHermesContext;
+  if (structured == null) throw new Error("paperclip_hermes_context_missing");
+  assertPaperclipHermesContextV1(structured);
+  return renderPaperclipHermesContext(structured);
 }
 
 export function resolveHermesCommand(config: Record<string, unknown>): string {
@@ -152,7 +174,8 @@ export function buildPrompt(
   options: { resumedSession?: boolean } = {},
 ): string {
   const context = (ctx as any).context || {};
-  if (context.wakeReason === "session_rollover_required") {
+  const contextRenderer = resolvePaperclipContextRenderer(config);
+  if (context.wakeReason === "session_rollover_required" && contextRenderer === "legacy") {
     const continuation = ctx.executionContinuation ?? context.executionContinuation;
     const capsule = continuation?.taskStateCapsule;
     const issueId = cfgString(context.issueId);
@@ -212,18 +235,29 @@ export function buildPrompt(
     paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
   }
 
-  const paperclipTaskMarkdown = selectPaperclipTaskMarkdown(context, {
-    resumedSession: options.resumedSession === true,
-  });
-  const wakePrompt = renderPaperclipWakePrompt(context.paperclipWake, {
-    conversationMode: context.conversationMode === true,
-    resumedSession: options.resumedSession === true,
-    // The task-context markdown is the authoritative brief on this lane; keep
-    // the wake prompt's description copy out so the prompt carries it once.
-    suppressIssueDescription: paperclipTaskMarkdown.length > 0,
-  });
-  const sessionHandoffMarkdown = cfgString(context.paperclipSessionHandoffMarkdown)?.trim() || "";
-  const wakePayloadJson = stringifyPaperclipWakePayload(context.paperclipWake) || "";
+  const structuredContextMarkdown = contextRenderer === "structured_v1"
+    ? renderStructuredPaperclipContext(context)
+    : "";
+  const paperclipTaskMarkdown = contextRenderer === "legacy"
+    ? selectPaperclipTaskMarkdown(context, {
+      resumedSession: options.resumedSession === true,
+    })
+    : "";
+  const wakePrompt = contextRenderer === "legacy"
+    ? renderPaperclipWakePrompt(context.paperclipWake, {
+      conversationMode: context.conversationMode === true,
+      resumedSession: options.resumedSession === true,
+      // The task-context markdown is the authoritative brief on this lane; keep
+      // the wake prompt's description copy out so the prompt carries it once.
+      suppressIssueDescription: paperclipTaskMarkdown.length > 0,
+    })
+    : "";
+  const sessionHandoffMarkdown = contextRenderer === "legacy"
+    ? cfgString(context.paperclipSessionHandoffMarkdown)?.trim() || ""
+    : "";
+  const wakePayloadJson = contextRenderer === "legacy"
+    ? stringifyPaperclipWakePayload(context.paperclipWake) || ""
+    : "";
 
   const vars: Record<string, unknown> = {
     agentId: ctx.agent?.id || "",
@@ -247,6 +281,7 @@ export function buildPrompt(
     taskContext: paperclipTaskMarkdown,
     paperclipWakeJson: wakePayloadJson,
     wakePayloadJson,
+    paperclipHermesContextMarkdown: structuredContextMarkdown,
     paperclipApiKeyEnv: "PAPERCLIP_API_KEY",
     paperclipRunIdEnv: "PAPERCLIP_RUN_ID",
   };
@@ -260,6 +295,7 @@ export function buildPrompt(
       ? BOUNDED_REPOSITORY_EXECUTION_PROMPT
       : "";
   return joinPromptSections([
+    structuredContextMarkdown,
     wakePrompt,
     sessionHandoffMarkdown,
     paperclipTaskMarkdown,

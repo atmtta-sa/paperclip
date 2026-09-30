@@ -1,5 +1,7 @@
 import { expect, test } from "vitest";
 
+import { buildPaperclipHermesContext } from "@paperclipai/adapter-utils/paperclip-hermes-context";
+
 import { buildPrompt } from "./execute.js";
 
 function baseContext(overrides: Record<string, unknown> = {}) {
@@ -292,4 +294,105 @@ test.each([false, true])("conversation prompts preserve the handoff policy (resu
     expect(prompt).not.toContain("--arg status done");
     expect(prompt).not.toContain("## Bounded repository execution");
   }
+});
+
+test("structured_v1 renders canonical context without legacy objective or continuation projections", () => {
+  const objective = "Implement exactly one canonical objective.";
+  const structuredContext = buildPaperclipHermesContext({
+    identity: {
+      companyId: "company-1",
+      agentId: "agent-1",
+      issueId: "issue-1",
+      workspaceId: "workspace-1",
+      runId: "run-1",
+    },
+    issue: {
+      id: "issue-1",
+      title: "Canonical prompt",
+      description: objective,
+    },
+    directive: {
+      key: "directive.current",
+      value: "Execute only the assigned issue.",
+      revision: 1,
+      source: { type: "wake", id: "run-1" },
+    },
+    comments: [{
+      id: "comment-1",
+      body: objective,
+    }],
+    continuationSummary: {
+      id: "summary-1",
+      body: objective,
+    },
+    checkpoint: {
+      id: "checkpoint-1",
+      objective,
+      stateFingerprint: "state-1",
+      nextAction: "Run the focused tests.",
+    },
+  });
+  const prompt = buildPrompt(baseContext({
+    paperclipHermesContext: structuredContext,
+    paperclipSessionHandoffMarkdown: `Legacy handoff: ${objective}`,
+    paperclipTaskMarkdown: `Legacy task: ${objective}`,
+  }), { paperclipContextRenderer: "structured_v1" });
+
+  expect(prompt.match(new RegExp(objective, "g"))).toHaveLength(1);
+  expect(prompt.match(/## objective: objective\.current/g)).toHaveLength(1);
+  expect(prompt.match(/## checkpoint_ref: continuation\.current/g)).toHaveLength(1);
+  expect(prompt).not.toContain("## Paperclip Wake Payload");
+  expect(prompt).not.toContain("Legacy handoff:");
+  expect(prompt).not.toContain("Legacy task:");
+  expect(prompt).not.toContain("continuation_summary");
+  expect(prompt).toContain("Execution contract:");
+});
+
+test("structured_v1 fails closed when canonical context is unavailable", () => {
+  expect(() => buildPrompt(baseContext(), {
+    paperclipContextRenderer: "structured_v1",
+  })).toThrow("paperclip_hermes_context_missing");
+});
+
+test("structured_v1 rejects duplicate semantic keys in persisted context", () => {
+  const duplicate = {
+    version: 1,
+    identity: {
+      companyId: "company-1",
+      agentId: "agent-1",
+      issueId: "issue-1",
+      workspaceId: "workspace-1",
+      runId: "run-1",
+    },
+    entries: [
+      {
+        kind: "objective",
+        key: "objective.current",
+        value: "First objective.",
+        authority: "authoritative",
+        precedence: 100,
+        revision: 1,
+        sources: [{ type: "issue", id: "issue-1" }],
+      },
+      {
+        kind: "objective",
+        key: "objective.current",
+        value: "Second objective.",
+        authority: "authoritative",
+        precedence: 100,
+        revision: 1,
+        sources: [{ type: "issue", id: "issue-2" }],
+      },
+    ],
+  };
+
+  expect(() => buildPrompt(baseContext({ paperclipHermesContext: duplicate }), {
+    paperclipContextRenderer: "structured_v1",
+  })).toThrow("paperclip_hermes_context_duplicate_key:objective.current");
+});
+
+test("rejects unsupported Paperclip context renderer versions", () => {
+  expect(() => buildPrompt(baseContext(), {
+    paperclipContextRenderer: "structured_v2",
+  })).toThrow("paperclip_context_renderer_unsupported:structured_v2");
 });

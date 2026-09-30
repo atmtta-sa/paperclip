@@ -31,6 +31,21 @@ test("root package export exposes Paperclip external adapter entrypoint", () => 
   expect(typeof adapter.getConfigSchema).toBe("function");
 });
 
+test("Hermes config schema exposes explicit structured context renderer selection", async () => {
+  const adapter = createServerAdapter();
+  const schema = await adapter.getConfigSchema?.();
+  const field = schema?.fields.find((candidate) => candidate.key === "paperclipContextRenderer");
+
+  expect(field).toMatchObject({
+    type: "select",
+    default: "legacy",
+  });
+  expect(field && "options" in field ? field.options : []).toEqual([
+    { value: "legacy", label: "Legacy markdown" },
+    { value: "structured_v1", label: "Structured context v1" },
+  ]);
+});
+
 test("root package export keeps explicit local and gateway adapter factories", () => {
   const localAdapter = createHermesLocalServerAdapter();
   const gatewayAdapter = createHermesGatewayServerAdapter();

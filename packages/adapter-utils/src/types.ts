@@ -690,6 +690,7 @@ export interface CreateConfigValues {
   cwd: string;
   instructionsFilePath?: string;
   promptTemplate: string;
+  paperclipContextRenderer?: "legacy" | "structured_v1";
   model: string;
   thinkingEffort: string;
   chrome: boolean;

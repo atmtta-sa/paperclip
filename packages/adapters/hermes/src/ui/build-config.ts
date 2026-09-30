@@ -81,6 +81,10 @@ export function buildHermesConfig(
     ac.promptTemplate = v.promptTemplate;
   }
 
+  if (v.paperclipContextRenderer) {
+    ac.paperclipContextRenderer = v.paperclipContextRenderer;
+  }
+
   // Heartbeat config is handled by Paperclip itself
 
   return ac;

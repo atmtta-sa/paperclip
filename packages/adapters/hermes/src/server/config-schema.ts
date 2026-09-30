@@ -103,6 +103,17 @@ export function getConfigSchema(): AdapterConfigSchema {
         type: "textarea",
         hint: "Optional custom prompt template with {{variable}} placeholders.",
       },
+      {
+        key: "paperclipContextRenderer",
+        label: "Paperclip context renderer",
+        type: "select",
+        default: "legacy",
+        options: [
+          { value: "legacy", label: "Legacy markdown" },
+          { value: "structured_v1", label: "Structured context v1" },
+        ],
+        hint: "Structured v1 renders canonical keyed context and excludes legacy duplicate projections.",
+      },
     ],
   };
 }
