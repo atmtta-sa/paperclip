@@ -3,6 +3,9 @@ import type { AdapterConfigSchema } from "@paperclipai/adapter-utils";
 import {
   DEFAULT_GRACE_SEC,
   DEFAULT_TIMEOUT_SEC,
+  DEFAULT_TOOL_RESULT_PER_CALL_BYTES,
+  DEFAULT_TOOL_RESULT_PER_SESSION_BYTES,
+  DEFAULT_TOOL_RESULT_PER_TURN_BYTES,
   VALID_PROVIDERS,
 } from "../shared/constants.js";
 
@@ -113,6 +116,27 @@ export function getConfigSchema(): AdapterConfigSchema {
           { value: "structured_v1", label: "Structured context v1" },
         ],
         hint: "Structured v1 renders canonical keyed context and excludes legacy duplicate projections.",
+      },
+      {
+        key: "toolResultPerCallBytes",
+        label: "Tool result bytes per call",
+        type: "number",
+        default: DEFAULT_TOOL_RESULT_PER_CALL_BYTES,
+        hint: "Provisional UTF-8 byte allowance for one managed tool result.",
+      },
+      {
+        key: "toolResultPerTurnBytes",
+        label: "Tool result bytes per turn",
+        type: "number",
+        default: DEFAULT_TOOL_RESULT_PER_TURN_BYTES,
+        hint: "Provisional cumulative UTF-8 byte allowance for one managed turn.",
+      },
+      {
+        key: "toolResultPerSessionBytes",
+        label: "Tool result bytes per session",
+        type: "number",
+        default: DEFAULT_TOOL_RESULT_PER_SESSION_BYTES,
+        hint: "Provisional cumulative UTF-8 byte allowance including resumed tool history.",
       },
     ],
   };

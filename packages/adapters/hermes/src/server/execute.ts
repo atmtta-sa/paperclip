@@ -52,6 +52,9 @@ import {
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
   DEFAULT_MODEL,
+  DEFAULT_TOOL_RESULT_PER_CALL_BYTES,
+  DEFAULT_TOOL_RESULT_PER_SESSION_BYTES,
+  DEFAULT_TOOL_RESULT_PER_TURN_BYTES,
   VALID_PROVIDERS,
 } from "../shared/constants.js";
 
@@ -79,6 +82,20 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+function resolveToolResultBudget(config: Record<string, unknown>) {
+  const perResultBytes = cfgNumber(config.toolResultPerCallBytes) ?? DEFAULT_TOOL_RESULT_PER_CALL_BYTES;
+  const perTurnBytes = cfgNumber(config.toolResultPerTurnBytes) ?? DEFAULT_TOOL_RESULT_PER_TURN_BYTES;
+  const perSessionBytes = cfgNumber(config.toolResultPerSessionBytes) ?? DEFAULT_TOOL_RESULT_PER_SESSION_BYTES;
+  if (
+    !Number.isSafeInteger(perResultBytes) || perResultBytes <= 0 ||
+    !Number.isSafeInteger(perTurnBytes) || perTurnBytes < perResultBytes ||
+    !Number.isSafeInteger(perSessionBytes) || perSessionBytes < perTurnBytes
+  ) {
+    throw new Error("hermes_tool_result_budget_invalid");
+  }
+  return { perResultBytes, perTurnBytes, perSessionBytes };
 }
 
 type PaperclipContextRenderer = "legacy" | "structured_v1";
@@ -684,6 +701,7 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+  env.HERMES_TOOL_RESULT_BUDGET_JSON = JSON.stringify(resolveToolResultBudget(config));
   if (ctx.autonomousBudgetEnvelope) {
     env.HERMES_AUTONOMOUS_BUDGET_JSON = JSON.stringify(ctx.autonomousBudgetEnvelope);
   }

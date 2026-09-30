@@ -17,6 +17,11 @@ export const DEFAULT_TIMEOUT_SEC = 1800;
 /** Grace period after SIGTERM before SIGKILL (seconds). */
 export const DEFAULT_GRACE_SEC = 10;
 
+/** Provisional managed-run tool-result byte limits; explicitly configurable. */
+export const DEFAULT_TOOL_RESULT_PER_CALL_BYTES = 50_000;
+export const DEFAULT_TOOL_RESULT_PER_TURN_BYTES = 100_000;
+export const DEFAULT_TOOL_RESULT_PER_SESSION_BYTES = 200_000;
+
 /**
  * Default model to use if none specified.
  *

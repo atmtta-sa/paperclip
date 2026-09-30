@@ -141,6 +141,35 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(args).toContain("-Q");
   });
 
+  it("injects explicit provisional tool-result byte limits", async () => {
+    const { ctx } = makeCtx({
+      toolResultPerCallBytes: 40_000,
+      toolResultPerTurnBytes: 80_000,
+      toolResultPerSessionBytes: 160_000,
+    });
+
+    await execute(ctx as any);
+
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const env = (call[3] as { env: Record<string, string> }).env;
+    expect(JSON.parse(env.HERMES_TOOL_RESULT_BUDGET_JSON)).toEqual({
+      perResultBytes: 40_000,
+      perTurnBytes: 80_000,
+      perSessionBytes: 160_000,
+    });
+  });
+
+  it("rejects invalid tool-result byte limits before spawning Hermes", async () => {
+    const { ctx } = makeCtx({
+      toolResultPerCallBytes: 80_000,
+      toolResultPerTurnBytes: 40_000,
+      toolResultPerSessionBytes: 160_000,
+    });
+
+    await expect(execute(ctx as any)).rejects.toThrow("hermes_tool_result_budget_invalid");
+    expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
+  });
+
   it("caps autonomous runs at eight turns and 300 seconds despite looser config", async () => {
     const { ctx } = makeCtx({ timeoutSec: 1800, maxTurnsPerRun: 50 });
     (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {

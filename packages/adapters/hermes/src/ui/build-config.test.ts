@@ -43,3 +43,21 @@ test("does not invent a renderer selection when the form omits it", () => {
 
   expect(config).not.toHaveProperty("paperclipContextRenderer");
 });
+
+test("persists schema-driven renderer and tool-result budgets", () => {
+  const config = buildHermesConfig(values({
+    adapterSchemaValues: {
+      paperclipContextRenderer: "structured_v1",
+      toolResultPerCallBytes: 40_000,
+      toolResultPerTurnBytes: 80_000,
+      toolResultPerSessionBytes: 160_000,
+    },
+  }));
+
+  expect(config).toMatchObject({
+    paperclipContextRenderer: "structured_v1",
+    toolResultPerCallBytes: 40_000,
+    toolResultPerTurnBytes: 80_000,
+    toolResultPerSessionBytes: 160_000,
+  });
+});

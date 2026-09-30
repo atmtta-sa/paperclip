@@ -44,6 +44,9 @@ test("Hermes config schema exposes explicit structured context renderer selectio
     { value: "legacy", label: "Legacy markdown" },
     { value: "structured_v1", label: "Structured context v1" },
   ]);
+  expect(schema?.fields.find((candidate) => candidate.key === "toolResultPerCallBytes")?.default).toBe(50_000);
+  expect(schema?.fields.find((candidate) => candidate.key === "toolResultPerTurnBytes")?.default).toBe(100_000);
+  expect(schema?.fields.find((candidate) => candidate.key === "toolResultPerSessionBytes")?.default).toBe(200_000);
 });
 
 test("root package export keeps explicit local and gateway adapter factories", () => {

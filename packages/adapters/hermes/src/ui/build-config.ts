@@ -22,7 +22,9 @@ import {
 export function buildHermesConfig(
   v: CreateConfigValues,
 ): Record<string, unknown> {
-  const ac: Record<string, unknown> = {};
+  const ac: Record<string, unknown> = {
+    ...(v.adapterSchemaValues ?? {}),
+  };
 
   // Model
   if (v.model.trim()) {
