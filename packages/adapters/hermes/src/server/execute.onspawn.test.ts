@@ -35,6 +35,10 @@ vi.mock("node:fs/promises", () => ({
   mkdir: vi.fn(async () => undefined),
   rm: vi.fn(async () => undefined),
   access: vi.fn(async () => undefined),
+  lstat: vi.fn(async () => ({
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+  })),
   readdir: vi.fn(async () => []),
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
 }));
@@ -62,6 +66,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       },
       config: {
         command: "/usr/bin/hermes",
+        hermesProfile: "paperclip-visualization-tool-developer",
         timeoutSec: 60,
         graceSec: 5,
         ...overrides,
@@ -118,6 +123,35 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
     expect((call[3] as { cwd: string }).cwd).toBe("/srv/projects/orchestration-platform");
   });
+
+  it("selects the isolated managed profile and disables persistent profile memory", async () => {
+    const { ctx } = makeCtx();
+
+    await execute(ctx as any);
+
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const args = call[2] as string[];
+    const env = (call[3] as { env: Record<string, string> }).env;
+    expect(args.slice(0, 3)).toEqual([
+      "--profile",
+      "paperclip-visualization-tool-developer",
+      "chat",
+    ]);
+    expect(JSON.parse(env.HERMES_MANAGED_MEMORY_POLICY_JSON)).toEqual({
+      memoryEnabled: false,
+      userProfileEnabled: false,
+    });
+  });
+
+  it.each([undefined, "", "../default", "default", "bad profile"])(
+    "rejects a missing or unsafe managed profile before spawn: %s",
+    async (hermesProfile) => {
+      const { ctx } = makeCtx({ hermesProfile });
+
+      await expect(execute(ctx as any)).rejects.toThrow("hermes_managed_profile_invalid");
+      expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
+    },
+  );
 
   it("injects the reserved autonomous budget envelope into Hermes", async () => {
     const { ctx } = makeCtx();
@@ -267,7 +301,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     await execute(ctx as any);
     const calls = vi.mocked(serverUtils.runChildProcess).mock.calls;
     const args = calls[calls.length - 1]?.[2] as string[];
-    expect(args[2]).toBe(deliveredPrompt);
+    expect(args[args.indexOf("-q") + 1]).toBe(deliveredPrompt);
   });
 
   it("fails closed when a rollover capsule is missing", () => {

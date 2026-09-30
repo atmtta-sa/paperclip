@@ -10,6 +10,7 @@ import {
   hermesGatewayType,
 } from "./index.js";
 import { createServerAdapter as createGatewayServerAdapterFromSubpath } from "./gateway/index.js";
+import { requireManagedHermesProfile } from "./server/profile-policy.js";
 
 test("root package export exposes Paperclip external adapter entrypoint", () => {
   const adapter = createServerAdapter();
@@ -107,6 +108,97 @@ test("Hermes keeps the operational Paperclip skill linked after an empty replace
 
     expect(snapshot?.desiredSkills).toContain("paperclipai/paperclip/paperclip");
     expect((await fs.lstat(path.join(home, ".hermes", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Hermes reconciles allowlisted skills only into the selected managed profile", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-profile-skill-"));
+  try {
+    await fs.mkdir(
+      path.join(home, ".hermes", "profiles", "paperclip-visualization-tool-developer"),
+      { recursive: true },
+    );
+    const source = path.join(home, "runtime-skills", "paperclip");
+    await fs.mkdir(source, { recursive: true });
+    await fs.writeFile(path.join(source, "SKILL.md"), "# Paperclip\n", "utf8");
+    const adapter = createServerAdapter();
+
+    await adapter.syncSkills?.({
+      adapterType: "hermes_local",
+      agentId: "11111111-1111-4111-8111-111111111111",
+      companyId: "22222222-2222-4222-8222-222222222222",
+      config: {
+        env: { HOME: home },
+        hermesProfile: "paperclip-visualization-tool-developer",
+        paperclipRuntimeSkills: [{
+          key: "paperclipai/paperclip/paperclip",
+          runtimeName: "paperclip",
+          source,
+        }],
+      },
+    }, ["paperclipai/paperclip/paperclip"]);
+
+    const profileTarget = path.join(
+      home,
+      ".hermes",
+      "profiles",
+      "paperclip-visualization-tool-developer",
+      "skills",
+      "paperclip",
+    );
+    expect((await fs.lstat(profileTarget)).isSymbolicLink()).toBe(true);
+    await expect(fs.lstat(path.join(home, ".hermes", "skills", "paperclip"))).rejects.toThrow();
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Hermes skill sync cannot create a missing managed profile", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-missing-profile-"));
+  try {
+    const adapter = createServerAdapter();
+    await expect(adapter.syncSkills?.({
+      adapterType: "hermes_local",
+      agentId: "11111111-1111-4111-8111-111111111111",
+      companyId: "22222222-2222-4222-8222-222222222222",
+      config: {
+        env: { HOME: home },
+        hermesProfile: "paperclip-visualization-tool-developer",
+        paperclipRuntimeSkills: [],
+      },
+    }, [])).rejects.toThrow("hermes_managed_profile_missing");
+
+    await expect(fs.lstat(path.join(
+      home,
+      ".hermes",
+      "profiles",
+      "paperclip-visualization-tool-developer",
+    ))).rejects.toThrow();
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Hermes rejects a managed profile path that is not a real directory", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-profile-path-"));
+  try {
+    const profilesHome = path.join(home, ".hermes", "profiles");
+    const sharedHome = path.join(home, ".hermes", "shared");
+    await fs.mkdir(profilesHome, { recursive: true });
+    await fs.mkdir(sharedHome, { recursive: true });
+
+    for (const [profile, create] of [
+      ["profile-file", () => fs.writeFile(path.join(profilesHome, "profile-file"), "")],
+      ["profile-link", () => fs.symlink(sharedHome, path.join(profilesHome, "profile-link"))],
+    ] as const) {
+      await create();
+      await expect(requireManagedHermesProfile({
+        env: { HOME: home },
+        hermesProfile: profile,
+      })).rejects.toThrow("hermes_managed_profile_missing");
+    }
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }

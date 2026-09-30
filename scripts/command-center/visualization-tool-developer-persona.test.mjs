@@ -7,32 +7,29 @@ const instructions = readFileSync(
   "utf8",
 );
 
-test("Visualization Tool Developer uses bounded targeted discovery before implementation", () => {
+test("Visualization Tool Developer keeps role-specific architecture capability", () => {
   const requiredTerms = [
-    "Bounded execution discipline",
-    "predecessor evidence",
-    "path-scoped",
-    "finite result limit",
-    "large handoff/history files wholesale",
-    "smallest focused failing test",
-    "durable checkpoint",
+    "Python AST/static analysis",
+    "normalized architecture graph models",
+    "stable node and edge identities",
+    "Dash Cytoscape",
+    "React Flow",
+    "static-analysis limitations",
   ];
 
   for (const term of requiredTerms) assert.match(instructions, new RegExp(term, "i"));
 });
 
-test("Visualization Tool Developer keeps quality and authorization gates", () => {
-  const requiredTerms = [
-    "pytest",
-    "Ruff",
-    "Radon",
-    "Bandit",
-    "commit",
-    "push",
-    "deployment",
-    "database migration",
-    "live-data mutation",
+test("Visualization Tool Developer delegates generic execution policy to its owners", () => {
+  assert.ok(Buffer.byteLength(instructions, "utf8") < 4_500);
+  const removedSections = [
+    "Bounded execution discipline",
+    "Test-first execution",
+    "Cost and lifecycle controls",
+    "Completion report",
   ];
 
-  for (const term of requiredTerms) assert.match(instructions, new RegExp(term, "i"));
+  for (const section of removedSections) assert.doesNotMatch(instructions, new RegExp(section, "i"));
+  assert.match(instructions, /Repository-local instructions remain authoritative/i);
+  assert.match(instructions, /Team Lead retains .* final acceptance authority/i);
 });

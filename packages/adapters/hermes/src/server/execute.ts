@@ -64,6 +64,7 @@ import {
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
 import { hermesBudgetTelemetry } from "./budget-telemetry.js";
+import { requireManagedHermesProfile } from "./profile-policy.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -535,6 +536,7 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
+  const hermesProfile = await requireManagedHermesProfile(config);
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const configuredTimeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const timeoutSec = ctx.autonomousBudgetEnvelope
@@ -644,7 +646,7 @@ export async function execute(
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet =
     cfgBoolean(config.quiet) === true || Boolean(ctx.autonomousBudgetEnvelope);
-  const args: string[] = ["chat", "-q", prompt];
+  const args: string[] = ["--profile", hermesProfile, "chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
   // An explicit provider must not be paired with `-m auto`: Hermes resolves
@@ -701,6 +703,10 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+  env.HERMES_MANAGED_MEMORY_POLICY_JSON = JSON.stringify({
+    memoryEnabled: false,
+    userProfileEnabled: false,
+  });
   env.HERMES_TOOL_RESULT_BUDGET_JSON = JSON.stringify(resolveToolResultBudget(config));
   if (ctx.autonomousBudgetEnvelope) {
     env.HERMES_AUTONOMOUS_BUDGET_JSON = JSON.stringify(ctx.autonomousBudgetEnvelope);

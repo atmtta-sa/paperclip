@@ -35,6 +35,12 @@ export function getConfigSchema(): AdapterConfigSchema {
         hint: "Usually auto. Set this only when Hermes cannot infer the provider from the model or ~/.hermes/config.yaml.",
       },
       {
+        key: "hermesProfile",
+        label: "Hermes profile",
+        type: "text",
+        hint: "Required isolated profile created with `hermes profile create <name> --no-skills`; `default` is rejected.",
+      },
+      {
         key: "timeoutSec",
         label: "Timeout seconds",
         type: "number",
