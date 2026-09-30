@@ -83,6 +83,9 @@ test("renders standard assignment wake with task authority and no backlog discov
   expect(prompt).toContain("Add focused unit tests for assignment wake and custom prompt rendering.");
   expect(prompt).toContain("The harness already checked out this issue for the current run.");
   expect(prompt).toContain("clear final disposition");
+  expect(prompt).toContain("## Bounded repository execution");
+  expect(prompt).toContain("Do not enumerate the repository or read large handoff/history files wholesale");
+  expect(prompt).toContain("run the smallest focused failing test as soon as the change boundary is known");
   expect(prompt).not.toContain("check for unassigned issues");
   expect(prompt).not.toContain("status=backlog");
 });
@@ -100,8 +103,31 @@ test("renders scoped planning wake authority before the Hermes default workflow"
   expect(prompt).toContain("Issue description:\n```text\nUse the wake payload as runtime authority.\n```");
   expect(prompt).toContain("clear final disposition");
   expect(prompt).toContain("keep `in_progress` only when a live continuation path exists");
+  expect(prompt).not.toContain("## Bounded repository execution");
   expect(prompt).not.toContain("check for unassigned issues");
   expect(prompt).not.toContain("status=backlog");
+});
+
+test("renders bounded repository execution guidance in a fresh-session rollover", () => {
+  const prompt = buildPrompt(baseContext({
+    wakeReason: "session_rollover_required",
+    executionContinuation: {
+      issueId: "issue-1",
+      coverage: { kind: "bounded_task_capsule" },
+      taskStateCapsule: {
+        version: 1,
+        issueId: "issue-1",
+        hash: "capsule-hash",
+        stateFingerprint: "state-fingerprint",
+        objective: "Implement the focused scanner slice.",
+      },
+    },
+  }), {});
+
+  expect(prompt).toContain("## Fresh-session task-state rollover");
+  expect(prompt).toContain("## Bounded repository execution");
+  expect(prompt).toContain("Reuse verified task and predecessor evidence already present in the prompt");
+  expect(prompt).toContain("Record a concise durable checkpoint after RED or the first useful change");
 });
 
 test("renders resume deltas instead of full scoped-wake boilerplate when continuing a session", () => {
@@ -264,5 +290,6 @@ test.each([false, true])("conversation prompts preserve the handoff policy (resu
     expect(prompt).not.toContain("clear final disposition");
     expect(prompt).not.toContain("Create child issues");
     expect(prompt).not.toContain("--arg status done");
+    expect(prompt).not.toContain("## Bounded repository execution");
   }
 });
