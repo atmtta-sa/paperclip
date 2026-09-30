@@ -70126,7 +70126,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       thread: dm.thread,
       message: makeMessage({
         id: "71001.1",
-        text: "/start-next Visualization Tool Developer",
+        text: "start-next Visualization Tool Developer",
         userId: "U-START-NEXT",
       }),
       trigger: "direct_message",

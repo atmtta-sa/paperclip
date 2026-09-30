@@ -33,6 +33,7 @@ function repository(
 describe("parseStartNextTaskCommand", () => {
   it.each([
     ["/start-next Visualization Tool Developer", "Visualization Tool Developer"],
+    ["start-next Visualization Tool Developer", "Visualization Tool Developer"],
     [" /START-NEXT@paperclip_bot   Visualization Tool Developer ", "Visualization Tool Developer"],
   ])("parses the explicit command %s", (text, expected) => {
     expect(parseStartNextTaskCommand(text)).toEqual({ agentName: expected });
@@ -40,6 +41,7 @@ describe("parseStartNextTaskCommand", () => {
 
   it.each([
     "start the developer's next task",
+    "start-next",
     "/start-next",
     "/start-next   ",
     "/new Visualization Tool Developer",

@@ -80,7 +80,7 @@ export type ChatTaskDispatchResult =
 export function parseStartNextTaskCommand(
   text: string,
 ): { agentName: string } | null {
-  const match = /^\/start-next(?:@[\w.-]+)?\s+(.{1,160})$/i.exec(text.trim());
+  const match = /^\/?start-next(?:@[\w.-]+)?\s+(.{1,160})$/i.exec(text.trim());
   const agentName = match?.[1]?.trim();
   return agentName ? { agentName } : null;
 }
