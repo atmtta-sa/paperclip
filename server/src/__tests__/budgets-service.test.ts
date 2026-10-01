@@ -8,6 +8,7 @@ import {
   companies,
   costEvents,
   createDb,
+  issues,
   projects,
 } from "@paperclipai/db";
 import { budgetService } from "../services/budgets.ts";
@@ -342,6 +343,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     await db.delete(approvals);
     await db.delete(budgetPolicies);
     await db.delete(costEvents);
+    await db.delete(issues);
     await db.delete(projects);
     await db.delete(agents);
     await db.delete(companies);
@@ -411,6 +413,43 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
 
     return event!;
   }
+
+  it("creates a task-scoped per-run policy for an issue", async () => {
+    const { companyId, projectId } = await createBudgetFixture();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      title: "Bounded canary task",
+      status: "todo",
+    });
+
+    const policy = await budgetService(db).upsertPolicy(
+      companyId,
+      {
+        scopeType: "task",
+        scopeId: issueId,
+        metric: "request_count",
+        windowKind: "per_run",
+        amount: 4,
+        hardStopEnabled: true,
+      },
+      "board-user",
+    );
+
+    expect(policy).toMatchObject({
+      companyId,
+      scopeType: "task",
+      scopeId: issueId,
+      scopeName: "Bounded canary task",
+      metric: "request_count",
+      windowKind: "per_run",
+      amount: 4,
+      observedAmount: 0,
+      status: "ok",
+    });
+  });
 
   it("raises one soft incident per window before hard-stopping and safely logging agent telemetry", async () => {
     const { companyId, agentId } = await createBudgetFixture();

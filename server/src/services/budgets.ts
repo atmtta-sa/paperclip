@@ -7,6 +7,7 @@ import {
   budgetPolicies,
   companies,
   costEvents,
+  issues,
   projects,
 } from "@paperclipai/db";
 import type {
@@ -118,6 +119,25 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
       name: row.name,
       paused: row.status === "paused",
       pauseReason: (row.pauseReason as ScopeRecord["pauseReason"]) ?? null,
+    };
+  }
+
+  if (scopeType === "task") {
+    const row = await db
+      .select({
+        companyId: issues.companyId,
+        name: issues.title,
+        paused: issues.autonomousExecutionPaused,
+      })
+      .from(issues)
+      .where(eq(issues.id, scopeId))
+      .then((rows) => rows[0] ?? null);
+    if (!row) throw notFound("Task not found");
+    return {
+      companyId: row.companyId,
+      name: row.name,
+      paused: row.paused,
+      pauseReason: null,
     };
   }
 
