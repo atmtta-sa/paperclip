@@ -368,6 +368,7 @@ type HermesRunResult = {
   cost_status?: string | null;
   cost_source?: string | null;
   cost_unavailable_reason?: string | null;
+  execution_checkpoint?: unknown;
 };
 
 function validNonnegative(value: unknown, integer = true): value is number {
@@ -744,6 +745,7 @@ export async function execute(
   } catch {
     // Non-fatal
   }
+  env.HERMES_EXECUTION_CHECKPOINT_CWD = cwd;
 
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
@@ -885,6 +887,9 @@ export async function execute(
       usageTelemetryComplete: false,
       costUnavailableReason: "run_result_unavailable",
     }),
+    ...(runResult?.execution_checkpoint !== undefined
+      ? { executionCheckpoint: runResult.execution_checkpoint }
+      : {}),
     ...(turnExitReason ? { turn_exit_reason: turnExitReason } : {}),
   };
 

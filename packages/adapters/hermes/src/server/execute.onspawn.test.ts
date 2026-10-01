@@ -122,6 +122,9 @@ describe("hermes-local adapter onSpawn forwarding", () => {
 
     const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
     expect((call[3] as { cwd: string }).cwd).toBe("/srv/projects/orchestration-platform");
+    expect(
+      (call[3] as { env: Record<string, string> }).env.HERMES_EXECUTION_CHECKPOINT_CWD,
+    ).toBe("/srv/projects/orchestration-platform");
   });
 
   it("selects the isolated managed profile and disables persistent profile memory", async () => {
@@ -347,6 +350,14 @@ describe("hermes-local adapter onSpawn forwarding", () => {
   });
 
   it("transports a typed rollover result and clears the provider session", async () => {
+    const executionCheckpoint = {
+      version: 1,
+      workspace: { cwd: "/workspace", gitHead: "a".repeat(40), branch: "main", statusSha256: "b".repeat(64) },
+      patch: { kind: "git_diff", sha256: "c".repeat(64), bytes: 1 },
+      tests: { status: "not_run", commands: [] },
+      blockers: { status: "clear", evidence: ["workspace captured"] },
+      nextAction: "Continue the assigned objective.",
+    };
     vi.mocked(fs.readFile).mockImplementation(async (file) =>
       String(file).endsWith(".result.json")
         ? JSON.stringify({
@@ -355,6 +366,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
             partial: true,
             stop_reason: "session_rollover_required",
             turn_exit_reason: "session_rollover_required",
+            execution_checkpoint: executionCheckpoint,
           })
         : "",
     );
@@ -373,6 +385,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(result.clearSession).toBe(true);
     expect(result.resultJson).toMatchObject({
       turn_exit_reason: "session_rollover_required",
+      executionCheckpoint,
     });
   });
 

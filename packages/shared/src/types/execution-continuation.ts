@@ -51,6 +51,26 @@ export interface ExecutionContinuationEnvelope {
     blockers: Array<{ kind: "interaction"; id: string }>;
     artifactRefs: string[];
     stateFingerprint: string;
+    replayFingerprint?: string;
+    executionCheckpoint?: {
+      version: 1;
+      workspace: {
+        cwd: string;
+        gitHead: string;
+        branch: string | null;
+        statusSha256: string;
+      };
+      patch: { kind: "git_diff"; sha256: string; bytes: number };
+      tests: {
+        status: "passed" | "failed" | "not_run";
+        commands: Array<{ command: string; exitCode: number | null }>;
+      };
+      blockers: {
+        status: "clear" | "blocked";
+        evidence: string[];
+      };
+      nextAction: string;
+    };
   };
   /** Start a new turn from history; never replay prior tool calls automatically. */
   interruptedRunId?: string;

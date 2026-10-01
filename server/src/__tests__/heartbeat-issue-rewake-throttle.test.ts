@@ -155,6 +155,32 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     await tempDb?.cleanup();
   });
 
+  function validExecutionCheckpoint() {
+    return {
+      version: 1 as const,
+      workspace: {
+        cwd: "/workspace/project",
+        gitHead: "0123456789abcdef0123456789abcdef01234567",
+        branch: "feat/checkpoint",
+        statusSha256: "a".repeat(64),
+      },
+      patch: {
+        kind: "git_diff" as const,
+        sha256: "b".repeat(64),
+        bytes: 128,
+      },
+      tests: {
+        status: "passed" as const,
+        commands: [{ command: "pnpm test", exitCode: 0 }],
+      },
+      blockers: {
+        status: "clear" as const,
+        evidence: ["No unresolved issue dependency"],
+      },
+      nextAction: "Run the focused typecheck.",
+    };
+  }
+
   async function seedCompanyAgentIssue() {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -622,6 +648,36 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(reservation?.status).toBe("retained_missing_telemetry");
   });
 
+  it("does not schedule a rollover without a durable execution checkpoint", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Session rollover required",
+      errorCode: SESSION_ROLLOVER_WAKE_REASON,
+      clearSession: true,
+      summary: "Checkpointed work; verification remains.",
+      provider: "test",
+      model: "test-model",
+      resultJson: { turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON },
+    }));
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const scheduled = await db
+      .select({ reason: heartbeatRuns.scheduledRetryReason })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.scheduledRetryReason, SESSION_ROLLOVER_RETRY_REASON),
+        ),
+      );
+    expect(scheduled).toEqual([]);
+  });
+
   it("starts one fresh rollover session and rejects the unchanged capsule before another run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     await db
@@ -644,7 +700,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       summary: "Checkpointed work; verification remains.",
       provider: "test",
       model: "test-model",
-      resultJson: { turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON },
+      resultJson: {
+        turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON,
+        executionCheckpoint: validExecutionCheckpoint(),
+      },
       budgetTelemetry: {
         providerRequestId: randomUUID(),
         requestCount: 1,
@@ -747,6 +806,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         model: "test-model",
         resultJson: {
           turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON,
+          executionCheckpoint: validExecutionCheckpoint(),
           apiCalls: 0,
           successfulProviderResponses: 0,
           providerRequestIds: [],

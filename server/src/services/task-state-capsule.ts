@@ -24,6 +24,10 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function sortedUnique(values: string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
 export type TaskStateCapsule = NonNullable<
   ExecutionContinuationEnvelope["taskStateCapsule"]
 >;
@@ -39,6 +43,7 @@ export function buildTaskStateCapsule(input: {
   }>;
   unresolvedInteractionIds: string[];
   stateFingerprint: string;
+  executionCheckpoint?: TaskStateCapsule["executionCheckpoint"];
 }): TaskStateCapsule {
   // Multiline issue descriptions are safe; recognizable pasted chat and credentials are not.
   if (/slack transcript|authorization:\s*bearer|xox[baprs]-|sk-[A-Za-z0-9]{16,}|-----BEGIN .* PRIVATE KEY-----/i.test(input.objective)) {
@@ -49,7 +54,8 @@ export function buildTaskStateCapsule(input: {
     issueId: input.issueId,
     objective: clip(input.objective, MAX_OBJECTIVE_CHARS) ?? "",
     completedWork: clip(input.completedWork, MAX_COMPLETED_WORK_CHARS),
-    nextAction: "Read the current issue and perform one authorized next action; stop if blocked.",
+    nextAction: input.executionCheckpoint?.nextAction ??
+      "Read the current issue and perform one authorized next action; stop if blocked.",
     completedActionRefs: input.completedActions
       .slice(-MAX_REFERENCES)
       .map((action) => ({
@@ -65,6 +71,9 @@ export function buildTaskStateCapsule(input: {
       .slice(-MAX_REFERENCES)
       .map((action) => `run:${action.runId}/receipt:${action.receiptId}`),
     stateFingerprint: input.stateFingerprint,
+    ...(input.executionCheckpoint
+      ? { executionCheckpoint: input.executionCheckpoint }
+      : {}),
   };
   const hashPayload = {
     version: payload.version,
@@ -75,11 +84,52 @@ export function buildTaskStateCapsule(input: {
     blockers: payload.blockers,
     artifactRefs: payload.artifactRefs,
     stateFingerprint: payload.stateFingerprint,
+    executionCheckpoint: payload.executionCheckpoint,
+  };
+  const checkpoint = payload.executionCheckpoint;
+  const replayPayload = {
+    version: payload.version,
+    issueId: payload.issueId,
+    objective: payload.objective,
+    nextAction: payload.nextAction,
+    operationIds: sortedUnique(
+      payload.completedActionRefs.map((action) => action.operationId),
+    ),
+    blockers: [...payload.blockers].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    ),
+    stateFingerprint: payload.stateFingerprint,
+    executionCheckpoint: checkpoint
+      ? {
+          workspace: {
+            gitHead: checkpoint.workspace.gitHead,
+            branch: checkpoint.workspace.branch,
+            statusSha256: checkpoint.workspace.statusSha256,
+          },
+          patch: checkpoint.patch,
+          tests: {
+            status: checkpoint.tests.status,
+            commands: sortedUnique(
+              checkpoint.tests.commands.map(
+                (command) => `${command.command}\u001f${command.exitCode}`,
+              ),
+            ),
+          },
+          blockers: {
+            status: checkpoint.blockers.status,
+            evidence: sortedUnique(checkpoint.blockers.evidence),
+          },
+          nextAction: checkpoint.nextAction,
+        }
+      : null,
   };
   return {
     ...payload,
     hash: createHash("sha256")
       .update(stableStringify(hashPayload))
+      .digest("hex"),
+    replayFingerprint: createHash("sha256")
+      .update(stableStringify(replayPayload))
       .digest("hex"),
   };
 }
@@ -87,8 +137,13 @@ export function buildTaskStateCapsule(input: {
 export function assertTaskStateCapsuleAdvanced(
   capsule: TaskStateCapsule,
   priorHash: string | null | undefined,
+  priorReplayFingerprint?: string | null,
 ): void {
-  if (priorHash && priorHash === capsule.hash) {
+  if (
+    (priorReplayFingerprint &&
+      priorReplayFingerprint === capsule.replayFingerprint) ||
+    (!priorReplayFingerprint && priorHash && priorHash === capsule.hash)
+  ) {
     throw new Error("continuation_capsule_unchanged");
   }
 }

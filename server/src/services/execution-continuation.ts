@@ -13,6 +13,7 @@ import type { ExecutionContinuationEnvelope } from "@paperclipai/shared";
 import { sanitizeQuarantinedCommentForHigherTrust } from "./source-trust.js";
 import { hasConversationContinuationPolicy } from "./conversation-continuation.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
+import { parseExecutionCheckpoint } from "./execution-checkpoint.js";
 import { loadIssueTaskStateFingerprint } from "./issue-continuity-state.js";
 import {
   assertTaskStateCapsuleAdvanced,
@@ -322,6 +323,9 @@ export async function buildExecutionContinuation(input: {
     .filter((row) => row.status === "pending")
     .map((row) => row.id);
   const rollover = string(input.context.wakeReason) === "session_rollover_required";
+  const executionCheckpoint = rollover
+    ? parseExecutionCheckpoint(object(lastTerminal?.result).executionCheckpoint)
+    : null;
   const stateFingerprint = rollover
     ? await loadIssueTaskStateFingerprint({ db, companyId, issueId })
     : null;
@@ -333,6 +337,7 @@ export async function buildExecutionContinuation(input: {
         completedActions,
         unresolvedInteractionIds,
         stateFingerprint,
+        ...(executionCheckpoint ? { executionCheckpoint } : {}),
       })
     : undefined;
   if (taskStateCapsule) {
@@ -340,7 +345,14 @@ export async function buildExecutionContinuation(input: {
     const priorHash = previousWakeReason === "session_rollover_required"
       ? string(object(priorEnvelope.taskStateCapsule).hash)
       : null;
-    assertTaskStateCapsuleAdvanced(taskStateCapsule, priorHash);
+    const priorReplayFingerprint = previousWakeReason === "session_rollover_required"
+      ? string(object(priorEnvelope.taskStateCapsule).replayFingerprint)
+      : null;
+    assertTaskStateCapsuleAdvanced(
+      taskStateCapsule,
+      priorHash,
+      priorReplayFingerprint,
+    );
   }
   return {
     ...(interruptedRunId ? { interruptedRunId } : {}),

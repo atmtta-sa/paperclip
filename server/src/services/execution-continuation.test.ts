@@ -16,7 +16,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import { buildExecutionContinuation, currentContinuationOrigins } from "./execution-continuation.js";
-import { buildTaskStateCapsule } from "./task-state-capsule.js";
+import {
+  assertTaskStateCapsuleAdvanced,
+  buildTaskStateCapsule,
+} from "./task-state-capsule.js";
 
 it.each([
   "Slack transcript:\n[12:00] User: copied thread",
@@ -39,6 +42,59 @@ it("preserves a multiline issue objective in a rollover capsule", () => {
     issueId: randomUUID(), objective, completedWork: null,
     completedActions: [], unresolvedInteractionIds: [], stateFingerprint: "state",
   }).objective).toBe(objective);
+});
+
+it("normalizes replay state independently of run ids and repeated test evidence", () => {
+  const checkpoint = {
+    version: 1 as const,
+    workspace: {
+      cwd: "/workspace/one",
+      gitHead: "a".repeat(40),
+      branch: "feat/checkpoint",
+      statusSha256: "b".repeat(64),
+    },
+    patch: { kind: "git_diff" as const, sha256: "c".repeat(64), bytes: 128 },
+    tests: {
+      status: "passed" as const,
+      commands: [
+        { command: "pnpm test", exitCode: 0 },
+        { command: "pnpm test", exitCode: 0 },
+      ],
+    },
+    blockers: { status: "clear" as const, evidence: ["clear"] },
+    nextAction: "Run the focused typecheck.",
+  };
+  const first = buildTaskStateCapsule({
+    issueId: "issue-1",
+    objective: "Finish the task",
+    completedWork: null,
+    completedActions: [{ runId: "run-1", receiptId: "receipt-1", operationId: "write:file" }],
+    unresolvedInteractionIds: [],
+    stateFingerprint: "issue-state",
+    executionCheckpoint: checkpoint,
+  });
+  const second = buildTaskStateCapsule({
+    issueId: "issue-1",
+    objective: "Finish the task",
+    completedWork: null,
+    completedActions: [{ runId: "run-2", receiptId: "receipt-2", operationId: "write:file" }],
+    unresolvedInteractionIds: [],
+    stateFingerprint: "issue-state",
+    executionCheckpoint: {
+      ...checkpoint,
+      workspace: { ...checkpoint.workspace, cwd: "/workspace/two" },
+      tests: {
+        ...checkpoint.tests,
+        commands: [{ command: "pnpm test", exitCode: 0 }],
+      },
+    },
+  });
+
+  expect(first.hash).not.toBe(second.hash);
+  expect(first.replayFingerprint).toBe(second.replayFingerprint);
+  expect(() =>
+    assertTaskStateCapsuleAdvanced(second, first.hash, first.replayFingerprint),
+  ).toThrow("continuation_capsule_unchanged");
 });
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -287,6 +343,50 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(freshPrompt).toContain("Read my Notion launch notes.");
       expect(freshPrompt).not.toContain('"resumeDelta"');
     });
+    it("carries durable checkpoint evidence into a fresh rollover capsule", async () => {
+      const executionCheckpoint = {
+        version: 1,
+        workspace: {
+          cwd: "/workspace/project",
+          gitHead: "a".repeat(40),
+          branch: "feat/checkpoint",
+          statusSha256: "b".repeat(64),
+        },
+        patch: { kind: "git_diff", sha256: "c".repeat(64), bytes: 128 },
+        tests: {
+          status: "passed",
+          commands: [{ command: "pnpm test", exitCode: 0 }],
+        },
+        blockers: { status: "clear", evidence: ["No failed verification command"] },
+        nextAction: "Run the focused typecheck.",
+      };
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "failed",
+          resultJson: { executionCheckpoint },
+        })
+        .where(eq(heartbeatRuns.id, runId));
+      try {
+        const context = await buildExecutionContinuation({
+          db,
+          companyId,
+          issueId,
+          agentId,
+          context: { wakeReason: "session_rollover_required" },
+          summary: null,
+          exposeLowTrustRaw: false,
+        });
+        expect(context.taskStateCapsule?.executionCheckpoint).toEqual(executionCheckpoint);
+        expect(context.taskStateCapsule?.nextAction).toBe(executionCheckpoint.nextAction);
+      } finally {
+        await db
+          .update(heartbeatRuns)
+          .set({ resultJson: null })
+          .where(eq(heartbeatRuns.id, runId));
+      }
+    });
+
     it("keeps ten fresh-session rollovers bounded and omits historical message bodies", async () => {
       const sizes: number[] = [];
       for (let cycle = 0; cycle < 10; cycle += 1) {

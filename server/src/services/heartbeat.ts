@@ -40,6 +40,7 @@ import { recordContinuityCircuitAlert } from "./continuity-circuit-alert.js";
 import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
+import { parseExecutionCheckpoint } from "./execution-checkpoint.js";
 import { installHeartbeatHermesContext } from "./paperclip-hermes-context.js";
 import {
   loadIssueTaskStateFingerprint,
@@ -15253,6 +15254,30 @@ export function heartbeatService(
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
+
+    if (
+      retryReason === SESSION_ROLLOVER_RETRY_REASON &&
+      !parseExecutionCheckpoint(parseObject(run.resultJson).executionCheckpoint)
+    ) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message:
+          "Session rollover suppressed because no valid durable execution checkpoint was persisted",
+        payload: {
+          retryReason,
+          errorCode: "execution_checkpoint_missing",
+        },
+      });
+      return {
+        outcome: "not_scheduled" as const,
+        reason:
+          "Session rollover requires a valid durable execution checkpoint.",
+        errorCode: "execution_checkpoint_missing" as const,
+        issueId,
+      };
+    }
 
     if (!baseSchedule) {
       await appendRunEvent(run, {
