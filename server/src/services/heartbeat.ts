@@ -788,6 +788,8 @@ const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 const CONFIGURATION_INCOMPLETE_FAILURE_CODE = "configuration_incomplete";
 const CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE = "configuration_incomplete";
+const AUTONOMOUS_RUN_BUDGET_POLICY_MISSING_CODE =
+  "autonomous_run_budget_policy_missing";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON =
   "execution_review_participant_recovery";
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON =
@@ -812,10 +814,17 @@ const PRE_ADAPTER_SETUP_FAILURE_CODES = new Set<string>([
   "setup_failed",
   CONFIGURATION_INCOMPLETE_FAILURE_CODE,
   WORKSPACE_VALIDATION_FAILURE_CODE,
+  AUTONOMOUS_RUN_BUDGET_POLICY_MISSING_CODE,
   ...NON_RETRYABLE_PREFLIGHT_FAILURE_CODES,
 ]);
 
 function nonRetryablePreflightFailureCode(error: unknown): string | null {
+  if (
+    error instanceof Error &&
+    error.message.startsWith("autonomous_run_budget_policy_missing:")
+  ) {
+    return AUTONOMOUS_RUN_BUDGET_POLICY_MISSING_CODE;
+  }
   if (error instanceof ChatControlRecoveryUnresolvedError)
     return CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE;
   if (
@@ -25367,6 +25376,8 @@ export function heartbeatService(
         const autonomousPauseFailure = err instanceof AutonomousExecutionPausedError;
         const providerCircuitFailure =
           err instanceof AutonomousProviderCircuitAdmissionError ? err : null;
+        const nonRetryablePreflightCode =
+          nonRetryablePreflightFailureCode(err);
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(
             (await getRun(run.id).catch(() => null))?.errorCode,
@@ -25398,7 +25409,7 @@ export function heartbeatService(
           (budgetAdmissionFailure ? "budget_exhausted" : null) ??
           workspaceValidationFailure?.code ??
           configurationIncompleteFailure?.code ??
-          nonRetryablePreflightFailureCode(err) ??
+          nonRetryablePreflightCode ??
           recordedResponsibleUserDenialCode ??
           nativeTerminalFailureCode ??
           "adapter_failed";
@@ -25532,7 +25543,8 @@ export function heartbeatService(
           if (
             !budgetAdmissionFailure &&
             !autonomousPauseFailure &&
-            !providerCircuitFailure
+            !providerCircuitFailure &&
+            !nonRetryablePreflightCode
           ) {
             await scheduleInteractionContinuationInfrastructureRetryIfEligible(
               livenessRun,
@@ -25548,7 +25560,8 @@ export function heartbeatService(
               nativeTerminalFailureCode !== null ||
               budgetAdmissionFailure !== null ||
               autonomousPauseFailure ||
-              providerCircuitFailure !== null,
+              providerCircuitFailure !== null ||
+              nonRetryablePreflightCode !== null,
           });
           await handleIssueReviewPathDisposition(livenessRun);
 
@@ -25597,7 +25610,7 @@ export function heartbeatService(
         await finalizeAgentStatus(agent.id, "failed", message, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
           keepIdleOnFailure:
-            Boolean(nonRetryablePreflightFailureCode(err)) ||
+            Boolean(nonRetryablePreflightCode) ||
             isWorkspaceSyncConflictFailure(message),
         });
       }

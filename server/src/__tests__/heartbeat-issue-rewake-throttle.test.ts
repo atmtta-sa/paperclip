@@ -950,6 +950,47 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     ]);
   });
 
+  it("fails a missing run-envelope policy without adapter execution or retry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db
+      .delete(budgetPolicies)
+      .where(
+        and(
+          eq(budgetPolicies.companyId, companyId),
+          eq(budgetPolicies.scopeId, issueId),
+          eq(budgetPolicies.metric, "request_count"),
+          eq(budgetPolicies.windowKind, "per_run"),
+        ),
+      );
+    mockAdapterExecute.mockClear();
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db
+      .select({
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        retryOfRunId: heartbeatRuns.retryOfRunId,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toEqual([
+      {
+        status: "failed",
+        errorCode: "autonomous_run_budget_policy_missing",
+        retryOfRunId: null,
+      },
+    ]);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+
+    const reservations = await db
+      .select({ id: autonomousBudgetReservations.id })
+      .from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservations).toEqual([]);
+  });
+
   it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 
