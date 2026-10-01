@@ -24554,6 +24554,11 @@ export function heartbeatService(
           resultEvidence.apiCalls === 0 &&
           resultEvidence.successfulProviderResponses === 0 &&
           providerRequestIds.length === 0;
+        const verifiedPreProviderFailure =
+          adapterResult.executionRecovery?.kind === "bootstrap" &&
+          adapterResult.executionRecovery.providerWorkStarted === false;
+        const verifiedNoProviderActivity =
+          preProviderSessionRollover || verifiedPreProviderFailure;
         const requestCountValid = codexSubscriptionEvidence
           ? Number.isSafeInteger(resultEvidence.apiCalls) &&
             Number.isSafeInteger(resultEvidence.successfulProviderResponses) &&
@@ -24593,8 +24598,8 @@ export function heartbeatService(
           runId: run.id,
           providerActivityOccurred:
             (nativeDispatchStarted || legacyAdapterEntered) &&
-            !preProviderSessionRollover,
-          verifiedNoProviderActivity: preProviderSessionRollover,
+            !verifiedNoProviderActivity,
+          verifiedNoProviderActivity,
           providerRequestId: budgetTelemetry?.providerRequestId ?? null,
           actual: budgetTelemetry
             ? {
@@ -25099,6 +25104,9 @@ export function heartbeatService(
           const conversationSettled = await settleConversationTurn(db, livenessRun);
           await releaseIssueExecutionAndPromote(livenessRun, {
             suppressImmediateRecovery: conversationSettled ||
+              adapterResult.retryHint === "operator_action_required" ||
+              adapterResult.retryHint === "non_retryable" ||
+              adapterResult.retryHint === "policy_blocked" ||
               readNonEmptyString(
                 parseObject(livenessRun.contextSnapshot).goalControlRequestId,
               ) !== null ||

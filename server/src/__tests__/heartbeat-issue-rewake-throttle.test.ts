@@ -884,6 +884,72 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(completedRollover?.status).toBe("succeeded");
   });
 
+  it("releases a verified pre-provider skill conflict without scheduling a retry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Managed skill target is occupied",
+      errorCode: "skill_ownership_conflict",
+      executionRecovery: {
+        kind: "bootstrap" as const,
+        providerWorkStarted: false as const,
+      },
+      retryHint: "operator_action_required" as const,
+      resultJson: {
+        executionRecovery: {
+          kind: "bootstrap" as const,
+          providerWorkStarted: false as const,
+        },
+        retryHint: "operator_action_required",
+      },
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db
+      .select({
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        retryOfRunId: heartbeatRuns.retryOfRunId,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        errorCode: "skill_ownership_conflict",
+        retryOfRunId: null,
+      }),
+    ]);
+
+    const reservations = await db
+      .select({
+        status: autonomousBudgetReservations.status,
+        providerActivityOccurred: autonomousBudgetReservations.providerActivityOccurred,
+        providerRequestId: autonomousBudgetReservations.providerRequestId,
+        actualRequestCount: autonomousBudgetReservations.actualRequestCount,
+        actualInputTokens: autonomousBudgetReservations.actualInputTokens,
+        actualOutputTokens: autonomousBudgetReservations.actualOutputTokens,
+        actualCostMicrousd: autonomousBudgetReservations.actualCostMicrousd,
+      })
+      .from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservations).toEqual([
+      {
+        status: "released",
+        providerActivityOccurred: false,
+        providerRequestId: null,
+        actualRequestCount: null,
+        actualInputTokens: null,
+        actualOutputTokens: null,
+        actualCostMicrousd: null,
+      },
+    ]);
+  });
+
   it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 

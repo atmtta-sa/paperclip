@@ -82,6 +82,12 @@ export interface AdapterExecutionResult {
     sessionPreserved: true;
     actionOutcomes: "settled";
   };
+  /** Adapter evidence for control-plane retry policy; Paperclip remains authoritative. */
+  retryHint?:
+    | "transient"
+    | "operator_action_required"
+    | "non_retryable"
+    | "policy_blocked";
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;

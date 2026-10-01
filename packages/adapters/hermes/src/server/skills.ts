@@ -21,6 +21,10 @@ import {
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
+export class HermesSkillOwnershipConflictError extends Error {
+  readonly code = "skill_ownership_conflict";
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -249,7 +253,7 @@ export async function reconcileHermesPaperclipSkills(
       ? path.resolve(path.dirname(target), linkedSource)
       : null;
     if (resolvedSource !== path.resolve(entry.source)) {
-      throw new Error(
+      throw new HermesSkillOwnershipConflictError(
         `Cannot reconcile Hermes skill "${entry.key}" because ${target} is occupied by another installation.`,
       );
     }

@@ -122,6 +122,39 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     })).rejects.toThrow("autonomous_budget_reservation_scope_mismatch");
   });
 
+  it("idempotently replays a verified zero-provider release", async () => {
+    const scope = await createCostBudgetFixture(500);
+    const runId = randomUUID();
+    await reserveAutonomousBudget(db, {
+      ...scope,
+      runId,
+      requested: {
+        requestCount: 1,
+        inputTokens: 1_000,
+        outputTokens: 100,
+        runtimeMs: 10_000,
+        costMicrousd: 10_000,
+      },
+    });
+    const reconciliation = {
+      ...scope,
+      runId,
+      providerActivityOccurred: false,
+      verifiedNoProviderActivity: true,
+      providerRequestId: null,
+      actual: null,
+    };
+
+    expect(await reconcileAutonomousBudget(db, reconciliation)).toEqual({
+      status: "released",
+      replayed: false,
+    });
+    expect(await reconcileAutonomousBudget(db, reconciliation)).toEqual({
+      status: "released",
+      replayed: true,
+    });
+  });
+
   it("atomically bounds concurrent continuations by one chain envelope", async () => {
     const scope = await createCostBudgetFixture(500);
     await db.insert(budgetPolicies).values([

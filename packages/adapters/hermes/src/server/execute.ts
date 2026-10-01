@@ -575,6 +575,30 @@ export async function execute(
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await ctx.onLog("stderr", `[hermes] Cannot start without the required Paperclip-managed skills: ${reason}\n`);
+      if (
+        err instanceof Error &&
+        (err as Error & { code?: unknown }).code === "skill_ownership_conflict"
+      ) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: "skill_ownership_conflict",
+          errorMessage: reason,
+          executionRecovery: {
+            kind: "bootstrap",
+            providerWorkStarted: false,
+          },
+          retryHint: "operator_action_required",
+          resultJson: {
+            executionRecovery: {
+              kind: "bootstrap",
+              providerWorkStarted: false,
+            },
+            retryHint: "operator_action_required",
+          },
+        };
+      }
       throw err;
     }
   }

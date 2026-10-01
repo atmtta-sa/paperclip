@@ -43,7 +43,12 @@ vi.mock("node:fs/promises", () => ({
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
 }));
 
+vi.mock("./skills.js", () => ({
+  reconcileHermesPaperclipSkills: vi.fn(async () => []),
+}));
+
 import { buildPrompt, execute } from "./execute.js";
+import { reconcileHermesPaperclipSkills } from "./skills.js";
 import * as serverUtils from "@paperclipai/adapter-utils/server-utils";
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
@@ -144,6 +149,40 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       memoryEnabled: false,
       userProfileEnabled: false,
     });
+  });
+
+  it("returns a verified pre-provider result for a managed skill ownership conflict", async () => {
+    const conflict = Object.assign(new Error("Managed skill target is occupied"), {
+      code: "skill_ownership_conflict",
+    });
+    vi.mocked(reconcileHermesPaperclipSkills).mockRejectedValueOnce(conflict);
+    const { ctx } = makeCtx({ paperclipRuntimeSkills: [] });
+
+    const result = await execute(ctx as any);
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: "skill_ownership_conflict",
+      errorMessage: "Managed skill target is occupied",
+      executionRecovery: {
+        kind: "bootstrap",
+        providerWorkStarted: false,
+      },
+      retryHint: "operator_action_required",
+    });
+    expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
+  });
+
+  it("keeps unknown managed skill failures on the uncertain exception path", async () => {
+    vi.mocked(reconcileHermesPaperclipSkills).mockRejectedValueOnce(
+      new Error("unexpected reconciliation failure"),
+    );
+    const { ctx } = makeCtx({ paperclipRuntimeSkills: [] });
+
+    await expect(execute(ctx as any)).rejects.toThrow("unexpected reconciliation failure");
+    expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
   });
 
   it.each([undefined, "", "../default", "default", "bad profile"])(
