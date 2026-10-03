@@ -47,7 +47,7 @@ vi.mock("./skills.js", () => ({
   reconcileHermesPaperclipSkills: vi.fn(async () => []),
 }));
 
-import { buildPrompt, execute } from "./execute.js";
+import { buildPrompt, execute, normalizeManagedBudgetCode } from "./execute.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
 import * as serverUtils from "@paperclipai/adapter-utils/server-utils";
 
@@ -149,6 +149,40 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       memoryEnabled: false,
       userProfileEnabled: false,
     });
+  });
+
+  it("passes an explicit implementation progress policy only to bounded managed runs", async () => {
+    const { ctx } = makeCtx({
+      managedProgressIntent: "implementation",
+      maxProviderResponsesWithoutDurableProgress: 2,
+    });
+    (ctx as any).autonomousBudgetEnvelope = {
+      requestCount: 4,
+      inputTokens: 25_000,
+      outputTokens: 4_000,
+      runtimeMs: 300_000,
+      costMicrousd: 250_000,
+    };
+
+    await execute(ctx as any);
+
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const env = (call[3] as { env: Record<string, string> }).env;
+    expect(JSON.parse(env.HERMES_MANAGED_PROGRESS_POLICY_JSON)).toEqual({
+      version: 1,
+      intent: "implementation",
+      maxProviderResponsesWithoutDurableProgress: 2,
+    });
+  });
+
+  it("does not enable implementation progress policy implicitly", async () => {
+    const { ctx } = makeCtx();
+
+    await execute(ctx as any);
+
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const env = (call[3] as { env: Record<string, string> }).env;
+    expect(env.HERMES_MANAGED_PROGRESS_POLICY_JSON).toBeUndefined();
   });
 
   it("returns a verified pre-provider result for a managed skill ownership conflict", async () => {
@@ -428,7 +462,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     });
   });
 
-  it("transports a typed final-request budget denial without clearing the session", async () => {
+  it("normalizes a legacy cumulative budget denial to the modern non-retryable code", async () => {
     vi.mocked(fs.readFile).mockImplementation(async (file) =>
       String(file).endsWith(".result.json")
         ? JSON.stringify({
@@ -437,6 +471,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
             partial: false,
             stop_reason: "context_budget_exceeded",
             turn_exit_reason: "context_budget_exceeded",
+            budget_failure_reason: "cumulative_input_tokens_exceeded",
             api_calls: 0,
             successful_provider_responses: 0,
             usage_telemetry_complete: false,
@@ -447,12 +482,149 @@ describe("hermes-local adapter onSpawn forwarding", () => {
 
     const result = await execute(ctx as any);
 
-    expect(result.errorCode).toBe("context_budget_exceeded");
+    expect(result.errorCode).toBe("execution_input_budget_exceeded");
+    expect(result.retryHint).toBe("non_retryable");
     expect(result.clearSession).toBeUndefined();
     expect(result.resultJson).toMatchObject({
-      turn_exit_reason: "context_budget_exceeded",
+      turn_exit_reason: "execution_input_budget_exceeded",
       apiCalls: 0,
       successfulProviderResponses: 0,
+    });
+  });
+
+  it("preserves a modern model-context limit as non-retryable", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({
+            version: 2,
+            failed: true,
+            partial: false,
+            stop_reason: "model_context_limit_exceeded",
+            turn_exit_reason: "model_context_limit_exceeded",
+            budget_failure_reason: "context_window_exceeded",
+            api_calls: 0,
+            successful_provider_responses: 0,
+            usage_telemetry_complete: false,
+          })
+        : "",
+    );
+    const { ctx } = makeCtx();
+
+    const result = await execute(ctx as any);
+
+    expect(result.errorCode).toBe("model_context_limit_exceeded");
+    expect(result.retryHint).toBe("non_retryable");
+    expect(result.resultJson).toMatchObject({
+      turn_exit_reason: "model_context_limit_exceeded",
+    });
+  });
+
+  it.each([
+    "request_bytes_exceeded",
+    "request_tokens_exceeded",
+    "context_window_exceeded",
+    "context_window_unknown",
+    "model_metadata_missing",
+    "output_reserve_unavailable",
+  ])("normalizes legacy model-context reason %s", (reason) => {
+    expect(normalizeManagedBudgetCode("context_budget_exceeded", reason)).toEqual({
+      code: "model_context_limit_exceeded",
+      valid: true,
+    });
+  });
+
+  it.each([undefined, "unknown_budget_reason"])(
+    "fails closed for a newly received legacy budget result with source %s",
+    async (budgetFailureReason) => {
+      vi.mocked(fs.readFile).mockImplementation(async (file) =>
+        String(file).endsWith(".result.json")
+          ? JSON.stringify({
+              version: 2,
+              failed: true,
+              partial: false,
+              stop_reason: "context_budget_exceeded",
+              turn_exit_reason: "context_budget_exceeded",
+              ...(budgetFailureReason
+                ? { budget_failure_reason: budgetFailureReason } : {}),
+              api_calls: 0,
+              successful_provider_responses: 0,
+              usage_telemetry_complete: false,
+            })
+          : "",
+      );
+      const { ctx } = makeCtx();
+
+      const result = await execute(ctx as any);
+
+      expect(result.errorCode).toBe("adapter_result_inconsistent");
+      expect(result.retryHint).toBe("non_retryable");
+      expect(result.resultJson).toMatchObject({
+        turn_exit_reason: "adapter_result_inconsistent",
+        retryHint: "non_retryable",
+      });
+    },
+  );
+
+  it.each([
+    ["execution_input_budget_exceeded", "context_window_exceeded"],
+    ["model_context_limit_exceeded", "cumulative_input_tokens_exceeded"],
+  ])("rejects contradictory modern budget result %s + %s", async (code, reason) => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({
+            version: 2,
+            failed: true,
+            partial: false,
+            stop_reason: code,
+            turn_exit_reason: code,
+            budget_failure_reason: reason,
+            api_calls: 0,
+            successful_provider_responses: 0,
+            usage_telemetry_complete: false,
+          })
+        : "",
+    );
+    const { ctx } = makeCtx();
+
+    const result = await execute(ctx as any);
+
+    expect(result.errorCode).toBe("adapter_result_inconsistent");
+    expect(result.retryHint).toBe("non_retryable");
+    expect(result.resultJson).toMatchObject({
+      turn_exit_reason: "adapter_result_inconsistent",
+      retryHint: "non_retryable",
+    });
+  });
+
+  it("transports no-progress evidence as non-retryable", async () => {
+    const progress = {
+      provider_responses_since_baseline: 2,
+      max_provider_responses_without_durable_progress: 2,
+      workspace_changed: false,
+      verification_commands: 0,
+    };
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({
+            version: 2, failed: true, partial: true,
+            stop_reason: "no_progress", turn_exit_reason: "no_progress",
+            provider: "test", model: "test-model",
+            api_calls: 2, successful_provider_responses: 2,
+            usage_telemetry_complete: true,
+            input_tokens: 100, output_tokens: 20,
+            progress,
+          })
+        : "",
+    );
+
+    const result = await execute(makeCtx().ctx as any);
+
+    expect(result.errorCode).toBe("no_progress");
+    expect(result.retryHint).toBe("non_retryable");
+    expect(result.resultJson).toMatchObject({
+      turn_exit_reason: "no_progress",
+      retryHint: "non_retryable",
+      progress,
     });
   });
 
@@ -461,7 +633,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       String(file).endsWith(".result.json")
         ? JSON.stringify({
             version: 2, provider: "openrouter", model: "kimi", endpoint_class: "openrouter_api", api_calls: 1,
-            successful_provider_responses: 1, input_tokens: 123,
+            successful_provider_responses: 1, input_tokens: 123, provider_input_tokens: 150,
             output_tokens: 45, cache_read_tokens: 10, cache_write_tokens: 0,
             estimated_cost_usd: 0.002, cost_status: "estimated",
             cost_unavailable_reason: null, usage_telemetry_complete: true,
@@ -480,7 +652,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
 
     expect(result.provider).toBe("openrouter");
     expect(result.model).toBe("kimi");
-    expect(result.usage).toMatchObject({ inputTokens: 123, outputTokens: 45, cachedInputTokens: 10 });
+    expect(result.usage).toMatchObject({ inputTokens: 150, outputTokens: 45, cachedInputTokens: 10 });
     expect(result.costUsd).toBe(0.002);
     expect(result.usageBasis).toBe("per_run");
     expect(result.resultJson).toMatchObject({ successfulProviderResponses: 1,
@@ -499,7 +671,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
         String(file).endsWith(".result.json") ? JSON.stringify({
           version: 2, provider: "openrouter", model: "kimi", endpoint_class: "openrouter_api",
           api_calls: 1, successful_provider_responses: 1, usage_telemetry_complete: true,
-          input_tokens: 123, output_tokens: 45, estimated_cost_usd: 0.002,
+          input_tokens: 123, provider_input_tokens: 150, output_tokens: 45, estimated_cost_usd: 0.002,
           cost_status: "actual", cost_source: costSource,
           provider_request_ids: [requestId], failed: false, partial: false,
         }) : "",
@@ -508,7 +680,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       if (expected) {
         expect(result.budgetTelemetry).toMatchObject({
           providerRequestId: requestId, requestCount: 1,
-          inputTokens: 123, outputTokens: 45, costMicrousd: 2000,
+          inputTokens: 150, outputTokens: 45, costMicrousd: 2000,
         });
         expect(result.budgetTelemetry?.runtimeMs).toBeGreaterThanOrEqual(0);
       } else {

@@ -147,10 +147,12 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
 
     expect(await reconcileAutonomousBudget(db, reconciliation)).toEqual({
       status: "released",
+      settlementState: "released_zero_usage",
       replayed: false,
     });
     expect(await reconcileAutonomousBudget(db, reconciliation)).toEqual({
       status: "released",
+      settlementState: "released_zero_usage",
       replayed: true,
     });
   });
@@ -412,6 +414,117 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       .where(eq(autonomousBudgetReservations.runId, runId)).then((rows) => rows[0]);
     expect(row).toMatchObject({ status: "reconciled", actualCostCents: 110, actualRuntimeMs: 1_100 });
     expect(next).toMatchObject({ admitted: false, reason: "task_budget_exhausted" });
+  });
+
+  it("preserves the historical PHA-7 input overrun during idempotent settlement", async () => {
+    const scope = await createCostBudgetFixture(1000);
+    const runId = randomUUID();
+    await reserveAutonomousBudget(db, {
+      ...scope,
+      runId,
+      requested: {
+        requestCount: 4,
+        inputTokens: 25_000,
+        outputTokens: 8_000,
+        runtimeMs: 180_000,
+        costMicrousd: 1,
+      },
+    });
+    const reconciliation = {
+      ...scope,
+      runId,
+      providerActivityOccurred: true,
+      providerRequestId: "pha-7-request-1",
+      actual: {
+        requestCount: 3,
+        inputTokens: 29_729,
+        outputTokens: 634,
+        runtimeMs: 90_000,
+        costMicrousd: 0,
+      },
+    };
+
+    expect(await reconcileAutonomousBudget(db, reconciliation)).toMatchObject({
+      status: "reconciled",
+      settlementState: "consumed_over_reservation",
+      replayed: false,
+    });
+    expect(await reconcileAutonomousBudget(db, reconciliation)).toMatchObject({
+      status: "reconciled",
+      settlementState: "consumed_over_reservation",
+      replayed: true,
+    });
+
+    const row = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, runId)).then((rows) => rows[0]);
+    expect(row).toMatchObject({
+      reservedInputTokens: 25_000,
+      actualInputTokens: 29_729,
+      overrunInputTokens: 4_729,
+      settlementState: "consumed_over_reservation",
+    });
+  });
+
+  it("upgrades uncertain historical usage when authoritative telemetry is recovered", async () => {
+    const scope = await createCostBudgetFixture(1000);
+    const runId = randomUUID();
+    await reserveAutonomousBudget(db, {
+      ...scope,
+      runId,
+      requested: {
+        requestCount: 4,
+        inputTokens: 25_000,
+        outputTokens: 8_000,
+        runtimeMs: 180_000,
+        costMicrousd: 1,
+      },
+    });
+    await reconcileAutonomousBudget(db, {
+      ...scope,
+      runId,
+      providerActivityOccurred: true,
+      providerRequestId: null,
+      actual: null,
+    });
+
+    const recovered = {
+      ...scope,
+      runId,
+      providerActivityOccurred: true,
+      providerRequestId: "pha-7-request-1",
+      actual: {
+        requestCount: 3,
+        inputTokens: 29_729,
+        outputTokens: 634,
+        runtimeMs: 27_379,
+        costMicrousd: 0,
+      },
+    };
+    expect(await reconcileAutonomousBudget(db, recovered)).toEqual({
+      status: "reconciled",
+      settlementState: "consumed_over_reservation",
+      replayed: false,
+    });
+    expect(await reconcileAutonomousBudget(db, recovered)).toEqual({
+      status: "reconciled",
+      settlementState: "consumed_over_reservation",
+      replayed: true,
+    });
+    await expect(reconcileAutonomousBudget(db, {
+      ...recovered,
+      actual: { ...recovered.actual, inputTokens: 29_728 },
+    })).rejects.toThrow("autonomous_budget_reconciliation_conflict");
+
+    const row = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, runId)).then((rows) => rows[0]);
+    expect(row).toMatchObject({
+      actualRequestCount: 3,
+      actualInputTokens: 29_729,
+      actualOutputTokens: 634,
+      actualRuntimeMs: 27_379,
+      overrunInputTokens: 4_729,
+      settlementState: "consumed_over_reservation",
+    });
   });
 
   it("retains the full reservation when provider telemetry is missing", async () => {

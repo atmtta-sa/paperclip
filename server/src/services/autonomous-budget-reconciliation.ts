@@ -32,6 +32,10 @@ type NormalizedActual = {
   costMicrousd: number;
 };
 
+type SettlementState = NonNullable<
+  typeof autonomousBudgetReservations.$inferSelect.settlementState
+>;
+
 function nonNegativeInteger(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error("autonomous_budget_reservation_invalid_amount");
@@ -83,10 +87,39 @@ function reconciliationMatches(
   );
 }
 
+function deriveSettlementState(
+  row: typeof autonomousBudgetReservations.$inferSelect,
+  actual: NormalizedActual | null,
+  hasCompleteTelemetry: boolean,
+  verifiedNoProviderActivity: boolean,
+): SettlementState {
+  if (verifiedNoProviderActivity) return "released_zero_usage";
+  if (!hasCompleteTelemetry || !actual) return "uncertain_requires_reconciliation";
+  if (
+    actual.requestCount > row.reservedRequestCount ||
+    actual.inputTokens > row.reservedInputTokens ||
+    actual.outputTokens > row.reservedOutputTokens ||
+    actual.runtimeMs > row.reservedRuntimeMs ||
+    actual.costMicrousd > row.reservedCostMicrousd
+  ) return "consumed_over_reservation";
+  if (
+    actual.requestCount < row.reservedRequestCount ||
+    actual.inputTokens < row.reservedInputTokens ||
+    actual.outputTokens < row.reservedOutputTokens ||
+    actual.runtimeMs < row.reservedRuntimeMs ||
+    actual.costMicrousd < row.reservedCostMicrousd
+  ) return "partially_consumed";
+  return "consumed";
+}
+
 export async function reconcileAutonomousBudget(
   db: Db,
   input: AutonomousBudgetReconciliationInput,
-): Promise<{ status: "reconciled" | "retained_missing_telemetry" | "released"; replayed: boolean }> {
+): Promise<{
+  status: "reconciled" | "retained_missing_telemetry" | "released";
+  settlementState: SettlementState;
+  replayed: boolean;
+}> {
   const actual = input.actual ? normalizeActual(input.actual) : null;
   const hasCompleteTelemetry =
     input.providerActivityOccurred && actual !== null && Boolean(input.providerRequestId?.trim());
@@ -126,9 +159,23 @@ export async function reconcileAutonomousBudget(
     if (input.model !== undefined && row.model !== input.model) {
       throw new Error("autonomous_budget_reconciliation_model_mismatch");
     }
-    if (row.status !== "reserved") {
-      if (reconciliationMatches(row, input, actual, status)) {
-        return { status, replayed: true };
+    const settlementState = deriveSettlementState(
+      row,
+      actual,
+      hasCompleteTelemetry,
+      verifiedNoProviderActivity,
+    );
+    const recoveringAuthoritativeTelemetry =
+      row.status === "retained_missing_telemetry" &&
+      row.settlementState === "uncertain_requires_reconciliation" &&
+      status === "reconciled" &&
+      hasCompleteTelemetry;
+    if (row.status !== "reserved" && !recoveringAuthoritativeTelemetry) {
+      if (
+        reconciliationMatches(row, input, actual, status) &&
+        row.settlementState === settlementState
+      ) {
+        return { status, settlementState, replayed: true };
       }
       throw new Error("autonomous_budget_reconciliation_conflict");
     }
@@ -137,6 +184,7 @@ export async function reconcileAutonomousBudget(
       .update(autonomousBudgetReservations)
       .set({
         status,
+        settlementState,
         providerActivityOccurred: input.providerActivityOccurred,
         providerRequestId: input.providerRequestId,
         actualRequestCount: hasCompleteTelemetry ? actual.requestCount : null,
@@ -147,6 +195,9 @@ export async function reconcileAutonomousBudget(
           ? Math.ceil(actual.costMicrousd / 10_000)
           : null,
         actualCostMicrousd: hasCompleteTelemetry ? actual.costMicrousd : null,
+        overrunInputTokens: hasCompleteTelemetry
+          ? Math.max(0, actual.inputTokens - row.reservedInputTokens)
+          : 0,
         rateCardVersion: input.rateCardVersion ?? row.rateCardVersion,
         reconciledAt: new Date(),
         updatedAt: new Date(),
@@ -155,6 +206,6 @@ export async function reconcileAutonomousBudget(
 
     if (hasCompleteTelemetry) await recordAutonomousPromptGrowthAlert(tx, row, actual);
 
-    return { status, replayed: false };
+    return { status, settlementState, replayed: false };
   });
 }

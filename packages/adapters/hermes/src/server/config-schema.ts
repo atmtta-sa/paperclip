@@ -60,6 +60,24 @@ export function getConfigSchema(): AdapterConfigSchema {
         hint: "Optional Hermes --max-turns limit for tool-calling iterations.",
       },
       {
+        key: "managedProgressIntent",
+        label: "Managed progress policy",
+        type: "select",
+        default: "disabled",
+        options: [
+          { value: "disabled", label: "Disabled" },
+          { value: "implementation", label: "Implementation" },
+        ],
+        hint: "Opt-in hard progress admission for bounded implementation runs.",
+      },
+      {
+        key: "maxProviderResponsesWithoutDurableProgress",
+        label: "Provider responses before durable progress",
+        type: "number",
+        default: 2,
+        hint: "Before the next provider request, require a workspace change or completed verification command.",
+      },
+      {
         key: "toolsets",
         label: "Toolsets",
         type: "text",

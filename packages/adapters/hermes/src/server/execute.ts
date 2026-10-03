@@ -99,6 +99,29 @@ function resolveToolResultBudget(config: Record<string, unknown>) {
   return { perResultBytes, perTurnBytes, perSessionBytes };
 }
 
+function resolveManagedProgressPolicy(
+  config: Record<string, unknown>,
+  autonomousBudgetEnabled: boolean,
+) {
+  const intent = cfgString(config.managedProgressIntent);
+  if (!intent || intent === "disabled") return null;
+  if (intent !== "implementation") {
+    throw new Error("managed_progress_intent_unsupported");
+  }
+  if (!autonomousBudgetEnabled) {
+    throw new Error("managed_progress_policy_requires_autonomous_budget");
+  }
+  const limit = cfgNumber(config.maxProviderResponsesWithoutDurableProgress);
+  if (!Number.isSafeInteger(limit) || (limit ?? 0) < 1) {
+    throw new Error("managed_progress_response_limit_invalid");
+  }
+  return {
+    version: 1,
+    intent: "implementation",
+    maxProviderResponsesWithoutDurableProgress: limit,
+  } as const;
+}
+
 type PaperclipContextRenderer = "legacy" | "structured_v1";
 
 function resolvePaperclipContextRenderer(
@@ -351,6 +374,7 @@ type HermesRunResult = {
   version: 1 | 2;
   stop_reason?: string | null;
   turn_exit_reason?: string | null;
+  budget_failure_reason?: string | null;
   failed?: boolean;
   partial?: boolean;
   provider?: string | null;
@@ -361,6 +385,7 @@ type HermesRunResult = {
   successful_provider_responses?: number;
   usage_telemetry_complete?: boolean;
   input_tokens?: number | null;
+  provider_input_tokens?: number | null;
   output_tokens?: number | null;
   cache_read_tokens?: number | null;
   cache_write_tokens?: number | null;
@@ -369,7 +394,45 @@ type HermesRunResult = {
   cost_source?: string | null;
   cost_unavailable_reason?: string | null;
   execution_checkpoint?: unknown;
+  progress?: {
+    provider_responses_since_baseline: number;
+    max_provider_responses_without_durable_progress: number;
+    workspace_changed: boolean;
+    verification_commands: number;
+  };
 };
+
+const MODEL_CONTEXT_FAILURE_REASONS = new Set([
+  "request_bytes_exceeded",
+  "request_tokens_exceeded",
+  "context_window_exceeded",
+  "context_window_unknown",
+  "model_metadata_missing",
+  "output_reserve_unavailable",
+]);
+
+export function normalizeManagedBudgetCode(
+  code: string | undefined,
+  failureReason: string | undefined,
+): { code: string; valid: boolean } | null {
+  const derived = failureReason === "cumulative_input_tokens_exceeded"
+    ? "execution_input_budget_exceeded"
+    : failureReason && MODEL_CONTEXT_FAILURE_REASONS.has(failureReason)
+      ? "model_context_limit_exceeded"
+      : undefined;
+  if (code === "context_budget_exceeded") {
+    return derived
+      ? { code: derived, valid: true }
+      : { code: "adapter_result_inconsistent", valid: false };
+  }
+  if (code === "execution_input_budget_exceeded" ||
+      code === "model_context_limit_exceeded") {
+    return derived === code
+      ? { code, valid: true }
+      : { code: "adapter_result_inconsistent", valid: false };
+  }
+  return null;
+}
 
 function validNonnegative(value: unknown, integer = true): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 &&
@@ -381,6 +444,8 @@ function validQuietResult(value: Record<string, unknown>): boolean {
   if (value.version !== 2) return false;
   if ((value.failed != null && typeof value.failed !== "boolean") ||
       (value.partial != null && typeof value.partial !== "boolean")) return false;
+  if (value.budget_failure_reason != null &&
+      typeof value.budget_failure_reason !== "string") return false;
   if (value.endpoint_class != null &&
       !["unknown", "codex_app_server", "openrouter_api", "openai_api"].includes(String(value.endpoint_class))) return false;
   if (value.cost_status != null &&
@@ -401,11 +466,27 @@ function validQuietResult(value: Record<string, unknown>): boolean {
   }
   if (value.api_calls && (typeof value.provider !== "string" || !value.provider.trim() ||
       typeof value.model !== "string" || !value.model.trim())) return false;
-  for (const key of ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]) {
+  for (const key of ["input_tokens", "provider_input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]) {
     if (value[key] != null && !validNonnegative(value[key])) return false;
   }
   if (value.usage_telemetry_complete && value.api_calls &&
       (value.input_tokens == null || value.output_tokens == null)) return false;
+  if (value.progress !== undefined) {
+    if (!value.progress || typeof value.progress !== "object" || Array.isArray(value.progress)) return false;
+    const progress = value.progress as Record<string, unknown>;
+    const expectedKeys = [
+      "max_provider_responses_without_durable_progress",
+      "provider_responses_since_baseline",
+      "verification_commands",
+      "workspace_changed",
+    ];
+    if (Object.keys(progress).sort().join(",") !== expectedKeys.join(",") ||
+        !validNonnegative(progress.provider_responses_since_baseline) ||
+        !validNonnegative(progress.max_provider_responses_without_durable_progress) ||
+        progress.max_provider_responses_without_durable_progress === 0 ||
+        typeof progress.workspace_changed !== "boolean" ||
+        !validNonnegative(progress.verification_commands)) return false;
+  }
   return value.estimated_cost_usd == null || validNonnegative(value.estimated_cost_usd, false);
 }
 
@@ -736,6 +817,13 @@ export async function execute(
   if (ctx.autonomousBudgetEnvelope) {
     env.HERMES_AUTONOMOUS_BUDGET_JSON = JSON.stringify(ctx.autonomousBudgetEnvelope);
   }
+  const managedProgressPolicy = resolveManagedProgressPolicy(
+    config,
+    Boolean(ctx.autonomousBudgetEnvelope),
+  );
+  if (managedProgressPolicy) {
+    env.HERMES_MANAGED_PROGRESS_POLICY_JSON = JSON.stringify(managedProgressPolicy);
+  }
   const runResultPath = path.join(
     process.env.TMPDIR || "/tmp",
     `paperclip-hermes-${ctx.runId}-${randomUUID()}.result.json`,
@@ -838,13 +926,19 @@ export async function execute(
     provider: runResult?.version === 2 ? cfgString(runResult.provider) || resolvedProvider : resolvedProvider,
     model: runResult?.version === 2 ? cfgString(runResult.model) || model : model,
   };
-  const turnExitReason =
+  const rawTurnExitReason =
     cfgString(runResult?.turn_exit_reason) || cfgString(runResult?.stop_reason);
+  const budgetNormalization = normalizeManagedBudgetCode(
+    rawTurnExitReason,
+    cfgString(runResult?.budget_failure_reason),
+  );
+  const turnExitReason = budgetNormalization?.code ?? rawTurnExitReason;
   if (turnExitReason === "session_rollover_required") {
     executionResult.errorCode = turnExitReason;
     executionResult.clearSession = true;
-  } else if (turnExitReason === "context_budget_exceeded") {
+  } else if (budgetNormalization || turnExitReason === "no_progress") {
     executionResult.errorCode = turnExitReason;
+    executionResult.retryHint = "non_retryable";
   }
 
   if (parsed.errorMessage) {
@@ -857,10 +951,13 @@ export async function execute(
 
   // Stdout is display-only: its numbers can be task text or a progress banner.
   // Each spawned process reports its own counters, including on session resume.
-  if (runResult?.version === 2 && runResult.input_tokens != null &&
+  const providerInputTokens = runResult?.version === 2
+    ? runResult.provider_input_tokens ?? runResult.input_tokens
+    : null;
+  if (runResult?.version === 2 && providerInputTokens != null &&
       runResult.output_tokens != null && runResult.successful_provider_responses) {
     executionResult.usage = {
-      inputTokens: runResult.input_tokens,
+      inputTokens: providerInputTokens,
       outputTokens: runResult.output_tokens,
       ...(runResult.cache_read_tokens != null
         ? { cachedInputTokens: runResult.cache_read_tokens } : {}),
@@ -906,6 +1003,12 @@ export async function execute(
       costUnavailableReason: runResult.cost_unavailable_reason ?? null,
       endpointClass: runResult.endpoint_class ?? "unknown",
       providerRequestIds: runResult.provider_request_ids ?? [],
+      providerInputTokens: runResult.provider_input_tokens ?? null,
+      ...(runResult.budget_failure_reason !== undefined
+        ? { budgetFailureReason: runResult.budget_failure_reason } : {}),
+      ...(runResult.progress !== undefined ? { progress: runResult.progress } : {}),
+      ...(executionResult.retryHint === "non_retryable"
+        ? { retryHint: "non_retryable" } : {}),
     } : {
       successfulProviderResponses: 0,
       usageTelemetryComplete: false,

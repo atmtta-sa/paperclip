@@ -29,6 +29,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   heartbeatService,
+  normalizeExecutionBudgetTerminal,
   SESSION_ROLLOVER_RETRY_REASON,
   SESSION_ROLLOVER_WAKE_REASON,
 } from "../services/heartbeat.ts";
@@ -78,6 +79,21 @@ if (!embeddedPostgresSupport.supported) {
   );
 }
 
+it("lazily interprets historical budget terminals without rewriting or guessing", () => {
+  expect(normalizeExecutionBudgetTerminal({
+    errorCode: "context_budget_exceeded",
+    resultJson: { budgetFailureReason: "cumulative_input_tokens_exceeded" },
+  } as any)).toBe("execution_input_budget_exceeded");
+  expect(normalizeExecutionBudgetTerminal({
+    errorCode: "context_budget_exceeded",
+    resultJson: { budgetFailureReason: "context_window_exceeded" },
+  } as any)).toBe("model_context_limit_exceeded");
+  expect(normalizeExecutionBudgetTerminal({
+    errorCode: "context_budget_exceeded",
+    resultJson: {},
+  } as any)).toBe("legacy_budget_terminal_unclassified");
+});
+
 describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
@@ -86,7 +102,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-issue-rewake-throttle-");
     db = createDb(tempDb.connectionString);
-    heartbeat = heartbeatService(db);
+    heartbeat = heartbeatService(db, { runtimeEnv: {} });
   }, 20_000);
 
   afterEach(async () => {
@@ -189,6 +205,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
+      status: "active",
       autonomousExecutionPaused: false,
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
@@ -220,6 +237,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       responsibleUserId: "responsible-user",
     });
     await db.insert(budgetPolicies).values([
+      { companyId, scopeType: "task", scopeId: issueId, metric: "request_count", windowKind: "lifetime", amount: 80 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "input_tokens", windowKind: "lifetime", amount: 640_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "output_tokens", windowKind: "lifetime", amount: 80_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "runtime_ms", windowKind: "lifetime", amount: 3_000_000 },
       { companyId, scopeType: "task", scopeId: issueId, metric: "billed_microusd", windowKind: "lifetime", amount: 10_000_000 },
       { companyId, scopeType: "task", scopeId: issueId, metric: "request_count", windowKind: "per_run", amount: 8 },
       { companyId, scopeType: "task", scopeId: issueId, metric: "input_tokens", windowKind: "per_run", amount: 64_000 },
@@ -946,6 +967,234 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         actualInputTokens: null,
         actualOutputTokens: null,
         actualCostMicrousd: null,
+      },
+    ]);
+  });
+
+  it.each([
+    {
+      errorCode: "execution_input_budget_exceeded",
+      budgetFailureReason: "cumulative_input_tokens_exceeded",
+      expectedCode: "execution_input_budget_exceeded",
+      explanation: "cumulative authorized execution input",
+      forbiddenExplanation: /model context boundary/i,
+    },
+    {
+      errorCode: "model_context_limit_exceeded",
+      budgetFailureReason: "context_window_exceeded",
+      expectedCode: "model_context_limit_exceeded",
+      explanation: "provider request/model context boundary",
+      forbiddenExplanation: /cumulative|execution.*exhaust|input budget exhaustion/i,
+    },
+    {
+      errorCode: "context_budget_exceeded",
+      budgetFailureReason: undefined,
+      expectedCode: "legacy_budget_terminal_unclassified",
+      explanation: "available recorded evidence does not support assigning a modern budget category",
+      forbiddenExplanation: /execution.*exhaust|input budget exhaustion|model context.*exceed/i,
+    },
+  ])("preserves budget retry-suppression semantics for $expectedCode", async (testCase) => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      errorCode: testCase.errorCode,
+      contextSnapshot: { issueId },
+      resultJson: {
+        turn_exit_reason: testCase.errorCode,
+        ...(testCase.budgetFailureReason === undefined
+          ? {}
+          : { budget_failure_reason: testCase.budgetFailureReason }),
+      },
+    });
+    const [before] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const decision = await heartbeat.scheduleBoundedRetry(runId);
+    const [after] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const successors = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+
+    // Assert persisted facts and absence of successors even while the semantic regression is RED.
+    expect(after.errorCode).toBe(before.errorCode);
+    expect(after.resultJson).toEqual(before.resultJson);
+    expect(after.resultJson?.budget_failure_reason).toBe(before.resultJson?.budget_failure_reason);
+    expect(successors.map((run) => run.id)).toEqual([runId]);
+    expect(wakes).toEqual([]);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({ outcome: "not_scheduled", errorCode: testCase.expectedCode });
+    expect(decision).toHaveProperty("reason", expect.stringContaining(testCase.explanation));
+    expect(events).toHaveLength(1);
+    expect(events[0].message).toContain(testCase.explanation);
+    expect(events[0].payload).toMatchObject({ errorCode: testCase.expectedCode, retryDisposition: "non_retryable" });
+    expect(events[0].message).not.toMatch(testCase.forbiddenExplanation);
+    expect("reason" in decision ? decision.reason : "").not.toMatch(testCase.forbiddenExplanation);
+  });
+
+  it("settles attributed execution-input exhaustion without scheduling a retry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Hermes reported a failed run",
+      errorCode: "execution_input_budget_exceeded",
+      provider: "openai-codex",
+      model: "test-model",
+      usage: { inputTokens: 29_729, outputTokens: 634 },
+      usageBasis: "per_run" as const,
+      budgetTelemetry: {
+        providerRequestId: "phase9-request-1",
+        requestCount: 3,
+        inputTokens: 29_729,
+        outputTokens: 634,
+        runtimeMs: 90_000,
+        costMicrousd: 0,
+        rateCardVersion: "subscription",
+      },
+      resultJson: {
+        result: "",
+        provider: "openai-codex",
+        billingType: "subscription",
+        budgetTelemetryComplete: true,
+        costStatus: "included",
+        costUnavailableReason: null,
+        cost_usd: 0,
+        apiCalls: 3,
+        successfulProviderResponses: 3,
+        providerRequestIds: [
+          "phase9-request-1",
+          "phase9-request-2",
+          "phase9-request-3",
+        ],
+        usageTelemetryComplete: true,
+        turn_exit_reason: "execution_input_budget_exceeded",
+        budgetFailureReason: "cumulative_input_tokens_exceeded",
+      },
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db
+      .select({
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        retryOfRunId: heartbeatRuns.retryOfRunId,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toEqual([
+      {
+        status: "failed",
+        errorCode: "execution_input_budget_exceeded",
+        retryOfRunId: null,
+      },
+    ]);
+
+    const reservations = await db
+      .select({
+        status: autonomousBudgetReservations.status,
+        providerActivityOccurred: autonomousBudgetReservations.providerActivityOccurred,
+        providerRequestId: autonomousBudgetReservations.providerRequestId,
+        actualRequestCount: autonomousBudgetReservations.actualRequestCount,
+        actualInputTokens: autonomousBudgetReservations.actualInputTokens,
+        actualOutputTokens: autonomousBudgetReservations.actualOutputTokens,
+        actualCostMicrousd: autonomousBudgetReservations.actualCostMicrousd,
+      })
+      .from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservations).toEqual([
+      {
+        status: "reconciled",
+        providerActivityOccurred: true,
+        providerRequestId: "phase9-request-1",
+        actualRequestCount: 3,
+        actualInputTokens: 29_729,
+        actualOutputTokens: 634,
+        actualCostMicrousd: 0,
+      },
+    ]);
+  });
+
+  it("settles attributed no-progress usage without scheduling a retry", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Hermes reported a failed run",
+      errorCode: "no_progress",
+      retryHint: "non_retryable" as const,
+      provider: "openai-codex",
+      model: "test-model",
+      usage: { inputTokens: 12_000, outputTokens: 500 },
+      usageBasis: "per_run" as const,
+      budgetTelemetry: {
+        providerRequestId: "no-progress-request-1",
+        requestCount: 2,
+        inputTokens: 12_000,
+        outputTokens: 500,
+        runtimeMs: 45_000,
+        costMicrousd: 0,
+        rateCardVersion: "subscription",
+      },
+      resultJson: {
+        result: "",
+        provider: "openai-codex",
+        billingType: "subscription",
+        budgetTelemetryComplete: true,
+        costStatus: "included",
+        costUnavailableReason: null,
+        cost_usd: 0,
+        apiCalls: 2,
+        successfulProviderResponses: 2,
+        providerRequestIds: ["no-progress-request-1", "no-progress-request-2"],
+        usageTelemetryComplete: true,
+        turn_exit_reason: "no_progress",
+        retryHint: "non_retryable",
+        progress: {
+          provider_responses_since_baseline: 2,
+          max_provider_responses_without_durable_progress: 2,
+          workspace_changed: false,
+          verification_commands: 0,
+        },
+      },
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db
+      .select({
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        retryOfRunId: heartbeatRuns.retryOfRunId,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toEqual([
+      { status: "failed", errorCode: "no_progress", retryOfRunId: null },
+    ]);
+
+    const reservations = await db
+      .select({
+        status: autonomousBudgetReservations.status,
+        actualRequestCount: autonomousBudgetReservations.actualRequestCount,
+        actualInputTokens: autonomousBudgetReservations.actualInputTokens,
+        actualOutputTokens: autonomousBudgetReservations.actualOutputTokens,
+      })
+      .from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservations).toEqual([
+      {
+        status: "reconciled",
+        actualRequestCount: 2,
+        actualInputTokens: 12_000,
+        actualOutputTokens: 500,
       },
     ]);
   });

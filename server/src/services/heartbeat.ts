@@ -1095,6 +1095,49 @@ function isMaxTurnExhaustionRun(
   );
 }
 
+const NON_RETRYABLE_EXECUTION_BUDGET_CODES = new Set([
+  "execution_input_budget_exceeded",
+  "model_context_limit_exceeded",
+]);
+const MODEL_CONTEXT_BUDGET_FAILURE_REASONS = new Set([
+  "request_bytes_exceeded",
+  "request_tokens_exceeded",
+  "context_window_exceeded",
+  "context_window_unknown",
+  "model_metadata_missing",
+  "output_reserve_unavailable",
+]);
+
+export function normalizeExecutionBudgetTerminal(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+) {
+  const resultJson = parseObject(run.resultJson);
+  const codes = [run.errorCode, resultJson.turn_exit_reason, resultJson.stopReason];
+  const modern = codes.find(
+    (value): value is string =>
+      typeof value === "string" &&
+      NON_RETRYABLE_EXECUTION_BUDGET_CODES.has(value),
+  );
+  if (modern) return modern;
+  if (!codes.includes("context_budget_exceeded")) return null;
+
+  const reason = resultJson.budgetFailureReason ?? resultJson.budget_failure_reason;
+  if (reason === "cumulative_input_tokens_exceeded") {
+    return "execution_input_budget_exceeded";
+  }
+  if (typeof reason === "string" &&
+      MODEL_CONTEXT_BUDGET_FAILURE_REASONS.has(reason)) {
+    return "model_context_limit_exceeded";
+  }
+  return "legacy_budget_terminal_unclassified";
+}
+
+function isExecutionBudgetExhaustionRun(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+) {
+  return normalizeExecutionBudgetTerminal(run) !== null;
+}
+
 function readTransientRetryNotBeforeFromRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson">,
 ) {
@@ -15263,6 +15306,32 @@ export function heartbeatService(
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
+
+    const budgetTerminal = normalizeExecutionBudgetTerminal(run);
+    if (budgetTerminal !== null) {
+      const reason = budgetTerminal === "execution_input_budget_exceeded"
+        ? "Further provider work could not be admitted against cumulative authorized execution input. Automatic retry is not permitted."
+        : budgetTerminal === "model_context_limit_exceeded"
+          ? "The provider request/model context boundary prevented admission. Automatic retry is not permitted."
+          : "Historical budget terminal is non-retryable, but available recorded evidence does not support assigning a modern budget category.";
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: `Automatic retry suppressed: ${reason}`,
+        payload: {
+          retryReason,
+          errorCode: budgetTerminal,
+          retryDisposition: "non_retryable",
+        },
+      });
+      return {
+        outcome: "not_scheduled" as const,
+        reason,
+        errorCode: budgetTerminal,
+        issueId,
+      };
+    }
 
     if (
       retryReason === SESSION_ROLLOVER_RETRY_REASON &&

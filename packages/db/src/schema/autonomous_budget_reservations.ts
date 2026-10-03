@@ -26,6 +26,13 @@ export const autonomousBudgetReservations = pgTable(
       .$type<"reserved" | "reconciled" | "retained_missing_telemetry" | "released">()
       .notNull()
       .default("reserved"),
+    settlementState: text("settlement_state").$type<
+      | "consumed"
+      | "partially_consumed"
+      | "released_zero_usage"
+      | "consumed_over_reservation"
+      | "uncertain_requires_reconciliation"
+    >(),
     reservedRequestCount: integer("reserved_request_count").notNull().default(0),
     reservedInputTokens: bigint("reserved_input_tokens", { mode: "number" }).notNull().default(0),
     reservedOutputTokens: bigint("reserved_output_tokens", { mode: "number" }).notNull().default(0),
@@ -38,6 +45,7 @@ export const autonomousBudgetReservations = pgTable(
     actualRuntimeMs: bigint("actual_runtime_ms", { mode: "number" }),
     actualCostCents: integer("actual_cost_cents"),
     actualCostMicrousd: bigint("actual_cost_microusd", { mode: "number" }),
+    overrunInputTokens: bigint("overrun_input_tokens", { mode: "number" }).notNull().default(0),
     provider: text("provider"),
     model: text("model"),
     providerRequestId: text("provider_request_id"),
