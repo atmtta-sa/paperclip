@@ -44,3 +44,17 @@ The service correction is local source only. A supported operator mutation path 
 No push, merge, restart/deployment, live migration, live reservation mutation, wake, provider call, or COM-269 activity is included.
 Next boundary: separately authorize paused disposable-runtime rollout and verify exact committed revisions/schema, then separately authorize named historical reconciliation and exactly one bounded implementation canary if all applicable preconditions are met.
 If another demonstrated issue can invalidate safety or interpretation of the next measurement, request bounded consultation before expanding implementation; otherwise defer it.
+
+## Local operator recovery follow-up (source checkpoint)
+
+Base candidate: `98b20ac0a819305496de478459053ad0850ab268`; branch remains `feat/provider-free-context-regression`.
+
+Added `POST /api/companies/:companyId/budgets/autonomous-reservations/:runId/recover` through a separate route module mounted by costRoutes. It requires Board plus company write access, strict bounded telemetry, usage/billing SHA-256 evidence identifiers, billing basis, and explicit operator attestation. Subscription-included incremental cost must be zero. Hashes identify the reviewed evidence; the route does not retrieve or independently verify source artifacts or subscription billing statements. No credentials or raw provider content belong in its payload.
+
+Only terminal runs and uncertain reservations may recover; already reconciled reservations use existing identical-replay/conflict rules. Company/run/agent/issue/provider/model boundaries are checked before settlement. Existing reconciliation semantics remain unchanged. Settlement and durable audit are atomic; activity publication happens after commit. No historical run fields, pauses, agent states, wakes, or retries are changed.
+
+Files: `server/src/routes/autonomous-budget-recovery.ts`, its two-line mount in `server/src/routes/costs.ts`, `server/src/__tests__/autonomous-budget-recovery-route.test.ts`, and this handoff.
+
+Evidence: initial 18 HTTP cases failed with expected 404 before implementation. Final combined recovery/reservation/cost-route invocation passed all 57 tests (three files) using disposable PostgreSQL. Additional cases prove missing/foreign-run non-disclosure and rollback on a forced real database audit failure. Server `pnpm typecheck`, direct `pnpm exec tsc --noEmit`, and `git diff --check` passed. Existing pnpm, experimental SQLite, and Rust build warnings remain; no full-suite/independent-review claim.
+
+Pre-commit source review was performed by the implementing assistant, without delegation or provider-backed review; it is not independent certification. The commit containing this follow-up identifies its source checkpoint. No deployment, live recovery, provider call, wake, retry, push, or merge is included. Historical billing/source artifacts still need an operator-reviewed evidence bundle and exact named authorization before invocation. Next: obtain separate paused-runtime rollout and named historical-recovery authorization. Provider canary approval remains separate.

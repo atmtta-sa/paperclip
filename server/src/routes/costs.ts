@@ -27,6 +27,7 @@ import { autonomousContinuitySnapshot } from "../services/autonomous-continuity-
 import { setAutonomousExecutionPause, setScopedAutonomousExecutionPause } from "../services/autonomous-execution-control.js";
 import { badRequest } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { autonomousBudgetRecoveryRoutes } from "./autonomous-budget-recovery.js";
 
 export function parseCostDateRange(query: Record<string, unknown>) {
   const fromRaw = query.from as string | undefined;
@@ -53,6 +54,7 @@ export function costRoutes(
   options: { pluginWorkerManager?: PluginWorkerManager } = {},
 ) {
   const router = Router();
+  router.use(autonomousBudgetRecoveryRoutes(db));
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
