@@ -6,6 +6,7 @@ import { conflict, notFound } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { persistActivity, publishActivity } from "../services/activity-log.js";
 import { reconcileAutonomousBudget } from "../services/autonomous-budget-reconciliation.js";
+import { recoverHistoricalHermesPreproviderBudget } from "../services/historical-hermes-preprovider-recovery.js";
 
 const amount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const text = z.string().min(1).max(256).refine((value) => value === value.trim());
@@ -34,6 +35,16 @@ const recoverySchema = z.object({
   (body) => body.evidence.billingBasis !== "subscription_included" || body.actual.costMicrousd === 0,
   { message: "Subscription-included incremental cost must be zero", path: ["actual", "costMicrousd"] },
 );
+const preproviderRecoverySchema = z.object({
+  agentId: z.string().uuid(),
+  issueId: z.string().uuid(),
+  provider: text,
+  model: text,
+  evidence: z.object({
+    reviewedAdapterSourceCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    operatorAttested: z.literal(true),
+  }).strict(),
+}).strict();
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const conflictCodes = new Set([
   "autonomous_budget_reconciliation_conflict",
@@ -87,6 +98,23 @@ export function autonomousBudgetRecoveryRoutes(db: Db) {
         entityId: reservation.id, details: { runId, agentId: body.agentId, issueId: body.issueId, evidence, actual: body.actual, providerRequestId: body.providerRequestId, ...result },
       });
       return { result, publication };
+    });
+    if (committed.publication) publishActivity(committed.publication);
+    res.json(committed.result);
+  });
+
+  router.post("/companies/:companyId/budgets/autonomous-reservations/:runId/recover-preprovider", async (req, res) => {
+    assertBoard(req);
+    const companyId = z.string().uuid().parse(req.params.companyId);
+    assertCompanyAccess(req, companyId);
+    const runId = z.string().uuid().parse(req.params.runId);
+    const body = preproviderRecoverySchema.parse(req.body);
+    const actor = getActorInfo(req);
+    const committed = await recoverHistoricalHermesPreproviderBudget(db, {
+      companyId,
+      runId,
+      body,
+      actor,
     });
     if (committed.publication) publishActivity(committed.publication);
     res.json(committed.result);

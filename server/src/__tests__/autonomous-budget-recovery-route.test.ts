@@ -37,6 +37,7 @@ const support = await getEmbeddedPostgresTestSupport();
     return app;
   }
   const url = (s: Awaited<ReturnType<typeof fixture>>) => `/api/companies/${s.companyId}/budgets/autonomous-reservations/${s.runId}/recover`;
+  const preproviderUrl = (s: Awaited<ReturnType<typeof fixture>>) => `${url(s)}-preprovider`;
   const body = (s: Awaited<ReturnType<typeof fixture>>) => ({
     agentId: s.agentId, issueId: s.issueId, provider: "openai-codex", model: "test-model", providerRequestId: "test-response-3",
     actual: { requestCount: 3, inputTokens: 29_729, outputTokens: 634, runtimeMs: 27_379, costMicrousd: 0 },
@@ -120,5 +121,132 @@ const support = await getEmbeddedPostgresTestSupport();
     const audit = await db.select().from(activityLog).where(eq(activityLog.companyId, s.companyId));
     expect(audit.filter((row) => row.action === "autonomous_budget.telemetry_recovered")).toHaveLength(1);
     expect(audit.find((row) => row.action === "autonomous_budget.telemetry_recovered")).toMatchObject({ actorId: "recovery-operator", details: { evidence: body(s).evidence } });
+  });
+
+  async function preproviderFixture() {
+    const s = await fixture();
+    await db.update(heartbeatRuns).set({
+      status: "failed",
+      executionStage: "dispatching",
+      error: "hermes_managed_profile_invalid",
+      errorCode: "adapter_failed",
+      exitCode: null,
+      signal: null,
+      usageJson: null,
+      resultJson: { stopReason: "adapter_failed", timeoutFired: false },
+      processPid: null,
+      processGroupId: null,
+      processStartedAt: null,
+      startedAt: new Date("2026-10-06T13:47:52.120Z"),
+      finishedAt: new Date("2026-10-06T13:47:53.188Z"),
+      contextSnapshot: { issueId: s.issueId },
+    }).where(eq(heartbeatRuns.id, s.runId));
+    await db.update(autonomousBudgetReservations).set({
+      status: "reserved",
+      settlementState: null,
+      providerActivityOccurred: false,
+      providerRequestId: null,
+      actualRequestCount: null,
+      actualInputTokens: null,
+      actualOutputTokens: null,
+      actualRuntimeMs: null,
+      actualCostMicrousd: null,
+    }).where(eq(autonomousBudgetReservations.runId, s.runId));
+    return s;
+  }
+  const preproviderBody = (s: Awaited<ReturnType<typeof fixture>>) => ({
+    agentId: s.agentId,
+    issueId: s.issueId,
+    provider: "openai-codex",
+    model: "test-model",
+    evidence: {
+      reviewedAdapterSourceCommit: "6".repeat(40),
+      operatorAttested: true,
+    },
+  });
+
+  it("denies preprovider recovery to non-Board actors without mutation", async () => {
+    const s = await preproviderFixture(), before = await reservation(s.runId);
+    const response = await request(app({ type: "agent", agentId: s.agentId, companyId: s.companyId }))
+      .post(preproviderUrl(s)).send(preproviderBody(s));
+    expect(response.status).toBe(403);
+    await assertNoMutation(s, before);
+  });
+
+  it.each([
+    "adapter", "error", "stage", "unfinished", "process", "usage", "provider_activity",
+    "request_id", "actual_usage", "successor", "agent", "issue", "provider", "model",
+  ])("rejects unsafe historical preprovider evidence: %s", async (kind) => {
+    const s = await preproviderFixture(), payload = preproviderBody(s);
+    if (kind === "adapter") await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, s.agentId));
+    if (kind === "error") await db.update(heartbeatRuns).set({ error: "connection reset" }).where(eq(heartbeatRuns.id, s.runId));
+    if (kind === "stage") await db.update(heartbeatRuns).set({ executionStage: "running" }).where(eq(heartbeatRuns.id, s.runId));
+    if (kind === "unfinished") await db.update(heartbeatRuns).set({ finishedAt: null }).where(eq(heartbeatRuns.id, s.runId));
+    if (kind === "process") await db.update(heartbeatRuns).set({ processPid: 123 }).where(eq(heartbeatRuns.id, s.runId));
+    if (kind === "usage") await db.update(heartbeatRuns).set({ usageJson: { inputTokens: 1 } }).where(eq(heartbeatRuns.id, s.runId));
+    if (kind === "provider_activity") await db.update(autonomousBudgetReservations).set({ providerActivityOccurred: true }).where(eq(autonomousBudgetReservations.runId, s.runId));
+    if (kind === "request_id") await db.update(autonomousBudgetReservations).set({ providerRequestId: "request-1" }).where(eq(autonomousBudgetReservations.runId, s.runId));
+    if (kind === "actual_usage") await db.update(autonomousBudgetReservations).set({ actualRequestCount: 1 }).where(eq(autonomousBudgetReservations.runId, s.runId));
+    if (kind === "successor") await db.insert(heartbeatRuns).values({ companyId: s.companyId, agentId: s.agentId, status: "queued", retryOfRunId: s.runId });
+    if (kind === "agent") payload.agentId = randomUUID();
+    if (kind === "issue") payload.issueId = randomUUID();
+    if (kind === "provider") payload.provider = "wrong-provider";
+    if (kind === "model") payload.model = "wrong-model";
+    const before = await reservation(s.runId);
+    const expectedStatus = kind === "agent" ? 404 : 409;
+    expect((await request(app(board(s.companyId))).post(preproviderUrl(s)).send(payload)).status).toBe(expectedStatus);
+    await assertNoMutation(s, before);
+  });
+
+  it("rolls back preprovider release when its durable audit insert fails", async () => {
+    const s = await preproviderFixture(), before = await reservation(s.runId);
+    await db.execute(sql`ALTER TABLE activity_log ADD CONSTRAINT preprovider_recovery_audit_failure CHECK (action <> 'autonomous_budget.preprovider_recovered') NOT VALID`);
+    try {
+      expect((await request(app(board(s.companyId))).post(preproviderUrl(s)).send(preproviderBody(s))).status).toBe(500);
+      await assertNoMutation(s, before);
+    } finally {
+      await db.execute(sql`ALTER TABLE activity_log DROP CONSTRAINT preprovider_recovery_audit_failure`);
+    }
+  });
+
+  it("releases exact historical profile failure once without changing runs, pauses, or wakes", async () => {
+    const s = await preproviderFixture(), payload = preproviderBody(s), application = app(board(s.companyId));
+    const historical = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, s.companyId));
+    const first = await request(application).post(preproviderUrl(s)).send(payload);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ status: "released", settlementState: "released_zero_usage", replayed: false });
+    expect(await reservation(s.runId)).toMatchObject({
+      status: "released",
+      settlementState: "released_zero_usage",
+      providerActivityOccurred: false,
+      providerRequestId: null,
+      actualRequestCount: null,
+      actualInputTokens: null,
+      actualOutputTokens: null,
+      actualRuntimeMs: null,
+      actualCostMicrousd: null,
+    });
+    expect((await request(application).post(preproviderUrl(s)).send(payload)).body.replayed).toBe(true);
+    const settled = await reservation(s.runId);
+    payload.evidence.reviewedAdapterSourceCommit = "7".repeat(40);
+    expect((await request(application).post(preproviderUrl(s)).send(payload)).status).toBe(409);
+    expect(await reservation(s.runId)).toEqual(settled);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, s.companyId))).toEqual(historical);
+    expect((await db.select().from(companies).where(eq(companies.id, s.companyId)))[0].autonomousExecutionPaused).toBe(true);
+    expect((await db.select().from(agents).where(eq(agents.id, s.agentId)))[0].status).toBe("paused");
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, s.companyId))).toHaveLength(0);
+    const audit = await db.select().from(activityLog).where(eq(activityLog.companyId, s.companyId));
+    const recoveryAudit = audit.filter((row) => row.action === "autonomous_budget.preprovider_recovered");
+    expect(recoveryAudit).toHaveLength(1);
+    expect(recoveryAudit[0]).toMatchObject({
+      actorId: "recovery-operator",
+      details: {
+        evidence: {
+          reviewedAdapterSourceCommit: "6".repeat(40),
+          operatorAttested: true,
+          runRecordSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      },
+    });
   });
 });
