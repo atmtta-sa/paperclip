@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { reserveAutonomousBudget } from "../services/autonomous-budget-reservations.js";
+import { reconcileAutonomousBudget } from "../services/autonomous-budget-reconciliation.js";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -319,6 +321,136 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       .limit(1)
       .then((rows) => rows[0] ?? null);
   }
+
+  it.each(["valid", "wrong_run", "confirmed_usage"])(
+    "settles preflight evidence only when it is run-attributed and noncontradictory (%s)", async (variant) => {
+      const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+      await db.update(agents).set({ adapterType: "hermes_local" }).where(eq(agents.id, agentId));
+      mockAdapterExecute.mockImplementation((async (ctx: { runId: string }) => ({
+        exitCode: 1, signal: null, timedOut: false, provider: "custom", model: "gpt-4o-mini",
+        errorCode: "managed_progress_policy_invalid", retryHint: "non_retryable",
+        errorMessage: "Error: managed_progress_baseline_unavailable",
+        resultJson: { turn_exit_reason: "managed_progress_policy_invalid", successfulProviderResponses: 0,
+          ...(variant === "confirmed_usage" ? { durableCallEvidence: { confirmedResponses: 1 } } : {}),
+          pretransportEvidence: { version: 1, source: "hermes_sqlite_transport_owner",
+            runId: variant === "wrong_run" ? randomUUID() : ctx.runId, sessionId: "shared",
+            attestationId: randomUUID(), startedAt: 1, sealedAt: 2,
+            boundary: "never_crossed", complete: true, terminalReason: "managed_progress_policy_invalid" } },
+      })) as any);
+      expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+      await drainHeartbeatRunsToQuiescence(db, heartbeat);
+      const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+      expect(runs).toHaveLength(1);
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+      expect(runs[0]).toMatchObject({ status: "failed", errorCode: "managed_progress_policy_invalid" });
+      const [reservation] = await db.select().from(autonomousBudgetReservations)
+        .where(eq(autonomousBudgetReservations.runId, runs[0].id));
+      expect(reservation).toMatchObject(variant === "valid"
+        ? { status: "released", settlementState: "released_zero_usage", providerActivityOccurred: false }
+        : { status: "retained_missing_telemetry", settlementState: "uncertain_requires_reconciliation" });
+      expect(reservation.actualRequestCount).toBeNull();
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId)))
+        .toHaveLength(1);
+    },
+  );
+
+  it.each(["managed_progress_policy_invalid", undefined])(
+    "preserves the original managed terminal cause when accounting is uncertain (%s)", async (errorCode) => {
+      const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+      await db.update(agents).set({ adapterType: "hermes_local" }).where(eq(agents.id, agentId));
+      mockAdapterExecute.mockResolvedValue({
+        exitCode: 1, signal: null, timedOut: false, provider: "custom", model: "gpt-4o-mini",
+        errorCode, errorMessage: "Error: managed_progress_baseline_unavailable",
+        resultJson: { turn_exit_reason: "managed_progress_policy_invalid", apiCalls: 0,
+          successfulProviderResponses: 0, conversationContinuation: "continue_conversation_v1" },
+      } as any);
+      expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+      await drainHeartbeatRunsToQuiescence(db, heartbeat);
+      const [run] = await db.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.retryOfRunId} is null`));
+      const [reservation] = await db.select().from(autonomousBudgetReservations)
+        .where(eq(autonomousBudgetReservations.runId, run.id));
+      expect(reservation).toMatchObject({ status: "retained_missing_telemetry",
+        settlementState: "uncertain_requires_reconciliation", actualRequestCount: null });
+      expect(run).toMatchObject({ status: "failed", errorCode: "managed_progress_policy_invalid",
+        error: "Error: managed_progress_baseline_unavailable", workOutcome: "telemetry_missing" });
+      expect(run.resultJson).toMatchObject({ turn_exit_reason: "managed_progress_policy_invalid",
+        budgetSettlement: { status: "retained_missing_telemetry",
+          settlementState: "uncertain_requires_reconciliation", accountingErrorCode: "telemetry_missing" } });
+    },
+  );
+
+  it("does not erase a different-agent predecessor to bypass uncertain accounting", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const sourceAgentId = randomUUID(), rootId = randomUUID();
+    const [targetAgent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    await db.insert(agents).values({ ...targetAgent, id: sourceAgentId, name: "Predecessor owner" });
+    await db.insert(heartbeatRuns).values({
+      id: rootId, companyId, agentId: sourceAgentId, invocationSource: "automation", status: "failed",
+      errorCode: "overloaded", finishedAt: new Date(), responsibleUserId: "responsible-user",
+      contextSnapshot: { issueId }, resultJson: { errorFamily: "transient_upstream",
+        conversationContinuation: "continue_conversation_v1" },
+    });
+    const scope = { companyId, agentId: sourceAgentId, issueId, runId: rootId };
+    expect((await reserveAutonomousBudget(db, { ...scope, provider: "test", model: "test-model" })).admitted).toBe(true);
+    await reconcileAutonomousBudget(db, { ...scope, providerActivityOccurred: true, actual: null });
+    mockAdapterExecute.mockClear();
+    const wake = await heartbeat.wakeup(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_continuation_needed",
+      requestedByActorType: "system", requestedByActorId: null,
+      contextSnapshot: { issueId, retryOfRunId: rootId, wakeReason: "issue_continuation_needed" },
+    });
+    expect(wake).toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)))
+      .toEqual([expect.objectContaining({ id: rootId, agentId: sourceAgentId })]);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    expect(await db.select().from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId)))
+      .toHaveLength(1);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("blocks uncertain continuation scheduling across restart and competing database clients", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockResolvedValue({
+      exitCode: 1, signal: null, timedOut: false, errorCode: "overloaded",
+      errorFamily: "transient_upstream", provider: "test", model: "test-model",
+      resultJson: { errorFamily: "transient_upstream", conversationContinuation: "continue_conversation_v1" },
+    } as any);
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    let runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(1);
+    const root = runs[0];
+    const [reservation] = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, root.id));
+    expect(reservation.settlementState).toBe("uncertain_requires_reconciliation");
+    // Simulate a stale optimistic result projection; durable accounting must win.
+    await db.update(heartbeatRuns).set({ resultJson: { ...root.resultJson,
+      budgetSettlement: { status: "released", settlementState: "released_zero_usage" } } })
+      .where(eq(heartbeatRuns.id, root.id));
+    const otherDb = createDb(tempDb!.connectionString);
+    try {
+      const restarted = heartbeatService(otherDb, { runtimeEnv: {} });
+      const decisions = await Promise.all([
+        heartbeat.scheduleBoundedRetry(root.id), restarted.scheduleBoundedRetry(root.id),
+        restarted.scheduleBoundedRetry(root.id),
+      ]);
+      expect(decisions.every((value) => value.outcome === "not_scheduled")).toBe(true);
+      const continuation = await restarted.wakeup(agentId, {
+        source: "automation", triggerDetail: "system", reason: "issue_continuation_needed",
+        requestedByActorType: "system", requestedByActorId: null,
+        contextSnapshot: { issueId, retryOfRunId: root.id, wakeReason: "issue_continuation_needed" },
+      });
+      expect(continuation).toBeNull();
+      await drainHeartbeatRunsToQuiescence(db, restarted);
+      runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+      expect(runs).toHaveLength(1);
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId)))
+        .toHaveLength(1);
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally { await otherDb.$client.end(); }
+  });
 
   it("contains a failing fake provider within one logical execution", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
@@ -1118,6 +1250,57 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         actualCostMicrousd: 0,
       },
     ]);
+  });
+
+  it("settles explicitly synthetic fixture usage through the test-only verifier without a successor", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const receipt = {
+      providerRequestId: "synthetic-loopback-1", requestCount: 2,
+      inputTokens: 200, outputTokens: 40, runtimeMs: 100,
+      costMicrousd: 280, rateCardVersion: "synthetic-fixture-v1",
+    };
+    const verifier = vi.fn((result, usage) => {
+      expect(result.resultJson.costStatus).toBe("estimated");
+      expect(result.resultJson.provider).toBe("test");
+      expect(usage).toEqual({ inputTokens: 200, cachedInputTokens: 0, outputTokens: 40 });
+      return receipt;
+    });
+    const fixtureHeartbeat = heartbeatService(db, {
+      runtimeEnv: {}, verifyBudgetEvidenceForTest: verifier,
+    });
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 1, signal: null, timedOut: false,
+      errorCode: "no_progress", retryHint: "non_retryable",
+      provider: "test", model: "test-model",
+      usage: { inputTokens: 200, outputTokens: 40 }, usageBasis: "per_run",
+      resultJson: {
+        provider: "test", costStatus: "estimated", cost_usd: 0.00028,
+        usageTelemetryComplete: true, successfulProviderResponses: 2,
+        apiCalls: 2, providerRequestIds: ["synthetic-loopback-1", "synthetic-loopback-2"],
+        turn_exit_reason: "no_progress", retryHint: "non_retryable",
+      },
+    } as any);
+    expect(await fixtureHeartbeat.wakeup(agentId, {
+      source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_assigned" },
+      requestedByActorType: "system", requestedByActorId: "test",
+    })).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, fixtureHeartbeat);
+    expect(verifier).toHaveBeenCalledTimes(1);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", errorCode: "no_progress", retryOfRunId: null });
+    const reservations = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId));
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0]).toMatchObject({
+      status: "reconciled", actualRequestCount: 2, actualInputTokens: 200,
+      actualOutputTokens: 40, actualCostMicrousd: 280, rateCardVersion: "synthetic-fixture-v1",
+    });
+    const wakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes).toHaveLength(1);
   });
 
   it("settles attributed no-progress usage without scheduling a retry", async () => {

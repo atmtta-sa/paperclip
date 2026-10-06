@@ -5,6 +5,7 @@ import {
   activityLog,
   agents,
   autonomousBudgetReservations,
+  autonomousProviderCircuits,
   budgetIncidents,
   budgetPolicies,
   companies,
@@ -20,6 +21,7 @@ import {
   reconcileAutonomousBudget,
   reserveAutonomousBudget,
 } from "../services/autonomous-budget-reservations.js";
+import { settleSyntheticRetryPredecessor } from "./helpers/synthetic-retry-settlement.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -155,6 +157,159 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       settlementState: "released_zero_usage",
       replayed: true,
     });
+  });
+
+  it("denies an automatic successor before reservation when its predecessor is unsettled", async () => {
+    const scope = await createCostBudgetFixture(500);
+    const predecessorRunId = randomUUID();
+    const successorRunId = randomUUID();
+    const requested = {
+      requestCount: 1,
+      inputTokens: 1_000,
+      outputTokens: 100,
+      runtimeMs: 10_000,
+      costMicrousd: 10_000,
+    };
+
+    expect(await reserveAutonomousBudget(db, {
+      ...scope,
+      runId: predecessorRunId,
+      requested,
+    })).toMatchObject({ admitted: true });
+    await db.insert(heartbeatRuns).values([
+      {
+        id: predecessorRunId,
+        companyId: scope.companyId,
+        agentId: scope.agentId,
+        status: "failed",
+        finishedAt: new Date(),
+        contextSnapshot: { issueId: scope.issueId },
+        resultJson: { conversationContinuation: "continue_conversation_v1" },
+      },
+      {
+        id: successorRunId,
+        companyId: scope.companyId,
+        agentId: scope.agentId,
+        status: "running",
+        retryOfRunId: predecessorRunId,
+        contextSnapshot: { issueId: scope.issueId },
+      },
+    ]);
+    await db.update(issues).set({ executionRunId: successorRunId })
+      .where(eq(issues.id, scope.issueId));
+
+    const circuitsBefore = await db.select().from(autonomousProviderCircuits)
+      .where(eq(autonomousProviderCircuits.companyId, scope.companyId));
+    await expect(reserveAutonomousBudget(db, {
+      ...scope,
+      runId: successorRunId,
+      previousRunId: predecessorRunId,
+      requested,
+      provider: "test-provider",
+      credentialIdentifierHash: "test-credential",
+    })).rejects.toThrow("automatic_successor_launch_denied");
+    expect(await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, successorRunId))).toHaveLength(0);
+    expect(await db.select().from(autonomousProviderCircuits)
+      .where(eq(autonomousProviderCircuits.companyId, scope.companyId))).toEqual(circuitsBefore);
+  });
+
+  it("denies a settled automatic successor when retry authority is explicitly revoked", async () => {
+    const scope = await createCostBudgetFixture(500);
+    const predecessorRunId = randomUUID();
+    const successorRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: predecessorRunId,
+      companyId: scope.companyId,
+      agentId: scope.agentId,
+      status: "failed",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId: scope.issueId },
+      resultJson: {
+        executionRecovery: { kind: "provider", providerWorkStarted: true },
+        retryHint: "non_retryable",
+      },
+    });
+    await settleSyntheticRetryPredecessor(db, predecessorRunId, {
+      basis: "synthetic_completed_request",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: successorRunId,
+      companyId: scope.companyId,
+      agentId: scope.agentId,
+      status: "running",
+      retryOfRunId: predecessorRunId,
+      contextSnapshot: { issueId: scope.issueId },
+    });
+    await db.update(issues).set({ executionRunId: successorRunId })
+      .where(eq(issues.id, scope.issueId));
+
+    const circuitsBefore = await db.select().from(autonomousProviderCircuits)
+      .where(eq(autonomousProviderCircuits.companyId, scope.companyId));
+    await expect(reserveAutonomousBudget(db, {
+      ...scope,
+      runId: successorRunId,
+      previousRunId: predecessorRunId,
+      provider: "test-provider",
+      credentialIdentifierHash: "test-credential",
+    })).rejects.toThrow("automatic_successor_launch_denied");
+    expect(await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, successorRunId))).toHaveLength(0);
+    expect(await db.select().from(autonomousProviderCircuits)
+      .where(eq(autonomousProviderCircuits.companyId, scope.companyId))).toEqual(circuitsBefore);
+  });
+
+  it("commits launch authorization with an eligible automatic successor reservation", async () => {
+    const scope = await createCostBudgetFixture(500);
+    const predecessorRunId = randomUUID();
+    const successorRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: predecessorRunId,
+      companyId: scope.companyId,
+      agentId: scope.agentId,
+      status: "failed",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId: scope.issueId },
+      resultJson: {
+        executionRecovery: { kind: "provider", providerWorkStarted: true },
+        errorFamily: "transient_upstream",
+      },
+    });
+    await settleSyntheticRetryPredecessor(db, predecessorRunId, {
+      basis: "synthetic_completed_request",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: successorRunId,
+      companyId: scope.companyId,
+      agentId: scope.agentId,
+      status: "running",
+      retryOfRunId: predecessorRunId,
+      contextSnapshot: { issueId: scope.issueId },
+    });
+    await db.update(issues).set({ executionRunId: successorRunId })
+      .where(eq(issues.id, scope.issueId));
+
+    expect(await reserveAutonomousBudget(db, {
+      ...scope,
+      runId: successorRunId,
+      previousRunId: predecessorRunId,
+    })).toMatchObject({ admitted: true, replayed: false });
+    expect(await db.select({ executionStage: heartbeatRuns.executionStage })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, successorRunId)))
+      .toEqual([{ executionStage: "launch_authorized" }]);
+
+    await db.update(heartbeatRuns).set({ executionStage: "launching" })
+      .where(eq(heartbeatRuns.id, successorRunId));
+    await expect(reserveAutonomousBudget(db, {
+      ...scope,
+      runId: successorRunId,
+      previousRunId: predecessorRunId,
+    })).rejects.toThrow("automatic_successor_launch_denied");
+    expect(await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, successorRunId))).toHaveLength(1);
+    expect(await db.select({ executionStage: heartbeatRuns.executionStage })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, successorRunId)))
+      .toEqual([{ executionStage: "launching" }]);
   });
 
   it("atomically bounds concurrent continuations by one chain envelope", async () => {

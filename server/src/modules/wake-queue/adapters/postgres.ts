@@ -1,3 +1,4 @@
+import { lockEligibleAutomaticSuccessorSettlement } from "../../../services/automatic-successor-settlement.js";
 import { isAcknowledgedNativeStop } from "../../../services/acknowledged-native-stop.js";
 import { instanceSettingsService } from "../../../services/instance-settings.js";
 import { currentConversationCommentCondition } from "../../../services/agent-conversations.js";
@@ -501,6 +502,13 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
       return isAutomaticRecoverySuppressedByPauseHold(tx, companyId, issueId, treeControlSvc);
     },
 
+    async isAutomaticSuccessorSettlementEligible({ companyId, runId }) {
+      if (companyId !== run.companyId || runId !== run.id) {
+        throw new Error("wake-queue: accounting source does not match the locked execution");
+      }
+      return lockEligibleAutomaticSuccessorSettlement(tx, run);
+    },
+
     async isImmediateRecoverySourceBlocked({ companyId, runId }) {
       if (companyId !== run.companyId || runId !== run.id) {
         throw new Error(
@@ -952,7 +960,9 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
     async withIssueExecutionLock(input, fn): Promise<ReleaseTransactionResult & { run: RunSnapshot }> {
       return db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
-        const run = await tx
+        // Compatible with accounting/admission locks and event-insert FK checks.
+        await tx.execute(sql`select id from companies where id = ${input.companyId} for no key update`);
+        let run = await tx
           .select()
           .from(heartbeatRuns)
           .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)))
@@ -960,7 +970,6 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
         if (!run) {
           throw new Error(`wake-queue: run ${input.runId} was not found while releasing issue execution`);
         }
-        const runSnapshot = toRunSnapshot(run);
         const contextIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
 
         // Lock the context issue (if any) and every issue that still references this
@@ -987,6 +996,16 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
                 for update
               `,
         );
+
+        const [currentRun] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+        )).for("update");
+        if (!currentRun) throw new Error("wake-queue: finishing execution disappeared under lock");
+        const runSnapshot = toRunSnapshot(currentRun);
+        if (readNonEmptyString(parseObject(currentRun.contextSnapshot).issueId) !== contextIssueId) {
+          return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
+        }
+        run = currentRun;
 
         const candidateIssues = await tx
           .select()

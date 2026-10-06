@@ -64,7 +64,9 @@ import {
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
 import { hermesBudgetTelemetry } from "./budget-telemetry.js";
-import { requireManagedHermesProfile } from "./profile-policy.js";
+import { requireManagedHermesProfile, resolveHermesProfileHome } from "./profile-policy.js";
+import { readDurableHermesCallEvidence } from "./durable-call-evidence.js";
+import { readDurableHermesPretransportEvidence } from "./pretransport-evidence.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -906,6 +908,13 @@ export async function execute(
   });
   const childRuntimeMs = Math.ceil(performance.now() - childStartedAt);
   const runResult = await readHermesRunResult(runResultPath);
+  const durableCallEvidence = readDurableHermesCallEvidence(
+    resolveHermesProfileHome(config), ctx.runId, runResult,
+  );
+
+  const pretransportEvidence = readDurableHermesPretransportEvidence(
+    resolveHermesProfileHome(config), ctx.runId, runResult,
+  );
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
@@ -927,7 +936,8 @@ export async function execute(
     model: runResult?.version === 2 ? cfgString(runResult.model) || model : model,
   };
   const rawTurnExitReason =
-    cfgString(runResult?.turn_exit_reason) || cfgString(runResult?.stop_reason);
+    cfgString(runResult?.turn_exit_reason) || cfgString(runResult?.stop_reason) ||
+    pretransportEvidence?.terminalReason || "";
   const budgetNormalization = normalizeManagedBudgetCode(
     rawTurnExitReason,
     cfgString(runResult?.budget_failure_reason),
@@ -936,7 +946,8 @@ export async function execute(
   if (turnExitReason === "session_rollover_required") {
     executionResult.errorCode = turnExitReason;
     executionResult.clearSession = true;
-  } else if (budgetNormalization || turnExitReason === "no_progress") {
+  } else if (budgetNormalization || turnExitReason === "no_progress" ||
+      turnExitReason === "managed_progress_policy_invalid") {
     executionResult.errorCode = turnExitReason;
     executionResult.retryHint = "non_retryable";
   }
@@ -966,6 +977,13 @@ export async function execute(
     // even when the transcript/session ID is resumed.
     executionResult.usageBasis = "per_run";
   }
+  if (durableCallEvidence && durableCallEvidence.confirmedResponses > 0) {
+    executionResult.usage = {
+      inputTokens: durableCallEvidence.inputTokens,
+      outputTokens: durableCallEvidence.outputTokens,
+    };
+    executionResult.usageBasis = "per_run";
+  }
   if (runResult?.version === 2 && runResult.estimated_cost_usd != null) {
     executionResult.costUsd = runResult.estimated_cost_usd;
   }
@@ -987,6 +1005,8 @@ export async function execute(
     session_id: parsed.sessionId || null,
     usage: executionResult.usage || null,
     cost_usd: executionResult.costUsd ?? null,
+    ...(durableCallEvidence ? { durableCallEvidence } : {}),
+    ...(pretransportEvidence ? { pretransportEvidence } : {}),
     ...(runResult?.version === 2 ? {
       provider: runResult.provider ?? null,
       billingType: codexSubscriptionTelemetryComplete

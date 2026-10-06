@@ -38,6 +38,9 @@ import {
 import { recordAutonomousProviderCircuitOutcome } from "./autonomous-provider-circuit.js";
 import { recordContinuityCircuitAlert } from "./continuity-circuit-alert.js";
 import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
+import { resolveManagedBudgetVerifier, type ManagedBudgetVerifier } from "./managed-budget-evidence.js";
+import { verifyManagedPretransportEvidence } from "./managed-pretransport-evidence.js";
+import { lockEligibleAutomaticSuccessorSettlement, predecessorRetryPolicyAllows } from "./automatic-successor-settlement.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import { parseExecutionCheckpoint } from "./execution-checkpoint.js";
@@ -9172,6 +9175,8 @@ export type HeartbeatEnvironmentRuntime = ReturnType<
 >;
 
 export interface HeartbeatServiceOptions {
+  /** In-process fixture authority only; rejected outside NODE_ENV=test. */
+  verifyBudgetEvidenceForTest?: ManagedBudgetVerifier;
   /** Test seam before the atomic native runtime handoff. */
   beforeNativeRuntimeSelection?: (runId: string) => Promise<void>;
   /** Test seam immediately before the durable chat-control admission check. */
@@ -9325,6 +9330,9 @@ export function heartbeatService(
   db: Db,
   options: HeartbeatServiceOptions = {},
 ) {
+  const verifyBudgetEvidence = resolveManagedBudgetVerifier(
+    options.verifyBudgetEvidenceForTest, process.env.NODE_ENV,
+  );
   let shutdownInProgress = false;
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
@@ -15682,13 +15690,36 @@ export function heartbeatService(
             | "issue_cancelled"
             | "issue_terminal_status"
             | "issue_not_in_progress"
-            | "issue_execution_lock_changed";
+            | "issue_execution_lock_changed"
+            | "predecessor_budget_unsettled"
+            | "predecessor_retry_not_permitted";
           issueId: string | null;
           details: Record<string, unknown>;
         };
 
     const scheduleResult = await db.transaction(
       async (tx): Promise<ScheduledRetryTransactionResult> => {
+        // Serialize with settlement without blocking event-insert company FK checks.
+        // Lock order: company -> issue -> run -> reservation.
+        await tx.execute(sql`select id from companies where id = ${run.companyId} for no key update`);
+        if (issueId) await tx.execute(
+          sql`select id from issues where company_id = ${run.companyId} and id = ${issueId} for update`,
+        );
+        const [durablePredecessor] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id),
+        )).for("update");
+        if (!durablePredecessor ||
+            !await lockEligibleAutomaticSuccessorSettlement(tx as unknown as Db, durablePredecessor)) {
+          return { outcome: "not_scheduled", reason: "Predecessor budget is not durably settled for retry.",
+            errorCode: "predecessor_budget_unsettled", issueId, details: {} };
+        }
+        if (!predecessorRetryPolicyAllows(durablePredecessor) ||
+            (retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON &&
+              !readTransientRecoveryContractFromRun(durablePredecessor) &&
+              !hasConversationContinuationPolicy(durablePredecessor.resultJson))) {
+          return { outcome: "not_scheduled", reason: "Predecessor retry policy does not permit this successor.",
+            errorCode: "predecessor_retry_not_permitted", issueId, details: {} };
+        }
         // All automatic failure paths share the same predecessor claim. A
         // duplicate monitor, restart sweep or wake must reuse its successor.
         if (
@@ -22158,11 +22189,10 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
-        if (
-          !issueId ||
-          (!isResolvedInteractionContinuationWakeContext(context) &&
-            run.scheduledRetryReason !== "native_safe_replacement")
-        ) {
+        const requiresCurrentDispatchGate = Boolean(run.retryOfRunId) ||
+          isResolvedInteractionContinuationWakeContext(context) ||
+          run.scheduledRetryReason === "native_safe_replacement";
+        if (!issueId || !requiresCurrentDispatchGate) {
           return { dispatched: true, resultPromise: dispatch(() => {}) };
         }
         await options.beforeResolvedInteractionContinuationDispatchCheck?.({
@@ -24193,6 +24223,7 @@ export function heartbeatService(
                   agentId: agent.id,
                   issueId,
                   runId: run.id,
+                  previousRunId: run.retryOfRunId,
                   provider:
                     readNonEmptyString(runtimeConfig.provider) ??
                     agent.adapterType,
@@ -24600,30 +24631,9 @@ export function heartbeatService(
           usageBasis: adapterResult.usageBasis ?? null,
         });
         const normalizedUsage = sessionUsageResolution.normalizedUsage;
-        // An explicit incomplete Hermes result cannot be repaired by a nominal
-        // adapter telemetry object; keep the reservation until reconciliation.
         const resultEvidence = parseObject(adapterResult.resultJson);
-        const codexSubscriptionEvidence =
-          resultEvidence.provider === "openai-codex" &&
-          resultEvidence.billingType === "subscription" &&
-          resultEvidence.budgetTelemetryComplete === true &&
-          resultEvidence.costStatus === "included" &&
-          resultEvidence.costUnavailableReason == null &&
-          resultEvidence.cost_usd === 0;
-        const hasHermesUsageEvidence =
-          typeof resultEvidence.usageTelemetryComplete === "boolean";
-        const budgetEvidenceComplete = !hasHermesUsageEvidence ||
-          resultEvidence.budgetTelemetryComplete === true ||
-          (resultEvidence.budgetTelemetryComplete == null &&
-            resultEvidence.usageTelemetryComplete === true);
-        const hermesCostNotVerified =
-          (typeof resultEvidence.usageTelemetryComplete === "boolean" &&
-            resultEvidence.costStatus !== "actual" && !codexSubscriptionEvidence) ||
-          (typeof resultEvidence.costUnavailableReason === "string" &&
-            resultEvidence.costUnavailableReason.length > 0);
         const providerRequestIds = Array.isArray(resultEvidence.providerRequestIds)
-          ? resultEvidence.providerRequestIds
-          : [];
+          ? resultEvidence.providerRequestIds : [];
         const preProviderSessionRollover =
           isSessionRolloverRequiredRun({
             errorCode: adapterResult.errorCode,
@@ -24635,40 +24645,11 @@ export function heartbeatService(
         const verifiedPreProviderFailure =
           adapterResult.executionRecovery?.kind === "bootstrap" &&
           adapterResult.executionRecovery.providerWorkStarted === false;
+        const verifiedHermesPretransportFailure = agent.adapterType === "hermes_local" &&
+          verifyManagedPretransportEvidence(adapterResult, run.id);
         const verifiedNoProviderActivity =
-          preProviderSessionRollover || verifiedPreProviderFailure;
-        const requestCountValid = codexSubscriptionEvidence
-          ? Number.isSafeInteger(resultEvidence.apiCalls) &&
-            Number.isSafeInteger(resultEvidence.successfulProviderResponses) &&
-            (resultEvidence.successfulProviderResponses as number) >= 1 &&
-            (resultEvidence.apiCalls as number) >=
-              (resultEvidence.successfulProviderResponses as number) &&
-            providerRequestIds.length === resultEvidence.successfulProviderResponses &&
-            adapterResult.budgetTelemetry?.requestCount === resultEvidence.apiCalls
-          : resultEvidence.apiCalls === 1 && providerRequestIds.length === 1 &&
-            adapterResult.budgetTelemetry?.requestCount === 1;
-        const hermesRequestMismatch = typeof resultEvidence.costStatus === "string" &&
-          (!requestCountValid ||
-            providerRequestIds[0] !== adapterResult.budgetTelemetry?.providerRequestId);
-        const hermesCostMismatch = (resultEvidence.costStatus === "actual" ||
-          codexSubscriptionEvidence) &&
-          (typeof resultEvidence.cost_usd !== "number" ||
-            !Number.isFinite(resultEvidence.cost_usd) ||
-            resultEvidence.cost_usd < 0 ||
-            !Number.isSafeInteger(Math.round(resultEvidence.cost_usd * 1_000_000)) ||
-            Math.round(resultEvidence.cost_usd * 1_000_000) !==
-              adapterResult.budgetTelemetry?.costMicrousd);
-        const hermesUsageMismatch = typeof resultEvidence.usageTelemetryComplete === "boolean" &&
-          (adapterResult.usageBasis !== "per_run" || !rawUsage ||
-            rawUsage.inputTokens !== adapterResult.budgetTelemetry?.inputTokens ||
-            rawUsage.outputTokens !== adapterResult.budgetTelemetry?.outputTokens);
-        // Hermes token completeness does not prove its charge or request identity.
-        // Subscription-backed Codex has no metered cost, but still requires a
-        // provider response ID and exact per-run token evidence.
-        const budgetTelemetry = !budgetEvidenceComplete || hermesCostNotVerified ||
-          hermesRequestMismatch || hermesCostMismatch || hermesUsageMismatch
-          ? null
-          : adapterResult.budgetTelemetry ?? null;
+          preProviderSessionRollover || verifiedPreProviderFailure || verifiedHermesPretransportFailure;
+        const budgetTelemetry = verifyBudgetEvidence(adapterResult, rawUsage);
         const budgetReconciliation = await reconcileAutonomousBudget(db, {
           companyId: run.companyId,
           agentId: run.agentId,
@@ -24693,7 +24674,13 @@ export function heartbeatService(
         const telemetryMissing =
           budgetReconciliation.status === "retained_missing_telemetry";
         if (telemetryMissing) outcome = "failed";
-        const runErrorMessage = telemetryMissing
+        // Preserve the execution failure independently of accounting uncertainty.
+        // This recognized Hermes preflight reason is not a zero-usage attestation.
+        const executionErrorCode = adapterResult.errorCode ??
+          (agent.adapterType === "hermes_local" &&
+          resultEvidence.turn_exit_reason === "managed_progress_policy_invalid"
+            ? "managed_progress_policy_invalid" : null);
+        const runErrorMessage = telemetryMissing && !executionErrorCode
           ? "Provider activity missing required usage telemetry"
           : outcome === "cancelled"
             ? (latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled")
@@ -24715,7 +24702,7 @@ export function heartbeatService(
           adapterResult.executionRecovery?.kind === "bootstrap" &&
           adapterResult.executionRecovery.providerWorkStarted === false;
         const runErrorCode = telemetryMissing && !preProviderQuotaRejection
-          ? "telemetry_missing"
+          ? (executionErrorCode ?? "telemetry_missing")
           : outcome === "timed_out"
             ? "timeout"
             : outcome === "cancelled"
@@ -24832,6 +24819,11 @@ export function heartbeatService(
                   ? { executionRecovery: adapterResult.executionRecovery }
                   : {}),
                 configFreshness: configFreshnessResultMetadata,
+                ...(telemetryMissing ? { budgetSettlement: {
+                  status: budgetReconciliation.status,
+                  settlementState: budgetReconciliation.settlementState,
+                  accountingErrorCode: "telemetry_missing",
+                } } : {}),
               },
               errorFamily: adapterResult.errorFamily ?? null,
               retryNotBefore: adapterResult.retryNotBefore ?? null,
@@ -26709,6 +26701,9 @@ export function heartbeatService(
 
       const outcome = await db
         .transaction(async (tx) => {
+          if (source === "automation" && opts.requestedByActorType === "system") {
+            await tx.execute(sql`select id from companies where id = ${agent.companyId} for no key update`);
+          }
           await tx.execute(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
@@ -26760,6 +26755,7 @@ export function heartbeatService(
             }
           }
           let automaticParentRunId: string | null = null;
+          let automaticParentAgentId = agentId;
           if (
             source === "automation" &&
             opts.requestedByActorType === "system"
@@ -26779,10 +26775,7 @@ export function heartbeatService(
                 : genericParent;
             if (automaticParentRunId) {
               const [parent] = await tx
-                .select({
-                  agentId: heartbeatRuns.agentId,
-                  context: heartbeatRuns.contextSnapshot,
-                })
+                .select()
                 .from(heartbeatRuns)
                 .where(
                   and(
@@ -26790,14 +26783,17 @@ export function heartbeatService(
                     eq(heartbeatRuns.id, automaticParentRunId),
                   ),
                 )
+                .for("update")
                 .limit(1);
-              if (
-                parent &&
-                (parseObject(parent.context).issueId ??
-                  parseObject(parent.context).taskId) === issueId &&
-                parent.agentId !== agentId
-              )
-                automaticParentRunId = null;
+              // A handoff changes the successor owner, not the predecessor's
+              // accounting identity. Never manufacture independence by clearing it.
+              if (!parent ||
+                (parent.nativeIssueId ?? parent.contextSnapshot?.issueId ?? parent.contextSnapshot?.taskId) !== issueId ||
+                !predecessorRetryPolicyAllows(parent) ||
+                !await lockEligibleAutomaticSuccessorSettlement(tx as unknown as Db, parent)) {
+                return { kind: "skipped" as const };
+              }
+              automaticParentAgentId = parent.agentId;
             }
             const proof =
               nativeParent.kind === "unresolved"
@@ -26808,7 +26804,7 @@ export function heartbeatService(
                       {
                         companyId: agent.companyId,
                         issueId,
-                        agentId,
+                        agentId: automaticParentAgentId,
                         sourceRunId: automaticParentRunId,
                       },
                       true,

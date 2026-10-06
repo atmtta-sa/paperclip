@@ -577,6 +577,12 @@ async function runReleaseRecoveryTail(
       "wake-queue: queued a recovery run with no invokable recovery agent",
     );
 
+  // A denied bounded retry must not escape through the release-recovery tail.
+  // This check shares the issue transaction with every direct successor insert.
+  if (!await transaction.isAutomaticSuccessorSettlementEligible({
+    companyId: run.companyId, runId: run.id,
+  })) return { outcome: { kind: "released" }, postCommitEffects };
+
   if (run.conversationContinuation && ["failed", "timed_out", "interrupted"].includes(run.status)) {
     // Do not create an uncounted immediate successor inside the issue lock.
     // The host's idempotent scheduler claims it after commit with the same

@@ -65,6 +65,10 @@ import type {
 import { RunDispatchApplicationError } from "../application/types.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
+type DispatchTransactionOutcome<T> =
+  | { dispatched: false; cancellation: CancelStaleQueuedRunOutcome }
+  | { dispatched: true; resultPromise: Promise<T> }
+  | { dispatched: true; launchAfterCommit: true };
 type LoadGateFactsInput = {
   conversationContinuation: boolean;
   runId: string;
@@ -208,8 +212,8 @@ export function createPostgresRunDispatchAdapter(
               and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)),
             )
             // Keep the run status stable through the semantic decision and any
-            // resulting mutation and synchronous dispatch handoff. Never await
-            // adapter-owned work while this transaction holds the row locks.
+            // resulting mutation or ordinary synchronous handoff. Automatic
+            // successors use a durable CAS and launch only after commit.
             .for("update")
             .then((rows) => rows[0] ?? null);
           if (!run) return { kind: "missing" as const };
@@ -962,7 +966,10 @@ export function createPostgresRunDispatchAdapter(
   async function dispatchResolvedInteractionIfCurrent<T>(
     input: DispatchResolvedInteractionInput<T>,
   ): Promise<DispatchResolvedInteractionOutcome<T>> {
-    const dispatchLockedRun = async (tx: Db, run: HeartbeatRun) => {
+    const dispatchLockedRun = async (
+      tx: Db,
+      run: HeartbeatRun,
+    ): Promise<DispatchTransactionOutcome<T>> => {
       if (run.status !== input.expectedStatus) {
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
       }
@@ -1007,17 +1014,31 @@ export function createPostgresRunDispatchAdapter(
         return { dispatched: false as const, cancellation };
       }
 
-      // Hand off while ownership is still locked, but do not await the provider
-      // promise. Bootstrap and failure finalization can update these same rows;
-      // the transaction must commit independently of either callback completing.
+      if (run.retryOfRunId) {
+        const [launching] = await tx.update(heartbeatRuns).set({
+          executionStage: "launching",
+          updatedAt: input.now,
+        }).where(and(
+          eq(heartbeatRuns.id, run.id),
+          eq(heartbeatRuns.companyId, run.companyId),
+          eq(heartbeatRuns.status, input.expectedStatus),
+          eq(heartbeatRuns.executionStage, "launch_authorized"),
+        )).returning({ id: heartbeatRuns.id });
+        if (!launching) {
+          return {
+            dispatched: false as const,
+            cancellation: { outcome: "lost_race" as const },
+          };
+        }
+        return { dispatched: true as const, launchAfterCommit: true as const };
+      }
+
       const resultPromise = input.dispatch(() => {});
-      // A synchronous rejection can precede the commit response. Observe it
-      // immediately while preserving the original promise for the caller.
       void resultPromise.catch(() => {});
       return { dispatched: true as const, resultPromise };
     };
 
-    return withIssueThenRunLocks(
+    const transactionOutcome = await withIssueThenRunLocks(
       input,
       () => {
         throw new RunDispatchApplicationError(
@@ -1027,6 +1048,15 @@ export function createPostgresRunDispatchAdapter(
       },
       dispatchLockedRun,
     );
+    if (!transactionOutcome.dispatched) return transactionOutcome;
+    if ("resultPromise" in transactionOutcome) return transactionOutcome;
+
+    // Launch automatic successors only after the authorization/CAS commits. A failure
+    // after this point leaves `launching` durable and requires reconciliation;
+    // it must never restore replayable launch authority.
+    const resultPromise = input.dispatch(() => {});
+    void resultPromise.catch(() => {});
+    return { dispatched: true as const, resultPromise };
 
   }
 

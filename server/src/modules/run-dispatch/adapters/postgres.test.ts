@@ -191,6 +191,158 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     });
   }
 
+  it("consumes automatic-successor launch authorization exactly once across dispatchers", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    const predecessorRunId = randomUUID();
+    await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(heartbeatRuns).values({
+      id: predecessorRunId,
+      companyId,
+      agentId,
+      status: "failed",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId },
+    });
+    const successorRunId = await seedRun({
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+    await db.update(heartbeatRuns).set({
+      retryOfRunId: predecessorRunId,
+      executionStage: "launch_authorized",
+    }).where(eq(heartbeatRuns.id, successorRunId));
+    await db.update(issues).set({ executionRunId: successorRunId })
+      .where(eq(issues.id, issueId));
+
+    let calls = 0;
+    const dispatch = async () => { calls += 1; };
+    const otherDb = createDb(tempDb!.connectionString);
+    try {
+      const outcomes = await Promise.all([
+        createPostgresRunDispatchAdapter(db).dispatchResolvedInteractionIfCurrent({
+          companyId, runId: successorRunId, expectedStatus: "running", now: new Date(), dispatch,
+        }),
+        createPostgresRunDispatchAdapter(otherDb).dispatchResolvedInteractionIfCurrent({
+          companyId, runId: successorRunId, expectedStatus: "running", now: new Date(), dispatch,
+        }),
+      ]);
+
+      expect(outcomes.filter((outcome) => outcome.dispatched)).toHaveLength(1);
+      expect(calls).toBe(1);
+      expect(await db.select({ executionStage: heartbeatRuns.executionStage })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, successorRunId)))
+        .toEqual([{ executionStage: "launching" }]);
+
+      const reconstructedOutcome = await createPostgresRunDispatchAdapter(otherDb)
+        .dispatchResolvedInteractionIfCurrent({
+          companyId, runId: successorRunId, expectedStatus: "running", now: new Date(), dispatch,
+        });
+      expect(reconstructedOutcome).toMatchObject({
+        dispatched: false,
+        cancellation: { outcome: "lost_race" },
+      });
+      expect(calls).toBe(1);
+    } finally {
+      await otherDb.$client.end();
+    }
+  });
+
+  it("invokes an automatic-successor adapter only after launch authorization commits", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    const predecessorRunId = randomUUID();
+    await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(heartbeatRuns).values({
+      id: predecessorRunId,
+      companyId,
+      agentId,
+      status: "failed",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId },
+    });
+    const successorRunId = await seedRun({
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+    await db.update(heartbeatRuns).set({
+      retryOfRunId: predecessorRunId,
+      executionStage: "launch_authorized",
+    }).where(eq(heartbeatRuns.id, successorRunId));
+    await db.update(issues).set({ executionRunId: successorRunId })
+      .where(eq(issues.id, issueId));
+
+    let transactionCallbackActive = false;
+    const instrumentedDb = new Proxy(db, {
+      get(target, property, receiver) {
+        if (property !== "transaction") return Reflect.get(target, property, receiver);
+        return async (operation: (tx: unknown) => Promise<unknown>) => db.transaction(async (tx) => {
+          transactionCallbackActive = true;
+          try { return await operation(tx); }
+          finally { transactionCallbackActive = false; }
+        });
+      },
+    }) as typeof db;
+    let activeWhenInvoked: boolean | null = null;
+    const outcome = await createPostgresRunDispatchAdapter(instrumentedDb)
+      .dispatchResolvedInteractionIfCurrent({
+        companyId,
+        runId: successorRunId,
+        expectedStatus: "running",
+        now: new Date(),
+        dispatch: async () => { activeWhenInvoked = transactionCallbackActive; },
+      });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(activeWhenInvoked).toBe(false);
+  });
+
+  it("does not consume automatic-successor launch authorization after supersession", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    const predecessorRunId = randomUUID();
+    await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(heartbeatRuns).values({
+      id: predecessorRunId,
+      companyId,
+      agentId,
+      status: "failed",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId },
+    });
+    const successorRunId = await seedRun({
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+    await db.update(heartbeatRuns).set({
+      retryOfRunId: predecessorRunId,
+      executionStage: "launch_authorized",
+    }).where(eq(heartbeatRuns.id, successorRunId));
+    const competingRunId = await seedRun({
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+    await db.update(issues).set({ executionRunId: competingRunId })
+      .where(eq(issues.id, issueId));
+
+    const dispatch = vi.fn(async () => undefined);
+    expect(await createPostgresRunDispatchAdapter(db).dispatchResolvedInteractionIfCurrent({
+      companyId, runId: successorRunId, expectedStatus: "running", now: new Date(), dispatch,
+    })).toMatchObject({ dispatched: false, cancellation: { outcome: "cancelled" } });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(await db.select({ executionStage: heartbeatRuns.executionStage })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, successorRunId)))
+      .toEqual([{ executionStage: "launch_authorized" }]);
+  });
+
   it.each(["executionRunId", "checkoutRunId"] as const)("suppresses delayed native replacement after another run acquires %s", async (lock) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const issueId = randomUUID();

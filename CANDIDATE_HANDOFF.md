@@ -8,6 +8,108 @@ Hermes companion revision: `8d102fdd7e865347e3077062ca5efbe6370d0105`.
 Hermes worktree: `/home/yoga/.hermes/worktrees/hermes-effective-request-renderer`.
 This is source/test evidence, not deployment, historical reconciliation, or provider-canary acceptance.
 
+## Latest local checkpoint — bounded retry and generic continuation admission
+
+Local-only bounded correction is complete. `automatic-successor-settlement.ts` checks the
+exact durable issue reservation separately from retry policy. Bounded retry scheduling rereads
+the predecessor and reservation within the existing successor transaction. A durable validated
+conversation-continuation contract is accepted only as narrow continuation authority; it does
+not replace settlement, issue identity, retry bounds, sealing, or duplicate prevention.
+Missing or unresolved accounting cannot be replaced by optimistic result JSON.
+
+The corrected fixtures keep consumed settlement and continuation permission distinct. Unsupported
+`workspace_validation_failed` and accepted-interaction cases remain fail-closed: a
+`providerWorkStarted: false` projection is not a zero-use attestation, so they create no successor,
+no retry wakeup, and no workspace quarantine mutation. No usage or attestation was fabricated.
+
+Verification on this checkpoint:
+- Exact correction matrix: 3 files passed, 95 tests passed, 0 failed.
+- Retained log: `/tmp/bounded-correction-final-95.log`.
+- Server TypeScript (`tsc --noEmit`): passed, exit 0. The local Node 22 versus required Node 24
+  engine warning remains environmental and did not fail the command.
+- `git diff --check`: passed, exit 0.
+- No provider or network calls were made.
+
+The bounded settlement/retry correction remains a separate 95-test checkpoint. Final dispatch
+settlement/authorization recheck, stale-successor rejection before reservation/adapter launch,
+and uncertain-launch replay suppression are now closed by the launch-fencing checkpoint below.
+Missing-comment and other successor-creation paths, integrated smoke, provider canary, deployment,
+and broader release validation remain separate. No provider call, production-state mutation, commit,
+push, merge, or deployment occurred. Branch `feat/provider-free-context-regression` remains dirty
+with the broader managed-execution candidate. No Naz testing requested yet.
+
+## Latest local checkpoint — automatic-successor launch fencing
+
+Automatic successors now preserve exact predecessor lineage into both native and legacy budget
+admission. The reservation transaction locks and rereads the successor, predecessor, issue identity,
+ownership, durable accounting settlement, and affirmative retry/continuation authority before any
+reservation or provider-circuit mutation. Denial leaves reservation and circuit state unchanged.
+
+A newly admitted automatic successor receives durable `launch_authorized` state in the same
+transaction as its reservation. Final dispatch uses the existing issue-then-run lock order and
+atomically consumes only `launch_authorized` as `launching`. Automatic-successor adapter invocation
+starts only after that transaction commits; ordinary non-successor dispatch preserves its existing
+locked synchronous handoff. Competing controllers, reconstructed controllers, or reservation
+replays cannot relaunch a `launching` run. Supersession/cancellation winning first cancels dispatch
+without consuming launch authorization or calling the adapter. This establishes at most one
+Paperclip launch admission; it does not claim exactly-once external/provider execution.
+
+Self-review found and corrected three blocking issues: pre-commit automatic adapter invocation,
+unsafe aggregate durable-evidence values/empty or duplicate provider request identities, and durable
+call evidence attributed to a different predecessor run. Each correction was reproduced RED before
+the narrow production fix and rerun GREEN. This was implementing-assistant self-review, not an
+independent reviewer verdict.
+
+Provider-free verification on this checkpoint:
+- Integrated launch/settlement matrix: 6 files passed, 156 tests passed, 0 failed.
+- Retained log: `/tmp/successor-launch-fencing-review-final.log`.
+- Full Hermes adapter suite: 13 files passed, 162 tests passed, 0 failed.
+- Retained adapter log: `/tmp/hermes-adapter-review-final.log`.
+- Tests prove no reservation on settlement/authority denial, no circuit mutation, one durable
+  reservation on replay denial, no forbidden transition to `launching`, zero adapter calls on
+  supersession or uncertain replay, commit-before-launch for automatic successors, safe aggregate
+  evidence, and exact predecessor run attribution.
+- Server and Hermes adapter TypeScript checks passed. Targeted ESLint did not run because this
+  checkout resolved ESLint 6 without a discoverable configuration; no lint PASS is claimed.
+- `git diff --check` is rerun as the final gate after this handoff update.
+- No schema migration, provider/network call, commit, push, merge, deployment, or release occurred.
+
+The server matrix still emits pre-existing recovery-event duplicate-sequence warnings from
+`settleUnrecoverableExecutions`; assertions remain green, but those warnings are not certified by
+this slice and should be handled separately. Provider canary and corrected integrated smoke remain
+separately authorized boundaries.
+
+## Earlier local checkpoint — positive pre-transport evidence
+
+Consultation step 2 is implemented at component level, not integrated runtime closure.
+Hermes schema 34 adds durable run-start and sealed `managed_progress_policy_invalid`
+attestations. An existing attempted/completed call prevents zero attestation; sealing
+fences later transport and survives restart/repetition. Historical runs receive no
+invented attestations. The real progress-preflight path creates/seals this evidence.
+The read-only adapter validates exact run attribution and rejects unfinished or
+contradictory evidence; `execute.ts` carries it separately from usage and billing.
+Paperclip's dedicated acceptance helper feeds the existing settlement owner only for
+Hermes, exact completed evidence and no contradictory usage/cause. Valid evidence
+permits `released_zero_usage`; absent/wrong-run/conflicting evidence stays uncertain.
+No external billing or provider usage is fabricated and production billing rules are unchanged.
+
+Current verification:
+- Hermes focused contracts/progress/attribution/recovery/attestation: 52 passed on final formatted tree.
+- Full adapter: 159 passed; adapter TypeScript passed.
+- New settlement helper: 16 passed; production billing evidence: 9 passed; reservations: 16 passed (41 combined).
+- New cause/settlement heartbeat selection: 5 passed, 44 skipped; each new settlement case proves one adapter invocation, one run and one wake.
+- Full heartbeat owning file: 48 passed, 1 failed in previously recorded `reopens a nonproductive half-open probe without counting a provider failure` (`provider_circuit_open`). NOT a green full-file gate; left unchanged outside this correction.
+- Server TypeScript and both diff checks passed. Targeted Python Ruff lint/format passed.
+- Radon unavailable in the worktree environment; new complexity verification NOT executed.
+- Real Python SessionDB schema-34 store -> Node adapter reader passed with matching run/attestation IDs; isolated store retained at `/tmp/managed-pretransport-bridge-i_ya65eg`. This is a storage bridge, not a Hermes subprocess/Paperclip integrated canary.
+
+Tests used disposable SQLite/PostgreSQL storage and mocked adapter lifecycle execution.
+No provider invocation, shared-runtime mutation, historical recovery, deployment, commit,
+push or merge occurred. Branch remains `feat/provider-free-context-regression`, dirty
+with related continuation work. Atomic eligible-settlement/independent-retry successor
+gating, restart/repetition/concurrent scheduling proof, dispatch recheck and integrated
+five-record/matrix acceptance remain OPEN. No Naz testing requested.
+
 ## Included implementation
 
 - Adapter admission/result normalization preserves the two modern budget meanings; missing, unknown, or contradictory sources fail closed as `adapter_result_inconsistent`.
@@ -45,7 +147,44 @@ No push, merge, restart/deployment, live migration, live reservation mutation, w
 Next boundary: separately authorize paused disposable-runtime rollout and verify exact committed revisions/schema, then separately authorize named historical reconciliation and exactly one bounded implementation canary if all applicable preconditions are met.
 If another demonstrated issue can invalidate safety or interpretation of the next measurement, request bounded consultation before expanding implementation; otherwise defer it.
 
-## Local operator recovery follow-up (source checkpoint)
+## Uncommitted bounded-contract correction checkpoint
+
+Branch: `feat/provider-free-context-regression`; related source/tests remain dirty.
+This checkpoint is component GREEN, not end-to-end canary closure or deployment approval.
+
+- Extracted production managed-budget evidence verification and added an explicit in-process test-only dependency, refused outside `NODE_ENV=test`. Production synthetic-charge rejection remains intact.
+- Added read-only Hermes SQLite recovery from the validated profile and exact execution-run ID. Adapter usage and persisted evidence retain confirmed tokens when terminal output is absent; contradictory totals are flagged, uncertain transport remains incomplete, and ledger monetary amounts are not certified as external billing.
+- Production settlement retains uncertainty for incomplete/contradictory durable evidence. A mocked-adapter lifecycle test proves isolated synthetic settlement and zero successors; this is not the real adapter/subprocess canary.
+- Companion Hermes work adds run-attributed receipts, transactional managed call sequencing, run-scoped totals, migration leaving historical attribution unknown, and contradictory replay rejection. Latest companion focused contracts: 26 passed; the broader Hermes matrix has not been rerun after attribution edits.
+- Current Paperclip evidence: full adapter suite 153 passed; adapter TypeScript check passed; server evidence tests 9 passed; focused heartbeat group 12 passed / 32 skipped; `git diff --check` passed. Existing runtime-tool-delivery, experimental SQLite, and pnpm warnings remain. Server typecheck also passed with a 3 GB Node heap cap; no full server-suite/build claim is made.
+- Remaining: integrate real loopback adapter/Hermes execution with central settlement; complete cost/context denial, failure/restart, unknown transport and repeated-terminalization rows; prove transport/ledger/terminal/settlement/successor agreement. Empty ledger evidence does not prove zero transport.
+- No new commit, push, merge, deployment, historical recovery, existing-runtime wake or real-provider call is authorized or performed by this checkpoint.
+
+## Integrated smoke attempt — open gate
+
+One explicitly approved synthetic wake was exercised through real heartbeat, real Hermes adapter/subprocess, and disposable PostgreSQL. Attempt failed before transport: `managed_progress_baseline_unavailable`; fixture observed zero POSTs. The reservation remained `retained_missing_telemetry` / `uncertain_requires_reconciliation`, with one failed run plus one unexecuted `scheduled_retry` successor and two wakes. This is a failure, not consultation closure. Evidence: `/home/yoga/.hermes/canaries/provider-free-live-runtime/integrated-smoke-ujtla7d9/proof.json` and `execution.json`.
+
+Harness defect: working-directory dotenv/config discovery selected the old phase8 canary agent-home directory instead of the committed fixture workspace. The resulting synthetic-agent directory at `.../phase8-context-canary/workspaces/ab2f235a-df19-406a-9571-534ddbc47f21` is empty and has not been removed; no shared database wake was invoked. Do not claim complete filesystem isolation for this attempt. Embedded helper creates database `paperclip` inside a uniquely named test cluster, not a uniquely named SQL database; scope reporting must distinguish these.
+
+Harness now explicitly pins PAPERCLIP_HOME/PAPERCLIP_CONFIG, disables working-directory dotenv and schedulers, links a primary committed project workspace, and checks cwd containment before invoking Hermes. These edits have only passed server tsc and diff checks, not a second runtime attempt. Added opt-in `server/src/__tests__/managed-contract-smoke.test.ts` and external `integrated_smoke.py`.
+
+Measured retry gap remains: conversation-continuation policy bypasses legacy reconciliation protection while reservation accounting is uncertain. Add a focused provider-free regression and enforce authoritative reservation settlement at retry admission; do not redesign adjacent exception handling or pretend missing usage is zero. No second smoke/provider attempt authorized or executed. No deployment, commit, push, or merge.
+
+## Consultation follow-up — terminal-cause separation
+
+Bounded correction remains the verdict. The retained artifact shows reservation `fa06b7d8-796d-4b8a-ba4d-5d80d41dd50f` becoming uncertain before successor `a2d032da-0666-4437-8879-2fa244c1bea4` was created for predecessor `5b28b8d3-d93b-4759-bdff-e4089e79d616`. No successor dispatch is proven.
+
+Source inventory includes bounded scheduling, missing-comment successor creation, wake-created continuations, scheduled promotion, queued claims and executeRun. Existing retry insertion has locking/deduplication; strengthen that transaction rather than adding a parallel scheduler. Full mediation and concurrency review remain pending before a scheduling fix.
+
+First ordered correction implemented in heartbeat.ts: preserve adapter execution error/cause while recording uncertain accounting separately as resultJson.budgetSettlement, including accountingErrorCode=telemetry_missing. Recognize the supplied Hermes managed_progress_policy_invalid terminal reason when adapter errorCode is absent; this is expressly not positive zero-transport evidence. Missing actual usage remains null, and the reservation remains uncertain. No historical rows are rewritten.
+
+TDD evidence: two new cases failed first because telemetry_missing overwrote the original cause/message, then passed. Focused group: 14 passed / 32 skipped. Owning heartbeat file: 46 passed. Evidence boundary: 9 passed. Reservations: 16 passed. Server direct tsc and git diff --check passed. Runs used mocked adapters and disposable PostgreSQL with cwd dotenv disabled and explicit isolated config/home overrides; no Hermes/provider invocation or second integrated smoke occurred. Runtime-tool, pnpm and experimental SQLite warnings remain. The historically failing circuit probe passed in this full-file run; no unrelated circuit repair or root-cause resolution is claimed.
+
+Files touched for this step: server/src/services/heartbeat.ts, server/src/__tests__/heartbeat-issue-rewake-throttle.test.ts and this handoff. Branch feat/provider-free-context-regression remains dirty and relevant. No commit/push/merge/deployment authorized or performed.
+
+Next ordered work: positive durable run-scoped pre-transport attestation; atomic settlement plus independent retry-disposition enforcement for successor creation; dispatch recheck rejecting stale successors before any new reservation/adapter launch. Then separately approve and rerun the corrected smoke. Consultation closure and the remaining provider-free matrix are still open.
+
+## Local operator recovery follow-up (source checkpoint, not deployed)
 
 Base candidate: `98b20ac0a819305496de478459053ad0850ab268`; branch remains `feat/provider-free-context-regression`.
 

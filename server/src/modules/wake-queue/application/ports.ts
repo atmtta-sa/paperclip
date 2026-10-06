@@ -185,6 +185,8 @@ export interface WakeQueueTransaction {
   isAutomaticRecoverySuppressedByPauseHold(input: { companyId: string; issueId: string }): Promise<boolean>;
   /** Deny-only facts from the exact finishing run and its durable chat wake owner. */
   isImmediateRecoverySourceBlocked(input: { companyId: string; runId: string }): Promise<boolean>;
+  /** Exact terminal predecessor accounting; distinct from recovery permission. */
+  isAutomaticSuccessorSettlementEligible(input: { companyId: string; runId: string }): Promise<boolean>;
   queueReviewParticipantRecoveryRun(input: {
     companyId: string;
     issue: IssueSnapshot;

@@ -6,11 +6,13 @@ import {
   budgetIncidents,
   budgetPolicies,
   companies,
+  heartbeatRuns,
   issues,
 } from "@paperclipai/db";
 import type { BudgetMetric, BudgetScopeType, BudgetWindowKind } from "@paperclipai/shared";
 import { recordAutonomousCostVelocityAlert } from "./autonomous-cost-velocity-alert.js";
 import { acquireAutonomousProviderCircuitPermitWithLockedCompany } from "./autonomous-provider-circuit.js";
+import { lockEligibleAutomaticSuccessorLaunchSettlement } from "./automatic-successor-settlement.js";
 
 export type AutonomousBudgetRequest = {
   requestCount: number;
@@ -235,6 +237,18 @@ export async function reserveAutonomousBudget(
     if (!company || company.paused) {
       return { admitted: false as const, reason: "autonomous_execution_paused" as const };
     }
+    let automaticSuccessorLaunch = false;
+    if (input.previousRunId) {
+      const eligible = await lockEligibleAutomaticSuccessorLaunchSettlement(tx as unknown as Db, {
+        companyId: input.companyId,
+        agentId: input.agentId,
+        issueId: input.issueId,
+        runId: input.runId,
+        previousRunId: input.previousRunId,
+      });
+      if (eligible === false) throw new Error("automatic_successor_launch_denied");
+      automaticSuccessorLaunch = eligible === true;
+    }
     const agent = await tx.select({ id: agents.id, paused: agents.autonomousExecutionPaused })
       .from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)))
       .then((rows) => rows[0] ?? null);
@@ -305,6 +319,14 @@ export async function reserveAutonomousBudget(
         existing.issueId !== input.issueId
       ) {
         throw new Error("autonomous_budget_reservation_scope_mismatch");
+      }
+      if (automaticSuccessorLaunch) {
+        const authorized = await tx.select({ executionStage: heartbeatRuns.executionStage })
+          .from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.id, input.runId),
+            eq(heartbeatRuns.executionStage, "launch_authorized"),
+          )).then((rows) => rows[0] ?? null);
+        if (!authorized) throw new Error("automatic_successor_launch_denied");
       }
       const circuitDenial = await acquireProviderCircuitDenial();
       if (circuitDenial) return circuitDenial;
@@ -436,6 +458,19 @@ export async function reserveAutonomousBudget(
 
     const circuitDenial = await acquireProviderCircuitDenial();
     if (circuitDenial) return circuitDenial;
+    if (automaticSuccessorLaunch && input.previousRunId) {
+      const [authorized] = await tx.update(heartbeatRuns).set({
+        executionStage: "launch_authorized",
+        updatedAt: new Date(),
+      }).where(and(
+        eq(heartbeatRuns.id, input.runId),
+        eq(heartbeatRuns.companyId, input.companyId),
+        eq(heartbeatRuns.status, "running"),
+        eq(heartbeatRuns.retryOfRunId, input.previousRunId),
+        or(isNull(heartbeatRuns.executionStage), eq(heartbeatRuns.executionStage, "preparing")),
+      )).returning({ id: heartbeatRuns.id });
+      if (!authorized) throw new Error("automatic_successor_launch_denied");
+    }
     const reservation = await tx
       .insert(autonomousBudgetReservations)
       .values({

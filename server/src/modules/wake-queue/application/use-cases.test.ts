@@ -121,6 +121,7 @@ function createFakeTransaction(overrides: Partial<WakeQueueTransaction> = {}): W
     hasExplicitBlockerPath: vi.fn(async () => false),
     isAutomaticRecoverySuppressedByPauseHold: vi.fn(async () => false),
     isImmediateRecoverySourceBlocked: vi.fn(async () => false),
+    isAutomaticSuccessorSettlementEligible: vi.fn(async () => true),
     queueReviewParticipantRecoveryRun: vi.fn(async () => runSummary("review-recovery")),
     queueImmediateRecoveryRun: vi.fn(async () => runSummary("immediate-recovery")),
     ...overrides,
@@ -144,6 +145,28 @@ function createFakeRecovery(): RecoveryEscalationPort {
 }
 
 describe("releaseIssueExecution", () => {
+  it.each([false, true])("does not create automatic recovery or request a conversation retry without settlement: %s", async (conversationContinuation) => {
+    const transaction = Object.assign(createFakeTransaction(), {
+      isAutomaticSuccessorSettlementEligible: vi.fn(async () => false),
+    });
+    const host = createFakeHost();
+    const run = { ...RUN, conversationContinuation };
+    const issueLock: IssueLockWriter = {
+      withIssueExecutionLock: vi.fn(async (_input, fn) => ({
+        ...await fn({ primaryIssue: ISSUE, run }, { host, transaction }), run,
+      })),
+    };
+    const release = createReleaseIssueExecution({ issueLock, recovery: createFakeRecovery() });
+    const result = await release({ companyId: run.companyId, runId: run.id, now: new Date() });
+    expect(transaction.isAutomaticSuccessorSettlementEligible).toHaveBeenCalledWith({
+      companyId: run.companyId, runId: run.id,
+    });
+    expect(transaction.queueImmediateRecoveryRun).not.toHaveBeenCalled();
+    expect(transaction.queueReviewParticipantRecoveryRun).not.toHaveBeenCalled();
+    expect(host.resolveSessionBeforeForWakeup).not.toHaveBeenCalled();
+    expect(result.postCommitEffects).toEqual([]);
+    expect(result.outcome.kind).toBe("released");
+  });
   it.each([true, false])(
     "preserves failed-chat retry input without reopening only with adapter proof: %s",
     async (authorizedFailedChatRetry) => {

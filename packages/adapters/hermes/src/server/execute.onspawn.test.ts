@@ -47,6 +47,14 @@ vi.mock("./skills.js", () => ({
   reconcileHermesPaperclipSkills: vi.fn(async () => []),
 }));
 
+vi.mock("./durable-call-evidence.js", () => ({
+  readDurableHermesCallEvidence: vi.fn(() => null),
+}));
+import { readDurableHermesCallEvidence } from "./durable-call-evidence.js";
+vi.mock("./pretransport-evidence.js", () => ({
+  readDurableHermesPretransportEvidence: vi.fn(() => null),
+}));
+import { readDurableHermesPretransportEvidence } from "./pretransport-evidence.js";
 import { buildPrompt, execute, normalizeManagedBudgetCode } from "./execute.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
 import * as serverUtils from "@paperclipai/adapter-utils/server-utils";
@@ -92,6 +100,44 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
 describe("hermes-local adapter onSpawn forwarding", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(readDurableHermesCallEvidence).mockReset().mockReturnValue(null);
+    vi.mocked(readDurableHermesPretransportEvidence).mockReset().mockReturnValue(null);
+  });
+
+  it("carries a positive pretransport attestation without inventing provider billing", async () => {
+    const { ctx } = makeCtx();
+    const evidence = { version: 1 as const, source: "hermes_sqlite_transport_owner" as const,
+      runId: ctx.runId, sessionId: "shared", attestationId: "attestation-1", startedAt: 1, sealedAt: 2,
+      boundary: "never_crossed" as const, complete: true as const,
+      terminalReason: "managed_progress_policy_invalid" as const };
+    vi.mocked(readDurableHermesPretransportEvidence).mockReturnValueOnce(evidence);
+    const result = await execute(ctx as any);
+    expect(result.resultJson?.pretransportEvidence).toEqual(evidence);
+    expect(result.errorCode).toBe("managed_progress_policy_invalid");
+    expect(result.retryHint).toBe("non_retryable");
+    expect(result.usage).toBeUndefined();
+    expect(result.budgetTelemetry).toBeUndefined();
+    expect(result.costUsd).toBeUndefined();
+  });
+
+  it("recovers attributed usage when terminal output is absent without certifying billing", async () => {
+    const { ctx } = makeCtx();
+    const evidence = {
+      runId: ctx.runId, complete: true, requestCount: 1, confirmedResponses: 1,
+      inputTokens: 100, outputTokens: 20, providerRequestIds: ["synthetic-1"],
+      estimatedCostUsd: 0.00014, externalBillingVerified: false as const,
+      rateCardSnapshots: [], terminalDiscrepancies: [],
+    };
+    vi.mocked(readDurableHermesCallEvidence).mockReturnValueOnce(evidence);
+    const result = await execute(ctx as any);
+    expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 20 });
+    expect(result.usageBasis).toBe("per_run");
+    expect(result.resultJson?.durableCallEvidence).toEqual(evidence);
+    expect(result.budgetTelemetry).toBeUndefined();
+    expect(result.costUsd).toBeUndefined();
+    expect(readDurableHermesCallEvidence).toHaveBeenCalledWith(
+      expect.stringContaining("paperclip-visualization-tool-developer"), ctx.runId, null,
+    );
   });
 
   it("forwards ctx.onSpawn to runChildProcess", async () => {
