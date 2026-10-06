@@ -620,7 +620,38 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
-  const hermesProfile = await requireManagedHermesProfile(config);
+  let hermesProfile: string;
+  try {
+    hermesProfile = await requireManagedHermesProfile(config);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    if (
+      reason !== "hermes_managed_profile_invalid" &&
+      reason !== "hermes_managed_profile_missing"
+    ) {
+      throw err;
+    }
+    await ctx.onLog("stderr", `[hermes] Cannot start without an isolated managed profile: ${reason}\n`);
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: reason,
+      errorMessage: reason,
+      executionRecovery: {
+        kind: "bootstrap",
+        providerWorkStarted: false,
+      },
+      retryHint: "operator_action_required",
+      resultJson: {
+        executionRecovery: {
+          kind: "bootstrap",
+          providerWorkStarted: false,
+        },
+        retryHint: "operator_action_required",
+      },
+    };
+  }
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const configuredTimeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const timeoutSec = ctx.autonomousBudgetEnvelope

@@ -266,14 +266,52 @@ describe("hermes-local adapter onSpawn forwarding", () => {
   });
 
   it.each([undefined, "", "../default", "default", "bad profile"])(
-    "rejects a missing or unsafe managed profile before spawn: %s",
+    "returns a verified bootstrap failure for an invalid managed profile before spawn: %s",
     async (hermesProfile) => {
       const { ctx } = makeCtx({ hermesProfile });
 
-      await expect(execute(ctx as any)).rejects.toThrow("hermes_managed_profile_invalid");
+      const result = await execute(ctx as any);
+
+      expect(result).toMatchObject({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "hermes_managed_profile_invalid",
+        errorMessage: "hermes_managed_profile_invalid",
+        executionRecovery: {
+          kind: "bootstrap",
+          providerWorkStarted: false,
+        },
+        retryHint: "operator_action_required",
+        resultJson: {
+          executionRecovery: {
+            kind: "bootstrap",
+            providerWorkStarted: false,
+          },
+          retryHint: "operator_action_required",
+        },
+      });
       expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
     },
   );
+
+  it("returns a verified bootstrap failure when the managed profile directory is missing", async () => {
+    vi.mocked(fs.lstat).mockRejectedValueOnce(new Error("ENOENT"));
+    const { ctx } = makeCtx();
+
+    const result = await execute(ctx as any);
+
+    expect(result).toMatchObject({
+      errorCode: "hermes_managed_profile_missing",
+      errorMessage: "hermes_managed_profile_missing",
+      executionRecovery: {
+        kind: "bootstrap",
+        providerWorkStarted: false,
+      },
+      retryHint: "operator_action_required",
+    });
+    expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
+  });
 
   it("injects the reserved autonomous budget envelope into Hermes", async () => {
     const { ctx } = makeCtx();
