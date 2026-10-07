@@ -10,12 +10,18 @@ export const LEGACY_CONTROLLER_RENEW_MS = 10_000;
 type Run = typeof heartbeatRuns.$inferSelect;
 
 /** Commit these fields in the same UPDATE that claims a queued run. */
-export function legacyControllerClaim(runtimeMode: string) {
+export function legacyControllerClaim(
+  runtimeMode: string,
+  currentExecutionStage?: string | null,
+) {
   if (runtimeMode === "native") return {};
   return {
     controllerBootId: legacyControllerBootId,
     controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
-    executionStage: "preparing",
+    executionStage:
+      currentExecutionStage === "launch_authorized"
+        ? "launch_authorized"
+        : "preparing",
   };
 }
 
@@ -26,7 +32,15 @@ export async function renewLegacyControllerLease(
 ): Promise<boolean> {
   const [renewed] = await db.update(heartbeatRuns).set({
     controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
-    ...(stage ? { executionStage: stage } : {}),
+    ...(stage
+      ? {
+          executionStage: sql`case
+            when ${heartbeatRuns.executionStage} = 'launch_authorized'
+              then ${heartbeatRuns.executionStage}
+            else ${stage}
+          end`,
+        }
+      : {}),
   }).where(and(
     eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),

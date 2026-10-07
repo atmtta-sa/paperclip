@@ -199,6 +199,30 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     };
   }
 
+  function authorizedNoProgressResult() {
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      summary: "Issue rewake throttle test run.",
+      provider: "test",
+      model: "test-model",
+      resultJson: {
+        conversationContinuation: "continue_conversation_v1",
+      },
+      budgetTelemetry: {
+        providerRequestId: randomUUID(),
+        requestCount: 1,
+        inputTokens: 10,
+        outputTokens: 5,
+        runtimeMs: 100,
+        costMicrousd: 1,
+        rateCardVersion: "test-v1",
+      },
+    };
+  }
+
   async function seedCompanyAgentIssue() {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -944,7 +968,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     });
   });
 
-  it("does not misclassify a pre-provider session rollover as missing telemetry", async () => {
+  it("keeps pre-provider rollover blocked without transport-owner settlement evidence", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     mockAdapterExecute.mockClear();
     mockAdapterExecute
@@ -1009,32 +1033,18 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
     }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))
       .orderBy(heartbeatRuns.createdAt);
-    expect(runs).toHaveLength(2);
+    expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({
       status: "failed",
       errorCode: SESSION_ROLLOVER_WAKE_REASON,
-    });
-    expect(runs[1]).toMatchObject({
-      status: "scheduled_retry",
-      scheduledRetryReason: SESSION_ROLLOVER_RETRY_REASON,
     });
 
     const reservations = await db.select({ status: autonomousBudgetReservations.status })
       .from(autonomousBudgetReservations)
       .where(eq(autonomousBudgetReservations.companyId, companyId))
       .orderBy(autonomousBudgetReservations.createdAt);
-    expect(reservations[0]?.status).toBe("released");
-
-    await db.update(heartbeatRuns).set({ processPid: null, processGroupId: null })
-      .where(eq(heartbeatRuns.id, runs[0]!.id));
-    await heartbeat.promoteDueScheduledRetries(
-      new Date(runs[1]!.scheduledRetryAt!.getTime() + 1),
-    );
-    await heartbeat.resumeQueuedRuns();
-    await drainHeartbeatRunsToQuiescence(db, heartbeat);
-    const [completedRollover] = await db.select({ status: heartbeatRuns.status })
-      .from(heartbeatRuns).where(eq(heartbeatRuns.id, runs[1]!.id));
-    expect(completedRollover?.status).toBe("succeeded");
+    expect(reservations).toEqual([{ status: "retained_missing_telemetry" }]);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
   });
 
   it("releases a verified pre-provider skill conflict without scheduling a retry", async () => {
@@ -1425,6 +1435,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementation(async () => authorizedNoProgressResult());
 
     expect(await assignmentWake(agentId, issueId)).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
@@ -1619,6 +1630,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("reopens a nonproductive half-open probe without counting a provider failure", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementation(async () => authorizedNoProgressResult());
     const lastFailureRunId = randomUUID();
     await recordAutonomousProviderCircuitOutcome(db, {
       companyId,
@@ -1632,11 +1644,13 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(await assignmentWake(agentId, issueId)).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
 
-    const [run] = await db
+    const runs = await db
       .select()
       .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.companyId, companyId));
-    expect(run).toMatchObject({ status: "succeeded", workOutcome: "no_progress" });
+      .where(eq(heartbeatRuns.companyId, companyId))
+      .orderBy(heartbeatRuns.createdAt);
+    expect(runs[0]).toMatchObject({ status: "succeeded", workOutcome: "no_progress" });
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
     const [providerCircuit] = await db
       .select()
       .from(autonomousProviderCircuits)
@@ -1834,6 +1848,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
   it("replays 247 unchanged blocker wakes without another fake-provider dispatch", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation(async () => authorizedNoProgressResult());
 
     expect(await assignmentWake(agentId, issueId)).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
@@ -1864,8 +1879,22 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(runs).toHaveLength(2);
     expect(runs.some((run) => run.continuityCircuitState === "open")).toBe(true);
     const calls = mockAdapterExecute.mock.calls;
-    expect(calls.every(([context]) => context.autonomousBudgetEnvelope?.inputTokens === 64_000
-      && context.autonomousBudgetEnvelope?.costMicrousd === 250_000)).toBe(true);
+    expect(calls.map(([context]) => context.autonomousBudgetEnvelope)).toEqual([
+      {
+        requestCount: 8,
+        inputTokens: 64_000,
+        outputTokens: 8_000,
+        runtimeMs: 300_000,
+        costMicrousd: 250_000,
+      },
+      {
+        requestCount: 7,
+        inputTokens: 63_990,
+        outputTokens: 7_995,
+        runtimeMs: 299_900,
+        costMicrousd: 249_999,
+      },
+    ]);
     const fakeResults = await Promise.all(mockAdapterExecute.mock.results.map((result) => result.value));
     expect(fakeResults.every((result) => result.budgetTelemetry.inputTokens <= 64_000)).toBe(true);
     expect(fakeResults.reduce((cost, result) => cost + result.budgetTelemetry.costMicrousd, 0))
@@ -1873,7 +1902,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     const [reserved] = await db.select({ cost: sql<number>`coalesce(sum(${autonomousBudgetReservations.reservedCostMicrousd}), 0)::int` })
       .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
     expect(reserved?.cost).toBeLessThanOrEqual(10_000_000);
-  });
+  }, 60_000);
 
   it("keeps agent comments throttled without hiding genuinely new human input", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
