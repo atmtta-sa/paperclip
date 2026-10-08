@@ -17625,7 +17625,10 @@ export function heartbeatService(
                   .set({
                     status: "running",
                     runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-                    ...legacyControllerClaim(run.runtimeMode),
+                    ...legacyControllerClaim(
+                      run.runtimeMode,
+                      lockedRun.executionStage,
+                    ),
                     responsibleUserId,
                     startedAt: lockedRun.startedAt ?? claimedAt,
                     updatedAt: claimedAt,
@@ -17733,7 +17736,10 @@ export function heartbeatService(
                 .set({
                   status: "running",
                   runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-                    ...legacyControllerClaim(run.runtimeMode),
+                    ...legacyControllerClaim(
+                      run.runtimeMode,
+                      lockedRun.executionStage,
+                    ),
                   responsibleUserId,
                   startedAt: lockedRun.startedAt ?? claimedAt,
                   contextSnapshot: withQueuedCommentIdsInRunContext(
@@ -17804,7 +17810,7 @@ export function heartbeatService(
         .set({
           status: "running",
           runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-          ...legacyControllerClaim(run.runtimeMode),
+          ...legacyControllerClaim(run.runtimeMode, run.executionStage),
           responsibleUserId,
           startedAt: run.startedAt ?? claimedAt,
           updatedAt: claimedAt,
@@ -24632,23 +24638,13 @@ export function heartbeatService(
         });
         const normalizedUsage = sessionUsageResolution.normalizedUsage;
         const resultEvidence = parseObject(adapterResult.resultJson);
-        const providerRequestIds = Array.isArray(resultEvidence.providerRequestIds)
-          ? resultEvidence.providerRequestIds : [];
-        const preProviderSessionRollover =
-          isSessionRolloverRequiredRun({
-            errorCode: adapterResult.errorCode,
-            resultJson: adapterResult.resultJson,
-          }) &&
-          resultEvidence.apiCalls === 0 &&
-          resultEvidence.successfulProviderResponses === 0 &&
-          providerRequestIds.length === 0;
         const verifiedPreProviderFailure =
           adapterResult.executionRecovery?.kind === "bootstrap" &&
           adapterResult.executionRecovery.providerWorkStarted === false;
         const verifiedHermesPretransportFailure = agent.adapterType === "hermes_local" &&
           verifyManagedPretransportEvidence(adapterResult, run.id);
         const verifiedNoProviderActivity =
-          preProviderSessionRollover || verifiedPreProviderFailure || verifiedHermesPretransportFailure;
+          verifiedPreProviderFailure || verifiedHermesPretransportFailure;
         const budgetTelemetry = verifyBudgetEvidence(adapterResult, rawUsage);
         const budgetReconciliation = await reconcileAutonomousBudget(db, {
           companyId: run.companyId,

@@ -16,12 +16,12 @@ const support = await getEmbeddedPostgresTestSupport();
     db = createDb(database.connectionString);
   }, 30000);
   afterAll(async () => { await database?.cleanup(); });
-  async function seed() {
+  async function seed(executionStage?: "launch_authorized") {
     const companyId = randomUUID(), agentId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Controller test", issuePrefix: `C${companyId.slice(0, 7)}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Agent", role: "general", adapterType: "claude_local", status: "idle" });
-    const [queued] = await db.insert(heartbeatRuns).values({ companyId, agentId }).returning();
-    const [run] = await db.update(heartbeatRuns).set({ status: "running", ...legacyControllerClaim("legacy") })
+    const [queued] = await db.insert(heartbeatRuns).values({ companyId, agentId, executionStage }).returning();
+    const [run] = await db.update(heartbeatRuns).set({ status: "running", ...legacyControllerClaim("legacy", queued.executionStage) })
       .where(eq(heartbeatRuns.id, queued.id)).returning();
     return run;
   }
@@ -34,6 +34,13 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(run).toMatchObject({ status: "running", controllerBootId: legacyControllerBootId, executionStage: "preparing", processPid: null });
     expect(await hasLiveLegacyController(db, run)).toBe(true);
     expect(await revokeExpiredLegacyController(db, run)).toBe(false);
+  });
+  it("preserves automatic-successor launch authorization through claim and lease renewal", async () => {
+    const run = await seed("launch_authorized");
+    expect(run.executionStage).toBe("launch_authorized");
+    expect(await renewLegacyControllerLease(db, run, "dispatching")).toBe(true);
+    const [saved] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    expect(saved.executionStage).toBe("launch_authorized");
   });
   it("another deployment's startup reaper preserves an unexpired controller", async () => {
     const run = await seed();

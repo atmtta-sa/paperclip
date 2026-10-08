@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { autonomousBudgetReservations, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { verifyManagedPretransportEvidence } from "./managed-pretransport-evidence.js";
 import { hasConversationContinuationPolicy } from "./conversation-continuation.js";
+import { parseExecutionCheckpoint } from "./execution-checkpoint.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 
@@ -19,8 +20,17 @@ export function predecessorRetryAuthorityAllows(
   run: Pick<Run, "errorCode" | "resultJson">,
 ): boolean {
   if (!predecessorRetryPolicyAllows(run)) return false;
+  const result = object(run.resultJson);
+  const errorCodeRollover = run.errorCode === "session_rollover_required";
+  const resultRollover = result?.turn_exit_reason === "session_rollover_required";
+  if (run.errorCode != null && result?.turn_exit_reason != null &&
+      errorCodeRollover !== resultRollover) return false;
+  if (errorCodeRollover || resultRollover) {
+    const checkpoint = parseExecutionCheckpoint(result?.executionCheckpoint);
+    return checkpoint?.blockers.status === "clear";
+  }
   if (hasConversationContinuationPolicy(run.resultJson)) return true;
-  const errorFamily = object(run.resultJson)?.errorFamily;
+  const errorFamily = result?.errorFamily;
   return errorFamily === "transient_upstream" || errorFamily === "provider_quota";
 }
 
