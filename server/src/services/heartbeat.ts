@@ -9887,6 +9887,10 @@ export function heartbeatService(
     issueId: string | null;
     attempt: number;
     maxAttempts: number;
+    expectedSourceExecution?: {
+      assigneeAgentId: string;
+      executionRunId: string;
+    };
   }) {
     const interaction = await getAcceptedPlanApprovalInteractionForRun(
       input.run,
@@ -9918,12 +9922,14 @@ export function heartbeatService(
       attempt: input.attempt,
       maxAttempts: input.maxAttempts,
     });
-    await recovery.escalateStrandedAssignedIssue({
+    const escalatedIssue = await recovery.escalateStrandedAssignedIssue({
       issue,
       previousStatus: issue.status,
       latestRun: input.run,
       comment: body,
+      expectedSourceExecution: input.expectedSourceExecution,
     });
+    if (!escalatedIssue) return null;
     await addPlanApprovalResumeFailureCommentOnce({
       issueId: issue.id,
       run: input.run,
@@ -16196,6 +16202,27 @@ export function heartbeatService(
           ...scheduleResult.details,
         },
       });
+      if (
+        retryReason === INTERACTION_CONTINUATION_INFRA_RETRY_REASON &&
+        (scheduleResult.errorCode === "predecessor_budget_unsettled" ||
+          scheduleResult.errorCode === "predecessor_retry_not_permitted")
+      ) {
+        await escalatePlanApprovalResumeFailureNeedsAttention({
+          run,
+          issueId,
+          attempt: nextAttempt,
+          maxAttempts,
+          expectedSourceExecution: {
+            assigneeAgentId: run.agentId,
+            executionRunId: run.id,
+          },
+        }).catch((error) => {
+          logger.warn(
+            { err: error, runId: run.id, issueId },
+            "failed to escalate unauthorized plan-approval resume retry",
+          );
+        });
+      }
       return {
         outcome: "not_scheduled" as const,
         reason: scheduleResult.reason,

@@ -3724,7 +3724,36 @@ export function recoveryService(
     notice?: StrandedRecoveryNoticeSeed | null;
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
-  }) {
+    expectedSourceExecution?: {
+      assigneeAgentId: string;
+      executionRunId: string;
+    };
+  }): Promise<typeof issues.$inferSelect | null> {
+    if (input.expectedSourceExecution) {
+      const expected = input.expectedSourceExecution;
+      return db.transaction(async (tx) => {
+        const current = await tx
+          .select()
+          .from(issues)
+          .where(
+            and(
+              eq(issues.companyId, input.issue.companyId),
+              eq(issues.id, input.issue.id),
+              eq(issues.status, input.previousStatus),
+              eq(issues.assigneeAgentId, expected.assigneeAgentId),
+              eq(issues.executionRunId, expected.executionRunId),
+            ),
+          )
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!current) return null;
+        return recoveryService(tx as unknown as Db, deps).escalateStrandedAssignedIssue({
+          ...input,
+          issue: current,
+          expectedSourceExecution: undefined,
+        });
+      });
+    }
     if (isStrandedIssueRecoveryIssue(input.issue)) {
       return escalateStrandedRecoveryIssueInPlace({
         issue: input.issue,

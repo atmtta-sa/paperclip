@@ -519,6 +519,86 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(enqueueWakeup).not.toHaveBeenCalled();
   });
 
+  it("does not escalate stale work after reassignment and execution replacement", async () => {
+    const { managerId, coderId, sourceIssue } = await seedCompany();
+    const expectedRunId = randomUUID();
+    const replacementRunId = randomUUID();
+    await seedHeartbeatRun({
+      companyId: sourceIssue.companyId,
+      agentId: coderId,
+      runId: expectedRunId,
+      issueId: sourceIssue.id,
+      status: "failed",
+    });
+    await seedHeartbeatRun({
+      companyId: sourceIssue.companyId,
+      agentId: managerId,
+      runId: replacementRunId,
+      issueId: sourceIssue.id,
+      status: "running",
+    });
+    await db
+      .update(issues)
+      .set({ executionRunId: expectedRunId })
+      .where(eq(issues.id, sourceIssue.id));
+    const [claimedIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, sourceIssue.id));
+
+    await db
+      .update(issues)
+      .set({
+        assigneeAgentId: managerId,
+        executionRunId: replacementRunId,
+      })
+      .where(eq(issues.id, sourceIssue.id));
+
+    const recovery = recoveryService(db, {
+      enqueueWakeup: vi.fn(async () => null),
+    });
+    const escalated = await recovery.escalateStrandedAssignedIssue({
+      issue: claimedIssue!,
+      previousStatus: "in_progress",
+      latestRun: {
+        id: expectedRunId,
+        agentId: coderId,
+        status: "failed",
+        error: "adapter failed",
+        errorCode: "adapter_failed",
+        contextSnapshot: { retryReason: "issue_continuation_needed" },
+        livenessState: "needs_followup",
+      },
+      expectedSourceExecution: {
+        assigneeAgentId: coderId,
+        executionRunId: expectedRunId,
+      },
+    });
+
+    expect(escalated).toBeNull();
+    expect(
+      await db
+        .select()
+        .from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, sourceIssue.id)),
+    ).toHaveLength(0);
+    expect(
+      await db
+        .select({
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+          executionRunId: issues.executionRunId,
+        })
+        .from(issues)
+        .where(eq(issues.id, sourceIssue.id))
+        .then((rows) => rows[0] ?? null),
+    ).toEqual({
+      status: "in_progress",
+      assigneeAgentId: managerId,
+      executionRunId: replacementRunId,
+    });
+  });
+
   // Model the production payload: `requestedRef` keeps the operator spelling,
   // and the fingerprint carries the canonical remote ref. Two equivalent
   // spellings of one remote branch share `identityRef`, so they share one

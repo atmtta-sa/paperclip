@@ -27,6 +27,8 @@ import {
   agentWakeupRequests,
   approvals,
   authUsers,
+  autonomousBudgetReservations,
+  budgetIncidents,
   budgetPolicies,
   chatActions,
   chatConversations,
@@ -595,6 +597,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       }
     }
     await db.delete(agentWakeupRequests);
+    await db.delete(autonomousBudgetReservations);
+    await db.delete(budgetIncidents);
     await db.delete(budgetPolicies);
     for (let attempt = 0; attempt < 5; attempt += 1) {
       // A still-alive recovery child process can insert a new wakeup request
@@ -4048,10 +4052,59 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
   });
 
-  it("schedules bounded retries for failed accepted interaction continuation wakes", async () => {
+  it("escalates an accepted interaction when pre-provider retry authority is denied", async () => {
     const { companyId, agentId, runId, wakeupRequestId, issueId } =
       await seedQueuedIssueRunFixture();
     const interactionId = randomUUID();
+
+    await db
+      .update(companies)
+      .set({ autonomousExecutionPaused: false })
+      .where(eq(companies.id, companyId));
+    await db.insert(budgetPolicies).values([
+      ...[
+        ["request_count", 8],
+        ["input_tokens", 64_000],
+        ["output_tokens", 8_000],
+        ["runtime_ms", 300_000],
+        ["billed_microusd", 250_000],
+      ].map(([metric, amount]) => ({
+        companyId,
+        scopeType: "company" as const,
+        scopeId: companyId,
+        metric: metric as typeof budgetPolicies.$inferInsert.metric,
+        windowKind: "per_run" as const,
+        amount: amount as number,
+      })),
+      ...[
+        ["request_count", 80],
+        ["input_tokens", 640_000],
+        ["output_tokens", 80_000],
+        ["runtime_ms", 3_000_000],
+        ["billed_microusd", 10_000_000],
+      ].map(([metric, amount]) => ({
+        companyId,
+        scopeType: "task" as const,
+        scopeId: issueId,
+        metric: metric as typeof budgetPolicies.$inferInsert.metric,
+        windowKind: "lifetime" as const,
+        amount: amount as number,
+      })),
+      ...[
+        ["request_count", 8],
+        ["input_tokens", 64_000],
+        ["output_tokens", 8_000],
+        ["runtime_ms", 300_000],
+        ["billed_microusd", 250_000],
+      ].map(([metric, amount]) => ({
+        companyId,
+        scopeType: "task" as const,
+        scopeId: issueId,
+        metric: metric as typeof budgetPolicies.$inferInsert.metric,
+        windowKind: "per_run" as const,
+        amount: amount as number,
+      })),
+    ]);
 
     await db.insert(issueThreadInteractions).values({
       id: interactionId,
@@ -4123,18 +4176,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
     await heartbeat.resumeQueuedRuns();
 
-    const runs = await waitForValue(async () => {
-      const rows = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.agentId, agentId));
-      if (rows.length < 2) return null;
-      // Gate on the *terminal* write of the background recovery, not the
-      // intermediate retry-run commit. recordPlanApprovalResumeFailureRetry
-      // writes the system comment first and updates the interaction
-      // result.resumeFailure last (heartbeat.ts:5627 then :5632), so once
-      // resumeFailure.status is observed the comment + issue update are also
-      // committed and every assertion below is race-free.
+    await waitForRunToSettle(heartbeat, runId);
+    await heartbeat.waitForRunExecutionDrain(runId);
+    const disposition = await waitForValue(async () => {
       const interactionRow = await db
         .select({ result: issueThreadInteractions.result })
         .from(issueThreadInteractions)
@@ -4143,29 +4187,61 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       const result = interactionRow?.result ?? null;
       const resumeFailure =
         result && "resumeFailure" in result ? result.resumeFailure : null;
-      return resumeFailure?.status === "retrying" ? rows : null;
+      return resumeFailure?.status === "needs_attention" ? interactionRow : null;
     });
-    expect(runs).toHaveLength(2);
+    expect(disposition).not.toBeNull();
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
 
     const failedRun = runs?.find((row) => row.id === runId);
-    const retryRun = runs?.find((row) => row.id !== runId);
     expect(failedRun).toMatchObject({
       status: "failed",
       errorCode: "adapter_failed",
     });
-    expect(retryRun).toMatchObject({
-      status: "scheduled_retry",
-      retryOfRunId: runId,
-      scheduledRetryAttempt: 1,
-      scheduledRetryReason: INTERACTION_CONTINUATION_INFRA_RETRY_REASON,
-    });
-    expect(retryRun?.contextSnapshot).toMatchObject({
-      issueId,
-      interactionId,
-      interactionStatus: "accepted",
-      retryReason: INTERACTION_CONTINUATION_INFRA_RETRY_REASON,
-      wakeReason: INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
-      scheduledRetryAttempt: 1,
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    const retryDenialEvents = await db
+      .select({
+        message: heartbeatRunEvents.message,
+        payload: heartbeatRunEvents.payload,
+      })
+      .from(heartbeatRunEvents)
+      .where(
+        and(
+          eq(heartbeatRunEvents.runId, runId),
+          eq(
+            heartbeatRunEvents.message,
+            "Predecessor budget is not durably settled for retry.",
+          ),
+        ),
+      );
+    expect(retryDenialEvents).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          retryReason: INTERACTION_CONTINUATION_INFRA_RETRY_REASON,
+        }),
+      }),
+    ]);
+
+    const reservation = await db
+      .select()
+      .from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(reservation).toMatchObject({
+      status: "released",
+      settlementState: "released_zero_usage",
+      providerActivityOccurred: false,
+      providerRequestId: null,
+      actualRequestCount: null,
+      actualInputTokens: null,
+      actualOutputTokens: null,
+      actualRuntimeMs: null,
+      actualCostCents: null,
     });
 
     const wakeups = await db
@@ -4178,22 +4254,14 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       })
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.agentId, agentId));
-    expect(wakeups.find((row) => row.id === wakeupRequestId)).toMatchObject({
-      status: "failed",
-      reason: "issue_commented",
-      runId,
-    });
-    expect(wakeups.find((row) => row.runId === retryRun?.id)).toMatchObject({
-      status: "queued",
-      reason: INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
-      payload: expect.objectContaining({
-        issueId,
-        interactionId,
-        retryOfRunId: runId,
-        retryReason: INTERACTION_CONTINUATION_INFRA_RETRY_REASON,
-        scheduledRetryAttempt: 1,
+    expect(wakeups).toEqual([
+      expect.objectContaining({
+        id: wakeupRequestId,
+        status: "failed",
+        reason: "issue_commented",
+        runId,
       }),
-    });
+    ]);
 
     const issue = await db
       .select({ status: issues.status, executionRunId: issues.executionRunId })
@@ -4201,8 +4269,20 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue).toEqual({
-      status: "in_progress",
-      executionRunId: retryRun?.id ?? null,
+      status: "blocked",
+      executionRunId: null,
+    });
+
+    const recoveryActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(recoveryActions).toHaveLength(1);
+    expect(recoveryActions[0]).toMatchObject({
+      kind: "stranded_assigned_issue",
+      status: "active",
+      cause: "stranded_assigned_issue",
+      evidence: expect.objectContaining({ latestRunId: runId }),
     });
 
     const comments = await db
@@ -4212,8 +4292,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]).toMatchObject({
       authorType: "system",
-      createdByRunId: runId,
-      body: "Agent failed to resume after approval: `adapter_failed` — retrying (attempt 1/2)",
+      createdByRunId: null,
+      body: "Agent failed to resume after approval: `adapter_failed` — needs attention",
     });
 
     const interaction = await db
@@ -4225,12 +4305,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       version: 1,
       outcome: "accepted",
       resumeFailure: {
-        status: "retrying",
+        status: "needs_attention",
         errorCode: "adapter_failed",
         attempt: 1,
         maxAttempts: 2,
         runId,
-        retryRunId: retryRun?.id ?? null,
+        recoveryActionId: recoveryActions[0]?.id,
       },
     });
     mockAdapterExecute.mockClear();
