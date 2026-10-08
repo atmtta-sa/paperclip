@@ -59,6 +59,22 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(saved.executionStage).toBe("dispatching");
     expect(await revokeExpiredLegacyController(db, run)).toBe(false);
   });
+  it("renews an automatic successor without consuming its launch authorization", async () => {
+    const run = await seed();
+    await db
+      .update(heartbeatRuns)
+      .set({ executionStage: "launch_authorized" })
+      .where(eq(heartbeatRuns.id, run.id));
+
+    expect(await renewLegacyControllerLease(db, run, "dispatching")).toBe(true);
+
+    const [saved] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, run.id));
+    expect(saved.executionStage).toBe("launch_authorized");
+    expect(await revokeExpiredLegacyController(db, run)).toBe(false);
+  });
   it("an expired controller cannot renew or dispatch even before a reaper claims it", async () => {
     const run = await seed();
     await expire(run.id);

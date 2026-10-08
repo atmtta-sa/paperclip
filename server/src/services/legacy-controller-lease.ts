@@ -26,7 +26,17 @@ export async function renewLegacyControllerLease(
 ): Promise<boolean> {
   const [renewed] = await db.update(heartbeatRuns).set({
     controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
-    ...(stage ? { executionStage: stage } : {}),
+    ...(stage
+      ? {
+          // `launch_authorized` is a separate CAS token consumed by run-dispatch;
+          // renewing controller ownership must not consume it first.
+          executionStage: sql`case
+            when ${heartbeatRuns.executionStage} = 'launch_authorized'
+              then ${heartbeatRuns.executionStage}
+            else ${stage}
+          end`,
+        }
+      : {}),
   }).where(and(
     eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
