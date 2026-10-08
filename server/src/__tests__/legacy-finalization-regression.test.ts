@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   agents,
+  budgetPolicies,
   companies,
   completionContracts,
   createDb,
@@ -24,9 +25,30 @@ const adapterExecute = vi.hoisted(() => vi.fn(async () => ({
   signal: null,
   timedOut: false,
   summary: "Legacy adapter completed through the flag-off heartbeat.",
-  resultJson: { summary: "Legacy bytes", nested: { count: 1, ok: true } },
+  resultJson: {
+    summary: "Legacy bytes",
+    nested: { count: 1, ok: true },
+    apiCalls: 1,
+    successfulProviderResponses: 1,
+    usageTelemetryComplete: true,
+    costStatus: "actual",
+    costUnavailableReason: null,
+    cost_usd: 0.000001,
+    providerRequestIds: ["legacy-finalization-response"],
+  },
   provider: "test",
   model: "legacy-test",
+  usage: { inputTokens: 10, outputTokens: 5 },
+  usageBasis: "per_run" as const,
+  budgetTelemetry: {
+    providerRequestId: "legacy-finalization-response",
+    requestCount: 1,
+    inputTokens: 10,
+    outputTokens: 5,
+    runtimeMs: 100,
+    costMicrousd: 1,
+    rateCardVersion: "test-v1",
+  },
 })));
 
 vi.mock("../adapters/index.js", () => ({
@@ -65,6 +87,7 @@ describe("P6-32 legacy finalization regression", () => {
       name: "Legacy snapshot",
       issuePrefix: "LGC",
       status: "active",
+      autonomousExecutionPaused: false,
       defaultResponsibleUserId: "responsible-user",
     });
     await db.insert(projects).values({ id: projectId, companyId, name: "Legacy project", status: "active" });
@@ -94,6 +117,13 @@ describe("P6-32 legacy finalization regression", () => {
       workMode: "standard",
       assigneeAgentId: agentId,
     });
+    await db.insert(budgetPolicies).values([
+      { companyId, scopeType: "task", scopeId: issueId, metric: "request_count", windowKind: "per_run", amount: 8 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "input_tokens", windowKind: "per_run", amount: 64_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "output_tokens", windowKind: "per_run", amount: 8_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "runtime_ms", windowKind: "per_run", amount: 300_000 },
+      { companyId, scopeType: "task", scopeId: issueId, metric: "billed_microusd", windowKind: "per_run", amount: 250_000 },
+    ]);
   }, 30_000);
 
   afterAll(async () => {

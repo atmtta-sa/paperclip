@@ -350,7 +350,7 @@ describeEmbeddedPostgres("autonomous provider circuit", () => {
       provider: "openai-codex",
       credentialIdentifierHash: null,
     };
-    const openedAt = new Date("2026-09-28T17:00:00.000Z");
+    const openedAt = new Date();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await recordAutonomousProviderCircuitOutcome(db, {
         ...scope,
