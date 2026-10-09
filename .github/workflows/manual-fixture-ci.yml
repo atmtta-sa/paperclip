@@ -2,6 +2,9 @@ name: Manual fixture CI
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - fix/baseline-autonomous-test-fixtures
 
 permissions:
   contents: read
