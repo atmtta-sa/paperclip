@@ -12,6 +12,9 @@ import {
   agents,
   approvals,
   assets,
+  autonomousBudgetReservations,
+  budgetIncidents,
+  budgetPolicies,
   companies,
   companyMemberships,
   companySkills,
@@ -44,6 +47,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 import { parseWakePayloadFromMessage } from "./helpers/wake-message.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { errorHandler } from "../middleware/index.js";
@@ -429,9 +433,11 @@ async function seedLowTrustFixture(db: Db) {
     .values({
       name: `Low trust ${nonce}`,
       issuePrefix: `LT${nonce.slice(0, 4).toUpperCase()}`,
+      autonomousExecutionPaused: false,
       defaultResponsibleUserId: "board-user",
     })
     .returning();
+  await seedSyntheticCompanyBudgets(db, company!.id);
   const [allowedProject] = await db
     .insert(projects)
     .values({
@@ -884,6 +890,9 @@ describeEmbeddedPostgres(
       await db.delete(activityLog);
       await db.delete(heartbeatRunEvents);
       await deleteHeartbeatRunsAndWakeupsAfterActivityLogDrains(db);
+      await db.delete(autonomousBudgetReservations);
+      await db.delete(budgetIncidents);
+      await db.delete(budgetPolicies);
       await db.delete(issues);
       await db.delete(agentRuntimeState);
       await db.delete(principalPermissionGrants);

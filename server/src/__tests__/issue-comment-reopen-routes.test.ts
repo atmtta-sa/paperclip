@@ -441,6 +441,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.getDependencyReadiness.mockResolvedValue({
       issueId: "11111111-1111-4111-8111-111111111111",
       blockerIssueIds: [],
+      blockerStates: [],
       unresolvedBlockerIssueIds: [],
       unresolvedBlockerCount: 0,
       allBlockersDone: true,
@@ -1634,6 +1635,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.getDependencyReadiness.mockResolvedValue({
       issueId: "11111111-1111-4111-8111-111111111111",
       blockerIssueIds: [],
+      blockerStates: [],
       unresolvedBlockerIssueIds: [],
       unresolvedBlockerCount: 0,
       allBlockersDone: true,
@@ -1674,6 +1676,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.getDependencyReadiness.mockResolvedValue({
       issueId: "11111111-1111-4111-8111-111111111111",
       blockerIssueIds: [],
+      blockerStates: [],
       unresolvedBlockerIssueIds: [],
       unresolvedBlockerCount: 0,
       allBlockersDone: true,
@@ -3177,6 +3180,13 @@ describe.sequential("issue comment reopen routes", () => {
         id: "dependent-1",
         assigneeAgentId: dependentAgentId,
         blockerIssueIds: [issue.id],
+        blockerStates: [{
+          blockerIssueId: issue.id,
+          blockerKind: "issue_dependency",
+          requiredEvidenceVersion: "issue_done_v1",
+          resolutionState: "resolved",
+          evidenceRevision: 1,
+        }],
       },
     ]);
 

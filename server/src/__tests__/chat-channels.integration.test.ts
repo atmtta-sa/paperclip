@@ -178,6 +178,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 
 const externalTestDatabaseUrl = process.env.PAPERCLIP_TEST_DATABASE_URL;
 const embeddedPostgresSupport = externalTestDatabaseUrl
@@ -23676,6 +23677,26 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       summary: directFinals[execute.mock.calls.length - 1]!,
       provider: "test",
       model: "test-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+      usageBasis: "per_run" as const,
+      budgetTelemetry: {
+        providerRequestId: `chat-shortcut-response-${execute.mock.calls.length}`,
+        requestCount: 1,
+        inputTokens: 10,
+        outputTokens: 5,
+        runtimeMs: 100,
+        costMicrousd: 1,
+        rateCardVersion: "test-v1",
+      },
+      resultJson: {
+        apiCalls: 1,
+        successfulProviderResponses: 1,
+        usageTelemetryComplete: true,
+        costStatus: "actual",
+        costUnavailableReason: null,
+        cost_usd: 0.000001,
+        providerRequestIds: [`chat-shortcut-response-${execute.mock.calls.length}`],
+      },
     }));
     registerServerAdapter({
       type: adapterType,
@@ -23693,8 +23714,12 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     try {
       await db
         .update(companies)
-        .set({ defaultResponsibleUserId: "owner-user" })
+        .set({
+          defaultResponsibleUserId: "owner-user",
+          autonomousExecutionPaused: false,
+        })
         .where(eq(companies.id, fixture.companyId));
+      await seedSyntheticCompanyBudgets(db, fixture.companyId);
       await db
         .update(agents)
         .set({
