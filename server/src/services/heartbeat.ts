@@ -36,6 +36,7 @@ import {
   isAutonomousBudgetAdmissionError,
 } from "./autonomous-budget-dispatch.js";
 import { recordAutonomousProviderCircuitOutcome } from "./autonomous-provider-circuit.js";
+import { resolveReservationBillingPolicy } from "./billing-route-policy.js";
 import { recordContinuityCircuitAlert } from "./continuity-circuit-alert.js";
 import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
 import { managedHermesSettlementProvenance, resolveManagedBudgetVerifier, type ManagedBudgetVerifier } from "./managed-budget-evidence.js";
@@ -20101,6 +20102,10 @@ export function heartbeatService(
     let nativeSessionResumeScheduled = false;
     let nativeOwnershipHeld = false;
     let nativeDispatchStarted = false;
+    let reservationBillingModeForRun: "metered_currency" | "subscription_included" =
+      "metered_currency";
+    let reservationProviderForRun: string | null | undefined;
+    let reservationModelForRun: string | null | undefined;
     let nativeWorkspaceFinalizeScheduled = false;
     let nativeWorkspaceSync: Awaited<
       ReturnType<typeof prepareNativeWorkspaceSync>
@@ -24248,6 +24253,14 @@ export function heartbeatService(
             if (!issueId) {
               throw new Error("autonomous_budget_task_scope_missing");
             }
+            const reservationProvider =
+              readNonEmptyString(runtimeConfig.provider) ?? agent.adapterType;
+            const reservationModel = readNonEmptyString(runtimeConfig.model) ?? null;
+            const reservationBillingPolicy = resolveReservationBillingPolicy(
+              runtimeConfig,
+              reservationProvider,
+              reservationModel,
+            );
             const guardedDispatch =
               await dispatchWithAutonomousBudgetReservation(
                 db,
@@ -24257,12 +24270,15 @@ export function heartbeatService(
                   issueId,
                   runId: run.id,
                   previousRunId: run.retryOfRunId,
-                  provider:
-                    readNonEmptyString(runtimeConfig.provider) ??
-                    agent.adapterType,
-                  model: readNonEmptyString(runtimeConfig.model),
+                  provider: reservationProvider,
+                  model: reservationModel,
+                  billingPolicy: reservationBillingPolicy,
                 },
-                ({ envelope }) => dispatchResolvedInteractionContinuationWithAtomicGate(
+                ({ envelope, billingMode, provider, model }) => {
+                  reservationBillingModeForRun = billingMode;
+                  reservationProviderForRun = provider;
+                  reservationModelForRun = model;
+                  return dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
                   legacyAdapterEntered = true;
                   return adapter.execute({
@@ -24321,7 +24337,8 @@ export function heartbeatService(
                     authToken: authToken ?? undefined,
                   });
                 },
-              ),
+              );
+                },
               );
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
@@ -24697,6 +24714,9 @@ export function heartbeatService(
             !verifiedNoProviderActivity,
           verifiedNoProviderActivity,
           providerRequestId: budgetTelemetry?.providerRequestId ?? null,
+          provider: reservationProviderForRun,
+          model: reservationModelForRun,
+          billingMode: reservationBillingModeForRun,
           actual: budgetTelemetry
             ? {
                 requestCount: budgetTelemetry.requestCount,

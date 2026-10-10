@@ -129,6 +129,56 @@ describe("automatic successor accounting eligibility", () => {
     expect(await eligible(changed)).toBe(true);
   });
 
+  it("accepts a consumed managed Hermes predecessor with exact v3 subscription evidence", async () => {
+    const run = await fixture();
+    const policy = {
+      policyId: "codex-subscription-route", policyVersion: 1,
+      policyDigest: "b".repeat(64), billingMode: "subscription_included" as const,
+      credentialPrincipalId: "managed-account:codex-uat", maxRootChainProviderRequests: 12,
+    };
+    const requestId = `synthetic-subscription-receipt:${run.id}`;
+    const durableCallEvidence = {
+      status: "complete", source: "hermes_sqlite_transport_owner", contractVersion: 3,
+      runId: run.id, complete: true, executionComplete: true, iterationAttempts: 1,
+      providerDispatches: 1, confirmedResponses: 1, pretransportDenials: 0,
+      rejectedAfterDispatch: 0, unknownOutcomes: 0, requestCount: 1,
+      inputTokens: 10, outputTokens: 2, providerRuntimeMs: null,
+      runtimeBasis: null, runtimeApplicability: "unavailable_by_route",
+      providerRequestIds: [requestId],
+      costMicrousd: null, costBasis: "subscription_included",
+      costAuthority: "subscription_route_policy",
+      costAuthorityRef: `${policy.policyId}:${policy.policyVersion}`, estimatedCostUsd: null,
+      terminalDiscrepancies: [], billingMode: "subscription_included",
+      billingAggregation: "single_mode", chargeApplicability: "not_applicable_per_request",
+      monetaryAmountMicrousd: null, monetaryCurrency: null,
+      tokenAccountingBasis: "provider_reported_tokens_v1",
+      routePolicyId: policy.policyId, routePolicyVersion: policy.policyVersion,
+      routePolicyDigest: policy.policyDigest, credentialPrincipalId: policy.credentialPrincipalId,
+      rootChainRequestLimit: policy.maxRootChainProviderRequests,
+    };
+    const adapterResult = { resultJson: { durableCallEvidence } } as any;
+    const settlementEvidence = managedHermesSettlementProvenance(adapterResult, run.id)!;
+    await seedSyntheticCompanyBudgets(db, run.companyId);
+    const scope = { companyId: run.companyId, agentId: run.agentId,
+      issueId: run.contextSnapshot!.issueId as string, runId: run.id };
+    expect(await reserveAutonomousBudget(db, {
+      ...scope, provider: "hermes_local", model: "gpt-5.6-codex", billingPolicy: policy,
+      requested: { requestCount: 2, inputTokens: 20, outputTokens: 4, runtimeMs: 10 },
+    })).toMatchObject({ admitted: true });
+    await reconcileAutonomousBudget(db, {
+      ...scope, providerActivityOccurred: true, providerRequestId: requestId,
+      billingMode: "subscription_included",
+      actual: { requestCount: 1, inputTokens: 10, outputTokens: 2, runtimeMs: null },
+      settlementEvidence,
+    });
+    const changed = await update(run, {
+      resultJson: { executionRecovery: { kind: "provider", providerWorkStarted: true },
+        durableCallEvidence },
+      usageJson: { inputTokens: 10, outputTokens: 2, requestCount: 1, runtimeMs: null },
+    });
+    expect(await eligible(changed)).toBe(true);
+  });
+
   it("denies the persisted request-cap shape despite conversation continuation", () => {
     const persisted = {
       errorCode: "adapter_failed",

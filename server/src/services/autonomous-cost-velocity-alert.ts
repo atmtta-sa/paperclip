@@ -27,7 +27,7 @@ export async function recordAutonomousCostVelocityAlert(
       gte(autonomousBudgetReservations.createdAt, start),
       inArray(autonomousBudgetReservations.status, ["reserved", "reconciled", "retained_missing_telemetry"])));
   const committedCostMicrousd = rows.reduce((total, row) => total + (
-    row.status === "reconciled" ? row.actual ?? row.reserved : row.reserved), 0);
+    row.status === "reconciled" ? row.actual ?? row.reserved ?? 0 : row.reserved ?? 0), 0);
   if (committedCostMicrousd * 4 < policy.amount) return;
 
   const [recent] = await tx.select({ id: activityLog.id }).from(activityLog)

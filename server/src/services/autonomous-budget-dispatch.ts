@@ -53,6 +53,9 @@ export async function dispatchWithAutonomousBudgetReservation<T>(
   dispatch: (reservation: {
     reservationId: string;
     replayed: boolean;
+    billingMode: "metered_currency" | "subscription_included";
+    provider: string | null;
+    model: string | null;
     envelope: AutonomousBudgetEnvelope;
   }) => Promise<T>,
 ): Promise<T> {
@@ -78,6 +81,9 @@ export async function dispatchWithAutonomousBudgetReservation<T>(
   return dispatch({
     reservationId: reservation.reservationId,
     replayed: reservation.replayed,
+    billingMode: reservation.billingMode,
+    provider: reservation.provider,
+    model: reservation.model,
     envelope: reservation.envelope,
   });
 }

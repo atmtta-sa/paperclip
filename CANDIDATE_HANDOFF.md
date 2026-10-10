@@ -197,3 +197,72 @@ Files: `server/src/routes/autonomous-budget-recovery.ts`, its two-line mount in 
 Evidence: initial 18 HTTP cases failed with expected 404 before implementation. Final combined recovery/reservation/cost-route invocation passed all 57 tests (three files) using disposable PostgreSQL. Additional cases prove missing/foreign-run non-disclosure and rollback on a forced real database audit failure. Server `pnpm typecheck`, direct `pnpm exec tsc --noEmit`, and `git diff --check` passed. Existing pnpm, experimental SQLite, and Rust build warnings remain; no full-suite/independent-review claim.
 
 Pre-commit source review was performed by the implementing assistant, without delegation or provider-backed review; it is not independent certification. The commit containing this follow-up identifies its source checkpoint. No deployment, live recovery, provider call, wake, retry, push, or merge is included. Historical billing/source artifacts still need an operator-reviewed evidence bundle and exact named authorization before invocation. Next: obtain separate paused-runtime rollout and named historical-recovery authorization. Provider canary approval remains separate.
+
+## Local checkpoint — provider-neutral settlement contract v3
+
+Branch `fix/provider-neutral-settlement-v3` now supports authoritative contract-v3
+`subscription_included` settlement when runtime is unavailable by route. The accepted shape requires
+`providerRuntimeMs: null`, `runtimeBasis: null`, and
+`runtimeApplicability: "unavailable_by_route"`; mixed measured/unavailable call evidence fails closed.
+Contract-v3 metered evidence remains strict for measured provider runtime, provider-authoritative cost,
+charge applicability, USD monetary consistency, and `provider_reported_tokens_v1`. Contract v1/v2
+behavior remains strict and backward compatible.
+
+Subscription reservations may persist null monetary fields without fabricating per-request cost.
+Metered reservations require non-null monetary values at both schema and migration boundaries.
+Heartbeat settlement uses the persisted admitted billing mode, provider, and model. Reservation replay
+fails before adapter dispatch when billing policy, route-policy binding, provider, or model drifts.
+Automatic-successor settlement preserves the same evidence and binding constraints.
+
+Final provider-free verification after the last edit:
+- Affected server matrix: 5 files, 133 tests passed, 0 failed.
+- Hermes adapter canonical suite: 13 files, 190 tests passed, 0 failed; adapter typecheck passed.
+- Canonical server typecheck, runner protocol/capability/semantic/traceability/build gates: passed.
+- DB typecheck, build, migration numbering, and migration safety checks: passed.
+- Provider/model routing-drift regressions: 2 passed and prove no second adapter invocation.
+- `git diff --check`: passed; normal and EOL-ignored diff stats agree.
+- Independent composite review concluded with `NARROW_VERDICT: PASS` for the final routing-binding
+  remediation; earlier reviewed adapter evidence, settlement, and migration/schema areas had no
+  remaining concrete blocker.
+
+Environment caveat: this host has Node 22.22.2 while the monorepo declares Node >=24.11.0.
+Canonical package tests/typechecks passed with engine warnings. The top-level `hermes verify --json`
+bootstrap is not claimed green because it requires the newer Node runtime and previously interrupted
+workspace dependency links; those links were restored from the unchanged lockfile.
+
+This checkpoint used disposable/local fixtures only. No provider invocation, external mutation, live
+migration, scheduler change, wake, deployment, push, or merge occurred. Continuity UAT should begin
+from the committed revision containing this section, first with provider-free replay/settlement fixtures
+and then, only under a separately named approval, with a disposable live-provider canary. Production
+rollout and historical reconciliation remain separate authorization boundaries.
+
+## Online continuity canary — PASS
+
+A disposable post-commit real-provider continuity canary passed through actual Paperclip orchestration
+and Hermes commit `83963838b5` using `openai-codex` / `gpt-5.6-sol`. One manual initial wake produced
+exactly two successful logical runs and one automatic successor. Run
+`44db8f04-972b-4e1f-adfb-f1c8b6710847` completed `alpha`; run
+`a20183ec-c0c1-4399-a73e-5e22f672dcd0` completed `beta`. Each run made three confirmed provider
+requests, within the approved maximum of four per run. Both contract-v3 reservations reconciled with
+`subscription_included`, null per-request monetary cost, and
+`runtimeApplicability: "unavailable_by_route"`. Session continuity persisted; there were no retries,
+extra descendants, duplicate run markers, or orphan canary processes.
+
+The final adapter compatibility correction requires the real Hermes row-level non-monetary authority
+tuple (`subscription_included`, `subscription_route_policy`, and exact
+`<policyId>:<policyVersion>:<policyDigest>`) while keeping monetary fields null and rejecting policy
+reference drift. Verification after that correction: focused reader 32/32, full Hermes adapter
+191/191 plus typecheck, actual captured writer-database read complete with two confirmed responses,
+provider-free two-run continuity 1/1, focused Paperclip reconciliation 107/107, and independent
+`NARROW_VERDICT: PASS`.
+
+Durable proof:
+`/home/yoga/.hermes/canaries/provider-neutral-settlement-v3-live-20261010-1/proof.json`.
+Output digests:
+- alpha: `dc2c84eddfeb275e1b29e28e49f3b9455531869abf9189d227b9ef7989f02950`
+- beta: `93861dbc1638a10f4756f3c8cb13178244585560c0bd470b8f7351cc53042de6`
+
+No deployment, push, merge, shared migration, shared scheduler mutation, historical reconciliation, or
+production/customer-data mutation occurred. The Paperclip reader correction and regression are committed
+at `6166c7461`; the matching Hermes runtime/evidence changes and regressions are committed at
+`83963838b5`. Both commits remain local pending separate push/merge authorization.

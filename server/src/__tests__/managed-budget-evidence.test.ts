@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { verifyManagedBudgetEvidence, resolveManagedBudgetVerifier } from "../services/managed-budget-evidence.js";
+import {
+  managedHermesSettlementProvenance,
+  verifyManagedBudgetEvidence,
+  resolveManagedBudgetVerifier,
+} from "../services/managed-budget-evidence.js";
 
 const telemetry = {
   providerRequestId: "synthetic-response-1", requestCount: 2,
@@ -18,6 +22,26 @@ const completeDurableEvidence = {
   costAuthority: "provider_usage_response",
   costAuthorityRef: "synthetic-response-1", estimatedCostUsd: 0,
   terminalDiscrepancies: [],
+};
+const completeSubscriptionEvidence = {
+  status: "complete", source: "hermes_sqlite_transport_owner", contractVersion: 3,
+  runId: "synthetic-run", complete: true, executionComplete: true, iterationAttempts: 2,
+  providerDispatches: 2, confirmedResponses: 2, pretransportDenials: 0,
+  rejectedAfterDispatch: 0, unknownOutcomes: 0, requestCount: 2,
+  inputTokens: 200, outputTokens: 40,
+  providerRequestIds: ["synthetic-response-1", "synthetic-response-2"],
+  providerRuntimeMs: null, runtimeBasis: null,
+  runtimeApplicability: "unavailable_by_route",
+  costMicrousd: null, costBasis: "subscription_included",
+  costAuthority: "subscription_route_policy",
+  costAuthorityRef: "codex-subscription-route:1", estimatedCostUsd: null,
+  terminalDiscrepancies: [], billingMode: "subscription_included",
+  billingAggregation: "single_mode", chargeApplicability: "not_applicable_per_request",
+  monetaryAmountMicrousd: null, monetaryCurrency: null,
+  tokenAccountingBasis: "provider_reported_tokens_v1",
+  routePolicyId: "codex-subscription-route", routePolicyVersion: 1,
+  routePolicyDigest: "b".repeat(64), credentialPrincipalId: "managed-account:codex-uat",
+  rootChainRequestLimit: 12,
 };
 function result(): AdapterExecutionResult {
   return {
@@ -38,6 +62,67 @@ describe("managed settlement evidence boundary", () => {
     const input = result();
     expect(verifyManagedBudgetEvidence(input, input.usage!, "synthetic-run")).toBeNull();
   });
+  it("accepts contract-v3 subscription resources without fabricating monetary cost", () => {
+    const input = result();
+    input.resultJson = { durableCallEvidence: completeSubscriptionEvidence };
+    input.budgetTelemetry = {
+      ...telemetry,
+      runtimeMs: null,
+      costMicrousd: null,
+      rateCardVersion: "hermes-provider-evidence-v3",
+    } as any;
+    expect(verifyManagedBudgetEvidence(input, input.usage!, "synthetic-run")).toEqual(
+      input.budgetTelemetry,
+    );
+    expect(managedHermesSettlementProvenance(input, "synthetic-run")).toMatchObject({
+      contractVersion: 3,
+      billingMode: "subscription_included",
+      routePolicyId: "codex-subscription-route",
+      routePolicyVersion: 1,
+      routePolicyDigest: "b".repeat(64),
+      runtimeBasis: null,
+      runtimeApplicability: "unavailable_by_route",
+    });
+  });
+  it("accepts contract-v3 metered evidence only with measured runtime and provider cost", () => {
+    const input = result();
+    const meteredV3 = {
+      ...completeDurableEvidence,
+      contractVersion: 3,
+      billingMode: "metered_currency",
+      billingAggregation: "single_mode",
+      chargeApplicability: "charge_applicable",
+      monetaryAmountMicrousd: 280,
+      monetaryCurrency: "USD",
+      tokenAccountingBasis: "provider_reported_tokens_v1",
+    };
+    input.resultJson = { durableCallEvidence: meteredV3 };
+    expect(verifyManagedBudgetEvidence(input, input.usage!, "synthetic-run")).toEqual(
+      input.budgetTelemetry,
+    );
+    expect(managedHermesSettlementProvenance(input, "synthetic-run")).toMatchObject({
+      contractVersion: 3,
+      costBasis: "provider_actual",
+      runtimeBasis: "confirmed_provider_call_ms_v1",
+    });
+  });
+  it.each([undefined, "unknown"])(
+    "rejects contract-v3 metered evidence with token basis %s",
+    (tokenAccountingBasis) => {
+      const input = result();
+      input.resultJson = { durableCallEvidence: {
+        ...completeDurableEvidence,
+        contractVersion: 3,
+        billingMode: "metered_currency",
+        billingAggregation: "single_mode",
+        chargeApplicability: "charge_applicable",
+        monetaryAmountMicrousd: 280,
+        monetaryCurrency: "USD",
+        tokenAccountingBasis,
+      } };
+      expect(verifyManagedBudgetEvidence(input, input.usage!, "synthetic-run")).toBeNull();
+    },
+  );
   it("rejects self-asserted subscription authority without an independent artifact", () => {
     const input = result();
     const subscriptionEvidence = {

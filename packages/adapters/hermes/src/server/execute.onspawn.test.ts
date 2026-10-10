@@ -61,13 +61,17 @@ import * as serverUtils from "@paperclipai/adapter-utils/server-utils";
 
 const noDurableEvidence = {
   status: "read_failed" as const, source: "hermes_sqlite_transport_owner" as const,
-  contractVersion: null, runId: "test-run-1", complete: false,
+  contractVersion: null, runId: "test-run-1", complete: false, executionComplete: false,
   iterationAttempts: 0, providerDispatches: 0, confirmedResponses: 0,
-  pretransportDenials: 0, unknownOutcomes: 0, requestCount: 0,
+  pretransportDenials: 0, rejectedAfterDispatch: 0, unknownOutcomes: 0, requestCount: 0,
   inputTokens: 0, outputTokens: 0, providerRequestIds: [], estimatedCostUsd: null,
   providerRuntimeMs: null, runtimeBasis: null, costMicrousd: null, costBasis: null,
   costAuthority: null, costAuthorityRef: null,
   rateCardSnapshots: [], terminalDiscrepancies: [],
+  billingMode: null, billingAggregation: null, chargeApplicability: null,
+  monetaryAmountMicrousd: null, monetaryCurrency: null, tokenAccountingBasis: null,
+  routePolicyId: null, routePolicyVersion: null, routePolicyDigest: null,
+  credentialPrincipalId: null, rootChainRequestLimit: null,
 };
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
@@ -135,13 +139,18 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     const { ctx } = makeCtx();
     const evidence = {
       status: "complete" as const, source: "hermes_sqlite_transport_owner" as const,
-      contractVersion: 1, runId: ctx.runId, complete: true,
+      contractVersion: 1, runId: ctx.runId, complete: true, executionComplete: true,
       iterationAttempts: 1, providerDispatches: 1, pretransportDenials: 0,
+      rejectedAfterDispatch: 0,
       unknownOutcomes: 0, requestCount: 1, confirmedResponses: 1,
       inputTokens: 100, outputTokens: 20, providerRequestIds: ["synthetic-1"],
       estimatedCostUsd: 0.00014, providerRuntimeMs: null, runtimeBasis: null,
       costMicrousd: null, costBasis: null, costAuthority: null, costAuthorityRef: null,
       rateCardSnapshots: [], terminalDiscrepancies: [],
+      billingMode: null, billingAggregation: null, chargeApplicability: null,
+      monetaryAmountMicrousd: null, monetaryCurrency: null, tokenAccountingBasis: null,
+      routePolicyId: null, routePolicyVersion: null, routePolicyDigest: null,
+      credentialPrincipalId: null, rootChainRequestLimit: null,
     };
     vi.mocked(readDurableHermesCallEvidence).mockReturnValueOnce(evidence);
     const result = await execute(ctx as any);
@@ -233,6 +242,58 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       version: 1,
       intent: "implementation",
       maxProviderResponsesWithoutDurableProgress: 2,
+    });
+  });
+
+  it("binds an approved subscription route policy before launch and emits null-cost resources", async () => {
+    const billingRoutePolicy = {
+      policyId: "codex-subscription-route", policyVersion: 1,
+      policyDigest: "b".repeat(64), provider: "openai-codex",
+      route: "https://chatgpt.com/backend-api/codex",
+      credentialPrincipalId: "managed-account:codex-uat", modelScope: ["gpt-5.6-codex"],
+      billingMode: "subscription_included", status: "active",
+      validFrom: "2026-10-01T00:00:00.000Z", validUntil: "2026-11-01T00:00:00.000Z",
+      maxRootChainProviderRequests: 12,
+    };
+    const { ctx } = makeCtx({
+      provider: "openai-codex", model: "gpt-5.6-codex", billingRoutePolicy,
+    });
+    (ctx as any).autonomousBudgetEnvelope = {
+      requestCount: 4, inputTokens: 25_000, outputTokens: 4_000,
+      runtimeMs: 300_000, costMicrousd: null,
+    };
+    const evidence = {
+      ...noDurableEvidence, status: "complete" as const, contractVersion: 3,
+      complete: true, executionComplete: true, providerDispatches: 1,
+      confirmedResponses: 1, requestCount: 1, inputTokens: 100, outputTokens: 20,
+      providerRequestIds: ["response-sub-1"], providerRuntimeMs: null,
+      runtimeBasis: null, runtimeApplicability: "unavailable_by_route" as const,
+      costBasis: "subscription_included" as const,
+      costAuthority: "subscription_route_policy" as const,
+      costAuthorityRef: "codex-subscription-route:1", billingMode: "subscription_included" as const,
+      billingAggregation: "single_mode" as const,
+      chargeApplicability: "not_applicable_per_request" as const,
+      monetaryAmountMicrousd: null, monetaryCurrency: null,
+      tokenAccountingBasis: "provider_reported_tokens_v1",
+      routePolicyId: billingRoutePolicy.policyId, routePolicyVersion: 1,
+      routePolicyDigest: billingRoutePolicy.policyDigest,
+      credentialPrincipalId: billingRoutePolicy.credentialPrincipalId,
+      rootChainRequestLimit: 12,
+    };
+    vi.mocked(readDurableHermesCallEvidence).mockReturnValueOnce(evidence as any);
+
+    const result = await execute(ctx as any);
+
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const env = (call[3] as { env: Record<string, string> }).env;
+    expect(JSON.parse(env.HERMES_BILLING_ROUTE_POLICY_JSON)).toEqual(billingRoutePolicy);
+    expect(readDurableHermesCallEvidence).toHaveBeenCalledWith(
+      expect.stringContaining("paperclip-visualization-tool-developer"), ctx.runId, null,
+      billingRoutePolicy,
+    );
+    expect(result.budgetTelemetry).toMatchObject({
+      providerRequestId: "response-sub-1", requestCount: 1,
+      inputTokens: 100, outputTokens: 20, runtimeMs: null, costMicrousd: null,
     });
   });
 
@@ -858,9 +919,9 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     );
     const durableCallEvidence = {
       status: "complete" as const, source: "hermes_sqlite_transport_owner" as const,
-      contractVersion: 2, runId: "test-run-1", complete: true,
+      contractVersion: 2, runId: "test-run-1", complete: true, executionComplete: true,
       iterationAttempts: 2, providerDispatches: 1, confirmedResponses: 1,
-      pretransportDenials: 1, unknownOutcomes: 0, requestCount: 1,
+      pretransportDenials: 1, rejectedAfterDispatch: 0, unknownOutcomes: 0, requestCount: 1,
       inputTokens: 100, outputTokens: 20, providerRequestIds: ["response-1"],
       providerRuntimeMs: 10, runtimeBasis: "confirmed_provider_call_ms_v1" as const,
       costMicrousd: 280, costBasis: "provider_actual" as const,
@@ -868,6 +929,11 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       costAuthorityRef: "response-1", estimatedCostUsd: 0,
       rateCardSnapshots: [{ rate_card_id: "a".repeat(64), currency: "USD" }],
       terminalDiscrepancies: [],
+      billingMode: "metered_currency" as const, billingAggregation: "single_mode" as const,
+      chargeApplicability: "charge_applicable" as const,
+      monetaryAmountMicrousd: 280, monetaryCurrency: "USD", tokenAccountingBasis: null,
+      routePolicyId: null, routePolicyVersion: null, routePolicyDigest: null,
+      credentialPrincipalId: null, rootChainRequestLimit: null,
     };
     vi.mocked(readDurableHermesCallEvidence).mockReturnValueOnce(durableCallEvidence);
     const { ctx } = makeCtx({ provider: "openai-codex" });
