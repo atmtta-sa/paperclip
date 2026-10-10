@@ -235,3 +235,33 @@ migration, scheduler change, wake, deployment, push, or merge occurred. Continui
 from the committed revision containing this section, first with provider-free replay/settlement fixtures
 and then, only under a separately named approval, with a disposable live-provider canary. Production
 rollout and historical reconciliation remain separate authorization boundaries.
+
+## Online continuity canary — PASS
+
+A disposable real-provider continuity canary passed through actual Paperclip orchestration and the
+matching Hermes runtime using `openai-codex` / `gpt-5.6-sol`. One manual initial wake produced exactly
+two successful logical runs and one automatic successor. Run
+`91fb9c99-b1da-433c-b3e0-a18a2b8aac8e` completed `alpha`; run
+`f40a9d00-576b-456e-a568-6a56fef393a4` completed `beta`. Each run made three confirmed provider
+requests, within the approved maximum of four per run. Both contract-v3 reservations reconciled with
+`subscription_included`, null per-request monetary cost, and
+`runtimeApplicability: "unavailable_by_route"`. Session continuity persisted; there were no retries,
+extra descendants, duplicate run markers, or orphan canary processes.
+
+The final adapter compatibility correction requires the real Hermes row-level non-monetary authority
+tuple (`subscription_included`, `subscription_route_policy`, and exact
+`<policyId>:<policyVersion>:<policyDigest>`) while keeping monetary fields null and rejecting policy
+reference drift. Verification after that correction: focused reader 32/32, full Hermes adapter
+191/191 plus typecheck, actual captured writer-database read complete with two confirmed responses,
+provider-free two-run continuity 1/1, focused Paperclip reconciliation 107/107, and independent
+`NARROW_VERDICT: PASS`.
+
+Durable proof:
+`/home/yoga/.hermes/canaries/provider-neutral-settlement-v3-live-20261010-1/proof.json`.
+Output digests:
+- alpha: `dc2c84eddfeb275e1b29e28e49f3b9455531869abf9189d227b9ef7989f02950`
+- beta: `93861dbc1638a10f4756f3c8cb13178244585560c0bd470b8f7351cc53042de6`
+
+No deployment, push, merge, shared migration, shared scheduler mutation, historical reconciliation, or
+production/customer-data mutation occurred. The Paperclip reader correction, its regression, this
+handoff update, and the matching Hermes runtime changes remain uncommitted pending repository finish.

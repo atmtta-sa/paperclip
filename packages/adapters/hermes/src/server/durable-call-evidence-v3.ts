@@ -125,8 +125,11 @@ export function summarizeV3(
       row.token_accounting_basis === TOKEN_BASIS && policyMatchesAttempt(policy, row, now)) &&
     calls.every((row) => row.charge_applicability === "not_applicable_per_request" &&
       row.monetary_amount_microusd == null && row.monetary_currency == null &&
-      row.cost_microusd == null && row.cost_basis == null && row.cost_authority == null &&
-      row.cost_authority_ref == null && row.token_accounting_basis === TOKEN_BASIS);
+      row.cost_microusd == null && row.cost_basis === "subscription_included" &&
+      row.cost_authority === "subscription_route_policy" &&
+      row.cost_authority_ref ===
+        `${policy!.policyId}:${policy!.policyVersion}:${policy!.policyDigest}` &&
+      row.token_accounting_basis === TOKEN_BASIS);
   const discrepancies = terminalDiscrepancies(
     terminal, inputTokens, outputTokens, validCalls.length,
   );

@@ -84,6 +84,9 @@ function subscriptionFixture(overrides: Record<string, unknown> = {}) {
     tokenBasis: "provider_reported_tokens_v1",
     monetaryAmount: null,
     monetaryCurrency: null,
+    costBasis: "subscription_included",
+    costAuthority: "subscription_route_policy",
+    costAuthorityRef: `${subscriptionPolicy.policyId}:${subscriptionPolicy.policyVersion}:${subscriptionPolicy.policyDigest}`,
     ...overrides,
   };
   db.prepare(`INSERT INTO provider_transport_attempts
@@ -101,9 +104,10 @@ function subscriptionFixture(overrides: Record<string, unknown> = {}) {
      cost_authority_ref,created_at,billing_mode,charge_applicability,monetary_amount_microusd,
      monetary_currency,token_accounting_basis,runtime_applicability)
     VALUES ('attempt-sub','session-sub',1,'response-sub','openai-codex','gpt-5.6-codex',
-     'https://chatgpt.com/backend-api/codex',120,30,NULL,NULL,NULL,NULL,NULL,NULL,
-     NULL,1,?,?,?,?,?,?)`)
-    .run(values.billingMode, values.chargeApplicability, values.monetaryAmount,
+     'https://chatgpt.com/backend-api/codex',120,30,NULL,NULL,NULL,NULL,?,?,?,
+     1,?,?,?,?,?,?)`)
+    .run(values.costBasis, values.costAuthority, values.costAuthorityRef,
+      values.billingMode, values.chargeApplicability, values.monetaryAmount,
       values.monetaryCurrency, values.tokenBasis, "unavailable_by_route");
   db.close();
   return home;
@@ -142,6 +146,13 @@ describe("read-only durable managed evidence", () => {
       credentialPrincipalId: subscriptionPolicy.credentialPrincipalId,
       rootChainRequestLimit: subscriptionPolicy.maxRootChainProviderRequests,
     });
+  });
+  it("rejects v3 subscription call authority that drifts from the bound route policy", () => {
+    const evidence = readDurableHermesCallEvidence(
+      subscriptionFixture({ costAuthorityRef: "other-policy:1:bad" }),
+      "run-sub", null, subscriptionPolicy,
+    );
+    expect(evidence).toMatchObject({ status: "incomplete", complete: false, requestCount: 0 });
   });
   it("preserves strict metered evidence when the store contract is v3", () => {
     const home = fixture();
