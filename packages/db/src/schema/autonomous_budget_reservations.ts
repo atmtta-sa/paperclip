@@ -1,6 +1,8 @@
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -38,14 +40,27 @@ export const autonomousBudgetReservations = pgTable(
     reservedInputTokens: bigint("reserved_input_tokens", { mode: "number" }).notNull().default(0),
     reservedOutputTokens: bigint("reserved_output_tokens", { mode: "number" }).notNull().default(0),
     reservedRuntimeMs: bigint("reserved_runtime_ms", { mode: "number" }).notNull().default(0),
-    reservedCostCents: integer("reserved_cost_cents").notNull().default(0),
-    reservedCostMicrousd: bigint("reserved_cost_microusd", { mode: "number" }).notNull().default(0),
+    reservedCostCents: integer("reserved_cost_cents").default(0),
+    reservedCostMicrousd: bigint("reserved_cost_microusd", { mode: "number" }).default(0),
     actualRequestCount: integer("actual_request_count"),
     actualInputTokens: bigint("actual_input_tokens", { mode: "number" }),
     actualOutputTokens: bigint("actual_output_tokens", { mode: "number" }),
     actualRuntimeMs: bigint("actual_runtime_ms", { mode: "number" }),
     actualCostCents: integer("actual_cost_cents"),
     actualCostMicrousd: bigint("actual_cost_microusd", { mode: "number" }),
+    billingMode: text("billing_mode")
+      .$type<"metered_currency" | "subscription_included">()
+      .notNull()
+      .default("metered_currency"),
+    monetaryApplicability: text("monetary_applicability")
+      .$type<"applicable_per_request" | "not_applicable_per_request">()
+      .notNull()
+      .default("applicable_per_request"),
+    routePolicyId: text("route_policy_id"),
+    routePolicyVersion: integer("route_policy_version"),
+    routePolicyDigest: text("route_policy_digest"),
+    credentialPrincipalId: text("credential_principal_id"),
+    rootChainRequestLimit: integer("root_chain_request_limit"),
     overrunInputTokens: bigint("overrun_input_tokens", { mode: "number" }).notNull().default(0),
     provider: text("provider"),
     model: text("model"),
@@ -59,7 +74,15 @@ export const autonomousBudgetReservations = pgTable(
       runId: string;
       digestSha256: string;
       costBasis: string;
-      runtimeBasis: string;
+      runtimeBasis: string | null;
+      runtimeApplicability?: string | null;
+      billingMode?: string;
+      routePolicyId?: string;
+      routePolicyVersion?: number;
+      routePolicyDigest?: string;
+      credentialPrincipalId?: string;
+      rootChainRequestLimit?: number;
+      tokenAccountingBasis?: string;
     } | null>(),
     reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -84,6 +107,25 @@ export const autonomousBudgetReservations = pgTable(
       table.companyId,
       table.agentId,
       table.createdAt,
+    ),
+    billingShapeCheck: check(
+      "autonomous_budget_reservations_billing_shape_check",
+      sql`(
+        (${table.billingMode} = 'metered_currency'
+          and ${table.monetaryApplicability} = 'applicable_per_request'
+          and ${table.reservedCostCents} is not null
+          and ${table.reservedCostMicrousd} is not null)
+        or
+        (${table.billingMode} = 'subscription_included'
+          and ${table.monetaryApplicability} = 'not_applicable_per_request'
+          and ${table.reservedCostCents} is null
+          and ${table.reservedCostMicrousd} is null
+          and ${table.routePolicyId} is not null
+          and ${table.routePolicyVersion} is not null and ${table.routePolicyVersion} > 0
+          and ${table.routePolicyDigest} ~ '^[a-f0-9]{64}$'
+          and ${table.credentialPrincipalId} is not null
+          and ${table.rootChainRequestLimit} is not null and ${table.rootChainRequestLimit} > 0)
+      )`,
     ),
   }),
 );

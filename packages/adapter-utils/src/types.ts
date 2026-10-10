@@ -127,8 +127,8 @@ export interface AdapterExecutionResult {
     requestCount: number;
     inputTokens: number;
     outputTokens: number;
-    runtimeMs: number;
-    costMicrousd: number;
+    runtimeMs: number | null;
+    costMicrousd: number | null;
     rateCardVersion?: string | null;
   } | null;
   resultJson?: Record<string, unknown> | null;
@@ -223,7 +223,7 @@ export interface AdapterExecutionContext {
     inputTokens: number;
     outputTokens: number;
     runtimeMs: number;
-    costMicrousd: number;
+    costMicrousd: number | null;
   };
   runId: string;
   agent: AdapterAgent;

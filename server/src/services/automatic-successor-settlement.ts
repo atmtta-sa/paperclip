@@ -49,9 +49,28 @@ function safeCount(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
+function authoritativeRuntimePair(durable: Record<string, unknown>): boolean {
+  const measured = safeCount(durable.providerRuntimeMs) &&
+    durable.runtimeBasis === "confirmed_provider_call_ms_v1";
+  const unavailable = durable.contractVersion === 3 && durable.providerRuntimeMs === null &&
+    durable.runtimeBasis === null && durable.runtimeApplicability === "unavailable_by_route";
+  return measured || unavailable;
+}
+
 function authoritativeCostPair(durable: Record<string, unknown>): boolean {
   return durable.costBasis === "provider_actual" &&
     durable.costAuthority === "provider_usage_response";
+}
+
+function authoritativeSubscriptionPair(durable: Record<string, unknown>): boolean {
+  return durable.contractVersion === 3 && durable.billingMode === "subscription_included" &&
+    durable.billingAggregation === "single_mode" &&
+    durable.chargeApplicability === "not_applicable_per_request" &&
+    durable.monetaryAmountMicrousd === null && durable.monetaryCurrency === null &&
+    durable.costMicrousd === null && durable.estimatedCostUsd === null &&
+    durable.costBasis === "subscription_included" &&
+    durable.costAuthority === "subscription_route_policy" &&
+    durable.tokenAccountingBasis === "provider_reported_tokens_v1";
 }
 
 function authoritativeSettlementPair(durable: Record<string, unknown>): boolean {
@@ -60,7 +79,7 @@ function authoritativeSettlementPair(durable: Record<string, unknown>): boolean 
       durable.costAuthority === "transport_owner_never_crossed" &&
       durable.costAuthorityRef === `exact-run-denial:${String(durable.runId)}`;
   }
-  return authoritativeCostPair(durable);
+  return authoritativeCostPair(durable) || authoritativeSubscriptionPair(durable);
 }
 
 export async function managedHermesSuccessorBinding(db: Db, run: Run) {
@@ -75,7 +94,7 @@ export async function managedHermesSuccessorBinding(db: Db, run: Run) {
   if (!reservation || reservation.provider !== "hermes_local") return null;
   const evidence = object(reservation.settlementEvidence);
   if (!evidence || evidence.source !== "hermes_sqlite_transport_owner" ||
-      evidence.contractVersion !== 2 || evidence.runId !== run.id ||
+      ![2, 3].includes(evidence.contractVersion as number) || evidence.runId !== run.id ||
       typeof evidence.digestSha256 !== "string" ||
       !/^[a-f0-9]{64}$/.test(evidence.digestSha256)) return null;
   return evidence;
@@ -103,7 +122,8 @@ function matchingDurableEvidence(
     durable.confirmedResponses, durable.pretransportDenials, durable.unknownOutcomes,
     durable.requestCount, durable.inputTokens, durable.outputTokens];
   if (durable.status !== "complete" || durable.source !== "hermes_sqlite_transport_owner" ||
-      durable.contractVersion !== 2 || durable.runId !== run.id || durable.complete !== true ||
+      ![2, 3].includes(durable.contractVersion as number) || durable.runId !== run.id ||
+      durable.complete !== true ||
       !Array.isArray(durable.terminalDiscrepancies) || durable.terminalDiscrepancies.length > 0 ||
       counts.some((value) => !safeCount(value)) || durable.unknownOutcomes !== 0 || !requestIds ||
       durable.iterationAttempts !== (durable.providerDispatches as number) +
@@ -111,16 +131,33 @@ function matchingDurableEvidence(
       durable.providerDispatches !== durable.confirmedResponses ||
       durable.requestCount !== durable.providerDispatches ||
       requestIds.length !== durable.confirmedResponses || new Set(requestIds).size !== requestIds.length ||
-      !safeCount(durable.providerRuntimeMs) ||
-      durable.runtimeBasis !== "confirmed_provider_call_ms_v1" ||
-      !safeCount(durable.costMicrousd) ||
+      !authoritativeRuntimePair(durable) ||
       !authoritativeSettlementPair(durable) ||
       typeof durable.costAuthorityRef !== "string" || !durable.costAuthorityRef.trim() ||
       !provenance || provenance.source !== durable.source ||
       provenance.contractVersion !== durable.contractVersion || provenance.runId !== durable.runId ||
       provenance.costBasis !== durable.costBasis || provenance.runtimeBasis !== durable.runtimeBasis ||
+      (durable.contractVersion === 3 &&
+       provenance.runtimeApplicability !== (durable.runtimeApplicability ?? null)) ||
       provenance.digestSha256 !== managedHermesEvidenceDigest(durable)) return false;
-  const costMicrousd = durable.costMicrousd as number;
+  const subscription = authoritativeSubscriptionPair(durable);
+  if (subscription &&
+      (provenance.billingMode !== durable.billingMode ||
+       provenance.routePolicyId !== durable.routePolicyId ||
+       provenance.routePolicyVersion !== durable.routePolicyVersion ||
+       provenance.routePolicyDigest !== durable.routePolicyDigest ||
+       provenance.credentialPrincipalId !== durable.credentialPrincipalId ||
+       provenance.rootChainRequestLimit !== durable.rootChainRequestLimit ||
+       reservation.billingMode !== durable.billingMode ||
+       reservation.routePolicyId !== durable.routePolicyId ||
+       reservation.routePolicyVersion !== durable.routePolicyVersion ||
+       reservation.routePolicyDigest !== durable.routePolicyDigest ||
+       reservation.credentialPrincipalId !== durable.credentialPrincipalId ||
+       reservation.rootChainRequestLimit !== durable.rootChainRequestLimit ||
+       reservation.monetaryApplicability !== "not_applicable_per_request" ||
+       reservation.reservedCostMicrousd !== null || reservation.actualCostMicrousd !== null)) return false;
+  if (!subscription && !safeCount(durable.costMicrousd)) return false;
+  const costMicrousd = durable.costMicrousd as number | null;
   if (durable.providerDispatches === 0) {
     return reservation.status === "released" && reservation.providerRequestId == null &&
       durable.pretransportDenials === durable.iterationAttempts && durable.inputTokens === 0 &&
@@ -162,12 +199,22 @@ function consumedSettlement(run: Run, reservation: Reservation): boolean {
       !reservation.providerRequestId?.trim() || run.resultJson?.pretransportEvidence != null ||
       (reservation.provider === "hermes_local" && run.resultJson?.durableCallEvidence == null) ||
       !matchingUsage(run, reservation)) return false;
+  const subscription = reservation.billingMode === "subscription_included";
+  const provenance = object(reservation.settlementEvidence);
+  const runtimeUnavailable = subscription && reservation.actualRuntimeMs === null &&
+    provenance?.runtimeBasis === null &&
+    provenance.runtimeApplicability === "unavailable_by_route";
+  if (reservation.actualRuntimeMs === null && !runtimeUnavailable) return false;
   const quantities = [reservation.actualRequestCount, reservation.actualInputTokens,
-    reservation.actualOutputTokens, reservation.actualRuntimeMs, reservation.actualCostMicrousd];
+    reservation.actualOutputTokens,
+    ...(reservation.actualRuntimeMs === null ? [] : [reservation.actualRuntimeMs]),
+    ...(subscription ? [] : [reservation.actualCostMicrousd])];
   if (quantities.some((value) => value == null || !Number.isSafeInteger(value) || value < 0) ||
       reservation.actualRequestCount! < 1) return false;
   const reserved = [reservation.reservedRequestCount, reservation.reservedInputTokens,
-    reservation.reservedOutputTokens, reservation.reservedRuntimeMs, reservation.reservedCostMicrousd];
+    reservation.reservedOutputTokens,
+    ...(reservation.actualRuntimeMs === null ? [] : [reservation.reservedRuntimeMs]),
+    ...(subscription ? [] : [reservation.reservedCostMicrousd])];
   if (quantities.some((value, index) => value! > reserved[index]!)) return false;
   const expectedState = quantities.some((value, index) => value! < reserved[index]!)
     ? "partially_consumed" : "consumed";

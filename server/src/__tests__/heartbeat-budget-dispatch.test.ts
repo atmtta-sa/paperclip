@@ -122,6 +122,48 @@ describeEmbeddedPostgres("heartbeat budget dispatch gate", () => {
     ]);
   });
 
+  it.each([
+    ["metered to subscription", null, {
+      policyId: "subscription-route", policyVersion: 1, policyDigest: "b".repeat(64),
+      billingMode: "subscription_included" as const,
+      credentialPrincipalId: "managed-account:test", maxRootChainProviderRequests: 12,
+    }],
+    ["subscription to metered", {
+      policyId: "subscription-route", policyVersion: 1, policyDigest: "b".repeat(64),
+      billingMode: "subscription_included" as const,
+      credentialPrincipalId: "managed-account:test", maxRootChainProviderRequests: 12,
+    }, null],
+  ])("denies replay dispatch on %s billing drift", async (_name, initialPolicy, replayPolicy) => {
+    const scope = await seedScope();
+    const runId = randomUUID();
+    const adapter = vi.fn(async () => "adapter-result");
+
+    await dispatchWithAutonomousBudgetReservation(
+      db, { ...scope, runId, billingPolicy: initialPolicy }, adapter,
+    );
+    await expect(dispatchWithAutonomousBudgetReservation(
+      db, { ...scope, runId, billingPolicy: replayPolicy }, adapter,
+    )).rejects.toThrow("autonomous_budget_reservation_billing_policy_mismatch");
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["provider", { provider: "provider-a", model: "model-a" },
+      { provider: "provider-b", model: "model-a" }],
+    ["model", { provider: "provider-a", model: "model-a" },
+      { provider: "provider-a", model: "model-b" }],
+  ])("denies replay dispatch on %s routing drift", async (_name, initial, replay) => {
+    const scope = await seedScope();
+    const runId = randomUUID();
+    const adapter = vi.fn(async () => "adapter-result");
+
+    await dispatchWithAutonomousBudgetReservation(db, { ...scope, runId, ...initial }, adapter);
+    await expect(dispatchWithAutonomousBudgetReservation(
+      db, { ...scope, runId, ...replay }, adapter,
+    )).rejects.toThrow("autonomous_budget_reservation_execution_binding_mismatch");
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
   it("denies new and replay dispatch while autonomous execution is paused", async () => {
     const scope = await seedScope();
     const runId = randomUUID();

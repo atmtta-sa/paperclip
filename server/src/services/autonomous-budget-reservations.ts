@@ -26,7 +26,7 @@ export type AutonomousBudgetRequest = {
 export type AutonomousBudgetEnvelope = Omit<
   AutonomousBudgetRequest,
   "costMicrousd" | "costCents"
-> & { costMicrousd: number };
+> & { costMicrousd: number | null };
 
 type NormalizedAutonomousBudgetRequest = AutonomousBudgetEnvelope;
 
@@ -41,6 +41,14 @@ export type AutonomousBudgetReservationInput = {
   model?: string | null;
   credentialIdentifierHash?: string | null;
   rateCardVersion?: string | null;
+  billingPolicy?: {
+    policyId: string;
+    policyVersion: number;
+    policyDigest: string;
+    billingMode: "metered_currency" | "subscription_included";
+    credentialPrincipalId: string;
+    maxRootChainProviderRequests: number;
+  } | null;
 };
 
 export type BudgetBlockReason =
@@ -77,7 +85,22 @@ function nonNegativeInteger(value: number): number {
   return value;
 }
 
-function normalizeBudgetRequest(requested: AutonomousBudgetRequest): NormalizedAutonomousBudgetRequest {
+function normalizeBudgetRequest(
+  requested: AutonomousBudgetRequest,
+  billingMode: "metered_currency" | "subscription_included" = "metered_currency",
+): NormalizedAutonomousBudgetRequest {
+  if (billingMode === "subscription_included") {
+    if (requested.costMicrousd != null || requested.costCents != null) {
+      throw new Error("autonomous_budget_subscription_monetary_amount_forbidden");
+    }
+    return {
+      requestCount: nonNegativeInteger(requested.requestCount),
+      inputTokens: nonNegativeInteger(requested.inputTokens),
+      outputTokens: nonNegativeInteger(requested.outputTokens),
+      runtimeMs: nonNegativeInteger(requested.runtimeMs),
+      costMicrousd: null,
+    };
+  }
   const explicitMicrousd =
     requested.costMicrousd === undefined
       ? null
@@ -108,9 +131,9 @@ function normalizeBudgetRequest(requested: AutonomousBudgetRequest): NormalizedA
 function requestedMetric(requested: NormalizedAutonomousBudgetRequest, metric: BudgetMetric): number {
   switch (metric) {
     case "billed_cents":
-      return requested.costMicrousd / 10_000;
+      return (requested.costMicrousd ?? 0) / 10_000;
     case "billed_microusd":
-      return requested.costMicrousd;
+      return requested.costMicrousd ?? 0;
     case "request_count":
       return requested.requestCount;
     case "input_tokens":
@@ -128,8 +151,8 @@ function recordedMetric(
 ): number {
   const reconciled = row.status === "reconciled";
   const costMicrousd = reconciled
-    ? (row.actualCostMicrousd ?? row.reservedCostMicrousd ?? row.reservedCostCents * 10_000)
-    : (row.reservedCostMicrousd ?? row.reservedCostCents * 10_000);
+    ? (row.actualCostMicrousd ?? row.reservedCostMicrousd ?? (row.reservedCostCents ?? 0) * 10_000)
+    : (row.reservedCostMicrousd ?? (row.reservedCostCents ?? 0) * 10_000);
   switch (metric) {
     case "billed_cents":
       return costMicrousd / 10_000;
@@ -165,7 +188,7 @@ function remainingChainEnvelope(
     inputTokens: remaining("input_tokens"),
     outputTokens: remaining("output_tokens"),
     runtimeMs: remaining("runtime_ms"),
-    costMicrousd: remaining("billed_microusd"),
+    costMicrousd: envelope.costMicrousd === null ? null : remaining("billed_microusd"),
   };
 }
 
@@ -187,6 +210,7 @@ function scopeReason(scopeType: BudgetScopeType): BudgetBlockReason {
 
 function deriveRunEnvelope(
   policies: Array<typeof budgetPolicies.$inferSelect>,
+  billingMode: "metered_currency" | "subscription_included" = "metered_currency",
 ): NormalizedAutonomousBudgetRequest {
   const perRun = policies.filter((policy) => policy.windowKind === "per_run");
   const minimum = (metric: BudgetMetric) => {
@@ -205,11 +229,47 @@ function deriveRunEnvelope(
     inputTokens: minimum("input_tokens"),
     outputTokens: minimum("output_tokens"),
     runtimeMs: minimum("runtime_ms"),
-    costMicrousd: costAmounts.length > 0 ? Math.min(...costAmounts) : null,
+    costMicrousd: billingMode === "subscription_included"
+      ? null
+      : costAmounts.length > 0 ? Math.min(...costAmounts) : null,
   };
-  const missing = Object.entries(envelope).find(([, value]) => value === null)?.[0];
+  const missing = Object.entries(envelope).find(([key, value]) =>
+    value === null && !(key === "costMicrousd" && billingMode === "subscription_included"))?.[0];
   if (missing) throw new Error(`autonomous_run_budget_policy_missing:${missing}`);
-  return normalizeBudgetRequest(envelope as NormalizedAutonomousBudgetRequest);
+  return normalizeBudgetRequest(envelope as AutonomousBudgetRequest, billingMode);
+}
+
+function validateBillingPolicy(input: AutonomousBudgetReservationInput): void {
+  const policy = input.billingPolicy;
+  if (!policy) return;
+  if (policy.billingMode !== "subscription_included" || !policy.policyId.trim() ||
+      !Number.isSafeInteger(policy.policyVersion) || policy.policyVersion < 1 ||
+      !/^[a-f0-9]{64}$/.test(policy.policyDigest) || !policy.credentialPrincipalId.trim() ||
+      !Number.isSafeInteger(policy.maxRootChainProviderRequests) ||
+      policy.maxRootChainProviderRequests < 1) {
+    throw new Error("autonomous_budget_billing_policy_invalid");
+  }
+}
+
+function matchesBillingPolicyBinding(
+  reservation: {
+    billingMode: "metered_currency" | "subscription_included";
+    routePolicyId: string | null;
+    routePolicyVersion: number | null;
+    routePolicyDigest: string | null;
+    credentialPrincipalId: string | null;
+    rootChainRequestLimit: number | null;
+  },
+  policy: AutonomousBudgetReservationInput["billingPolicy"],
+): boolean {
+  const requestedMode = policy?.billingMode ?? "metered_currency";
+  if (reservation.billingMode !== requestedMode) return false;
+  if (reservation.billingMode === "metered_currency") return policy == null;
+  return policy != null && reservation.routePolicyId === policy.policyId &&
+    reservation.routePolicyVersion === policy.policyVersion &&
+    reservation.routePolicyDigest === policy.policyDigest &&
+    reservation.credentialPrincipalId === policy.credentialPrincipalId &&
+    reservation.rootChainRequestLimit === policy.maxRootChainProviderRequests;
 }
 
 export async function reserveAutonomousBudget(
@@ -220,6 +280,9 @@ export async function reserveAutonomousBudget(
       admitted: true;
       reservationId: string;
       replayed: boolean;
+      billingMode: "metered_currency" | "subscription_included";
+      provider: string | null;
+      model: string | null;
       envelope: AutonomousBudgetEnvelope;
     }
   | { admitted: false; reason: BudgetBlockReason; policyId: string }
@@ -230,6 +293,7 @@ export async function reserveAutonomousBudget(
       retryAt: Date | null;
     }
 > {
+  validateBillingPolicy(input);
   return db.transaction(async (tx) => {
     // Serialize pause and admission on the company row, including replay.
     const [company] = await tx.select({ paused: companies.autonomousExecutionPaused })
@@ -308,6 +372,14 @@ export async function reserveAutonomousBudget(
         outputTokens: autonomousBudgetReservations.reservedOutputTokens,
         runtimeMs: autonomousBudgetReservations.reservedRuntimeMs,
         costMicrousd: autonomousBudgetReservations.reservedCostMicrousd,
+        billingMode: autonomousBudgetReservations.billingMode,
+        routePolicyId: autonomousBudgetReservations.routePolicyId,
+        routePolicyVersion: autonomousBudgetReservations.routePolicyVersion,
+        routePolicyDigest: autonomousBudgetReservations.routePolicyDigest,
+        credentialPrincipalId: autonomousBudgetReservations.credentialPrincipalId,
+        rootChainRequestLimit: autonomousBudgetReservations.rootChainRequestLimit,
+        provider: autonomousBudgetReservations.provider,
+        model: autonomousBudgetReservations.model,
       })
       .from(autonomousBudgetReservations)
       .where(eq(autonomousBudgetReservations.runId, input.runId))
@@ -319,6 +391,12 @@ export async function reserveAutonomousBudget(
         existing.issueId !== input.issueId
       ) {
         throw new Error("autonomous_budget_reservation_scope_mismatch");
+      }
+      if (!matchesBillingPolicyBinding(existing, input.billingPolicy)) {
+        throw new Error("autonomous_budget_reservation_billing_policy_mismatch");
+      }
+      if (existing.provider !== (input.provider ?? null) || existing.model !== (input.model ?? null)) {
+        throw new Error("autonomous_budget_reservation_execution_binding_mismatch");
       }
       if (automaticSuccessorLaunch) {
         const authorized = await tx.select({ executionStage: heartbeatRuns.executionStage })
@@ -334,6 +412,9 @@ export async function reserveAutonomousBudget(
         admitted: true as const,
         reservationId: existing.id,
         replayed: true,
+        billingMode: existing.billingMode,
+        provider: existing.provider,
+        model: existing.model,
         envelope: {
           requestCount: existing.requestCount,
           inputTokens: existing.inputTokens,
@@ -344,6 +425,7 @@ export async function reserveAutonomousBudget(
       };
     }
     if (policies.length === 0) throw new Error("autonomous_budget_policy_missing");
+    const billingMode = input.billingPolicy?.billingMode ?? "metered_currency";
     let chainRootRunId = input.runId;
     if (input.previousRunId) {
       const predecessor = await tx
@@ -352,6 +434,12 @@ export async function reserveAutonomousBudget(
           agentId: autonomousBudgetReservations.agentId,
           issueId: autonomousBudgetReservations.issueId,
           chainRootRunId: autonomousBudgetReservations.chainRootRunId,
+          billingMode: autonomousBudgetReservations.billingMode,
+          routePolicyId: autonomousBudgetReservations.routePolicyId,
+          routePolicyVersion: autonomousBudgetReservations.routePolicyVersion,
+          routePolicyDigest: autonomousBudgetReservations.routePolicyDigest,
+          credentialPrincipalId: autonomousBudgetReservations.credentialPrincipalId,
+          rootChainRequestLimit: autonomousBudgetReservations.rootChainRequestLimit,
         })
         .from(autonomousBudgetReservations)
         .where(eq(autonomousBudgetReservations.runId, input.previousRunId))
@@ -363,6 +451,16 @@ export async function reserveAutonomousBudget(
         predecessor.issueId !== input.issueId
       ) {
         throw new Error("autonomous_budget_chain_predecessor_mismatch");
+      }
+      const policy = input.billingPolicy;
+      if (predecessor.billingMode !== billingMode ||
+          (predecessor.billingMode === "subscription_included" &&
+           (!policy || predecessor.routePolicyId !== policy.policyId ||
+            predecessor.routePolicyVersion !== policy.policyVersion ||
+            predecessor.routePolicyDigest !== policy.policyDigest ||
+            predecessor.credentialPrincipalId !== policy.credentialPrincipalId ||
+            predecessor.rootChainRequestLimit !== policy.maxRootChainProviderRequests))) {
+        throw new Error("autonomous_budget_chain_billing_policy_mismatch");
       }
       chainRootRunId = predecessor.chainRootRunId;
     }
@@ -382,10 +480,17 @@ export async function reserveAutonomousBudget(
         ),
       );
     const requested = input.requested
-      ? normalizeBudgetRequest(input.requested)
+      ? normalizeBudgetRequest(input.requested, billingMode)
       : input.previousRunId
-        ? remainingChainEnvelope(deriveRunEnvelope(policies), chainRows)
-        : deriveRunEnvelope(policies);
+        ? remainingChainEnvelope(deriveRunEnvelope(policies, billingMode), chainRows)
+        : deriveRunEnvelope(policies, billingMode);
+    const committedChainRequests = chainRows.reduce(
+      (total, row) => total + recordedMetric(row, "request_count"), 0,
+    );
+    if (input.billingPolicy && committedChainRequests + requested.requestCount >
+        input.billingPolicy.maxRootChainProviderRequests) {
+      throw new Error("autonomous_budget_root_chain_request_limit_exceeded");
+    }
 
     const now = new Date();
     const crossedThresholds: Array<{
@@ -394,6 +499,8 @@ export async function reserveAutonomousBudget(
       observed: number;
     }> = [];
     for (const policy of policies) {
+      if (billingMode === "subscription_included" &&
+          (policy.metric === "billed_cents" || policy.metric === "billed_microusd")) continue;
       if (policy.amount <= 0) {
         return { admitted: false as const, reason: scopeReason(policy.scopeType), policyId: policy.id };
       }
@@ -484,14 +591,27 @@ export async function reserveAutonomousBudget(
         reservedInputTokens: requested.inputTokens,
         reservedOutputTokens: requested.outputTokens,
         reservedRuntimeMs: requested.runtimeMs,
-        reservedCostCents: Math.ceil(requested.costMicrousd / 10_000),
+        reservedCostCents: requested.costMicrousd === null
+          ? null : Math.ceil(requested.costMicrousd / 10_000),
         reservedCostMicrousd: requested.costMicrousd,
+        billingMode,
+        monetaryApplicability: billingMode === "subscription_included"
+          ? "not_applicable_per_request" : "applicable_per_request",
+        routePolicyId: input.billingPolicy?.policyId ?? null,
+        routePolicyVersion: input.billingPolicy?.policyVersion ?? null,
+        routePolicyDigest: input.billingPolicy?.policyDigest ?? null,
+        credentialPrincipalId: input.billingPolicy?.credentialPrincipalId ?? null,
+        rootChainRequestLimit: input.billingPolicy?.maxRootChainProviderRequests ?? null,
         provider: input.provider ?? null,
         model: input.model ?? null,
         credentialIdentifierHash: input.credentialIdentifierHash ?? null,
         rateCardVersion: input.rateCardVersion ?? null,
       })
-      .returning({ id: autonomousBudgetReservations.id })
+      .returning({
+        id: autonomousBudgetReservations.id,
+        provider: autonomousBudgetReservations.provider,
+        model: autonomousBudgetReservations.model,
+      })
       .then((rows) => rows[0]);
 
     for (const { policy, threshold, observed } of crossedThresholds) {
@@ -526,6 +646,9 @@ export async function reserveAutonomousBudget(
       admitted: true as const,
       reservationId: reservation.id,
       replayed: false,
+      billingMode,
+      provider: reservation.provider,
+      model: reservation.model,
       envelope: requested,
     };
   });

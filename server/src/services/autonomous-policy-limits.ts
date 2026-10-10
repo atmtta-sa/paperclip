@@ -8,8 +8,8 @@ type Policy = typeof budgetPolicies.$inferSelect;
 function committedMetric(row: Reservation, metric: Policy["metric"]): number {
   const reconciled = row.status === "reconciled";
   const cost = reconciled
-    ? row.actualCostMicrousd ?? row.reservedCostMicrousd ?? row.reservedCostCents * 10_000
-    : row.reservedCostMicrousd ?? row.reservedCostCents * 10_000;
+    ? row.actualCostMicrousd ?? row.reservedCostMicrousd ?? (row.reservedCostCents ?? 0) * 10_000
+    : row.reservedCostMicrousd ?? (row.reservedCostCents ?? 0) * 10_000;
   switch (metric) {
     case "billed_cents": return cost / 10_000;
     case "billed_microusd": return cost;

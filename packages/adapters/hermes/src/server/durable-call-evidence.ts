@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { summarizeV3 } from "./durable-call-evidence-v3.js";
 
 type Row = Record<string, SQLOutputValue>;
 type TerminalUsage = {
@@ -15,16 +16,32 @@ export type DurableHermesEvidenceStatus =
   | "no_exact_run_rows"
   | "read_failed"
   | "contract_version_mismatch";
+export type HermesBillingRoutePolicy = {
+  policyId: string;
+  policyVersion: number;
+  policyDigest: string;
+  provider: string;
+  route: string;
+  credentialPrincipalId: string;
+  modelScope: string[];
+  billingMode: "metered_currency" | "subscription_included";
+  status: "active" | "revoked";
+  validFrom: string;
+  validUntil: string;
+  maxRootChainProviderRequests: number;
+};
 export type DurableHermesCallEvidence = {
   status: DurableHermesEvidenceStatus;
   source: "hermes_sqlite_transport_owner";
   contractVersion: number | null;
   runId: string;
   complete: boolean;
+  executionComplete: boolean;
   iterationAttempts: number;
   providerDispatches: number;
   confirmedResponses: number;
   pretransportDenials: number;
+  rejectedAfterDispatch: number;
   unknownOutcomes: number;
   requestCount: number;
   inputTokens: number;
@@ -33,16 +50,29 @@ export type DurableHermesCallEvidence = {
   estimatedCostUsd: number | null;
   providerRuntimeMs: number | null;
   runtimeBasis: "confirmed_provider_call_ms_v1" | null;
+  runtimeApplicability?: "unavailable_by_route" | null;
   costMicrousd: number | null;
   costBasis: "provider_actual" | "subscription_included" | "pretransport_zero" | null;
-  costAuthority: "provider_usage_response" | "openai_codex_authenticated_subscription" |
+  costAuthority: "provider_usage_response" | "subscription_route_policy" |
     "transport_owner_never_crossed" | null;
   costAuthorityRef: string | null;
   rateCardSnapshots: Record<string, unknown>[];
   terminalDiscrepancies: string[];
+  billingMode: "metered_currency" | "subscription_included" | null;
+  billingAggregation: "single_mode" | "unsupported_mixed_mode" | null;
+  chargeApplicability: "charge_applicable" | "not_applicable_per_request" | null;
+  monetaryAmountMicrousd: number | null;
+  monetaryCurrency: string | null;
+  tokenAccountingBasis: string | null;
+  routePolicyId: string | null;
+  routePolicyVersion: number | null;
+  routePolicyDigest: string | null;
+  credentialPrincipalId: string | null;
+  rootChainRequestLimit: number | null;
 };
 
 const CONTRACT_VERSION = 2;
+const SUPPORTED_CONTRACT_VERSIONS = new Set([2, 3]);
 const SOURCE = "hermes_sqlite_transport_owner" as const;
 function nonNegativeInteger(value: SQLOutputValue): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -57,13 +87,18 @@ function pricingSnapshot(row: Row): Record<string, unknown> | null {
 }
 function outcome(runId: string, status: DurableHermesEvidenceStatus,
   contractVersion: number | null = null): DurableHermesCallEvidence {
-  return { status, source: SOURCE, contractVersion, runId, complete: false,
+  return { status, source: SOURCE, contractVersion, runId, complete: false, executionComplete: false,
     iterationAttempts: 0, providerDispatches: 0, confirmedResponses: 0,
-    pretransportDenials: 0, unknownOutcomes: 0, requestCount: 0,
+    pretransportDenials: 0, rejectedAfterDispatch: 0, unknownOutcomes: 0, requestCount: 0,
     inputTokens: 0, outputTokens: 0, providerRequestIds: [], estimatedCostUsd: null,
-    providerRuntimeMs: null, runtimeBasis: null, costMicrousd: null,
+    providerRuntimeMs: null, runtimeBasis: null, runtimeApplicability: null,
+    costMicrousd: null,
     costBasis: null, costAuthority: null, costAuthorityRef: null,
-    rateCardSnapshots: [], terminalDiscrepancies: [] };
+    rateCardSnapshots: [], terminalDiscrepancies: [], billingMode: null,
+    billingAggregation: null, chargeApplicability: null, monetaryAmountMicrousd: null,
+    monetaryCurrency: null, tokenAccountingBasis: null, routePolicyId: null,
+    routePolicyVersion: null, routePolicyDigest: null, credentialPrincipalId: null,
+    rootChainRequestLimit: null };
 }
 function validAuthority(row: Row): boolean {
   const ref = typeof row.cost_authority_ref === "string" ? row.cost_authority_ref.trim() : "";
@@ -88,10 +123,26 @@ function callMatchesAttempt(call: Row, attempt: Row | undefined): boolean {
     call.provider_request_id === attempt.provider_request_id && call.provider === attempt.provider &&
     call.model === attempt.model && call.billing_base_url === attempt.billing_base_url;
 }
+function validV3MeteredShape(attempts: Row[], calls: Row[]): boolean {
+  const tokenBasis = "provider_reported_tokens_v1";
+  return attempts.every((row) => row.billing_mode === "metered_currency" &&
+    row.charge_applicability === "charge_applicable" &&
+    row.token_accounting_basis === tokenBasis && row.route_policy_id == null &&
+    row.route_policy_version == null && row.route_policy_digest == null &&
+    row.credential_principal_id == null) &&
+    calls.every((row) => row.billing_mode === "metered_currency" &&
+      row.charge_applicability === "charge_applicable" &&
+      nonNegativeInteger(row.monetary_amount_microusd) &&
+      row.monetary_amount_microusd === row.cost_microusd && row.monetary_currency === "USD" &&
+      row.token_accounting_basis === tokenBasis && row.runtime_applicability == null);
+}
 function summarize(runId: string, attempts: Row[], calls: Row[],
-  terminal?: TerminalUsage | null): DurableHermesCallEvidence {
+  terminal?: TerminalUsage | null,
+  expectedContractVersion = CONTRACT_VERSION,
+  contractShapeValid = true): DurableHermesCallEvidence {
   const contractVersion = Number(attempts[0]?.contract_version ?? CONTRACT_VERSION);
-  const contractVersionsValid = attempts.every((row) => row.contract_version === CONTRACT_VERSION);
+  const contractVersionsValid = attempts.every((row) =>
+    row.contract_version === expectedContractVersion);
   const completed = attempts.filter((row) => row.state === "completed");
   const denials = attempts.filter((row) => row.state === "denied_pretransport");
   const dispatched = attempts.filter((row) => row.dispatched_at != null);
@@ -120,7 +171,7 @@ function summarize(runId: string, attempts: Row[], calls: Row[],
     completed.length === dispatched.length && calls.length === completed.length &&
     validCalls.length === calls.length && totalsSafe && identitiesUnique &&
     Number.isSafeInteger(providerRuntimeMs) && Number.isSafeInteger(costMicrousd) &&
-    authoritiesConsistent && snapshots.every((value) => value !== null);
+    authoritiesConsistent && snapshots.every((value) => value !== null) && contractShapeValid;
   const aggregateEstimatedCostUsd = calls.reduce(
     (sum, row) => sum + Number(row.estimated_cost_usd ?? 0), 0,
   );
@@ -138,13 +189,14 @@ function summarize(runId: string, attempts: Row[], calls: Row[],
   }
   return {
     status: complete ? "complete" : "incomplete", source: SOURCE, contractVersion,
-    runId, complete, iterationAttempts: attempts.length,
+    runId, complete, executionComplete: complete, iterationAttempts: attempts.length,
     providerDispatches: dispatched.length, confirmedResponses: validCalls.length,
-    pretransportDenials: denials.length, unknownOutcomes: unknown.length,
+    pretransportDenials: denials.length, rejectedAfterDispatch: 0, unknownOutcomes: unknown.length,
     requestCount: complete ? dispatched.length : 0, inputTokens, outputTokens,
     providerRequestIds, estimatedCostUsd: complete && estimatesValid ? aggregateEstimatedCostUsd : null,
     providerRuntimeMs: complete ? providerRuntimeMs : null,
     runtimeBasis: complete ? "confirmed_provider_call_ms_v1" : null,
+    runtimeApplicability: null,
     costMicrousd: complete ? costMicrousd : null,
     costBasis: complete && deniedBeforeTransport ? "pretransport_zero" : complete
       ? validCalls[0]?.cost_basis as DurableHermesCallEvidence["costBasis"] : null,
@@ -154,13 +206,22 @@ function summarize(runId: string, attempts: Row[], calls: Row[],
       complete && validCalls.length === 1 ? String(validCalls[0]?.cost_authority_ref) :
         complete ? "multiple_exact_request_refs" : null,
     rateCardSnapshots: snapshots.filter((value): value is Record<string, unknown> => value !== null),
-    terminalDiscrepancies,
+    terminalDiscrepancies, billingMode: complete ? "metered_currency" : null,
+    billingAggregation: complete ? "single_mode" : null,
+    chargeApplicability: complete ? "charge_applicable" : null,
+    monetaryAmountMicrousd: complete ? costMicrousd : null,
+    monetaryCurrency: complete ? "USD" : null,
+    tokenAccountingBasis: complete && contractVersion === 3 ? "provider_reported_tokens_v1" : null,
+    routePolicyId: null, routePolicyVersion: null, routePolicyDigest: null,
+    credentialPrincipalId: null, rootChainRequestLimit: null,
   };
 }
 
 /** Read one transaction snapshot from the validated profile; never migrate or create a store. */
 export function readDurableHermesCallEvidence(
   profileHome: string, runId: string, terminal?: TerminalUsage | null,
+  expectedRoutePolicy?: HermesBillingRoutePolicy,
+  now = new Date(),
 ): DurableHermesCallEvidence {
   let db: DatabaseSync | undefined;
   try {
@@ -176,7 +237,7 @@ export function readDurableHermesCallEvidence(
       "SELECT value FROM state_meta WHERE key = 'provider_evidence_contract_version'",
     ).get() as Row | undefined;
     const contractVersion = marker ? Number(marker.value) : null;
-    if (contractVersion !== CONTRACT_VERSION) {
+    if (contractVersion === null || !SUPPORTED_CONTRACT_VERSIONS.has(contractVersion)) {
       return outcome(runId, "contract_version_mismatch", contractVersion);
     }
     const attempts = db.prepare(
@@ -187,7 +248,16 @@ export function readDurableHermesCallEvidence(
     const calls = db.prepare(`SELECT u.* FROM provider_call_usage u
       JOIN provider_transport_attempts t ON t.attempt_id = u.attempt_id
       WHERE t.execution_run_id = ? ORDER BY t.started_at, t.attempt_id LIMIT 10001`).all(runId);
-    const result = summarize(runId, attempts, calls, terminal);
+    const modes = new Set([
+      ...attempts.map((row) => String(row.billing_mode)),
+      ...calls.map((row) => String(row.billing_mode)),
+    ]);
+    const v3Metered = contractVersion === 3 && modes.size === 1 &&
+      modes.has("metered_currency");
+    const result = contractVersion === 3 && !v3Metered
+      ? summarizeV3(runId, attempts, calls, expectedRoutePolicy, now, terminal)
+      : summarize(runId, attempts, calls, terminal, contractVersion,
+        contractVersion !== 3 || validV3MeteredShape(attempts, calls));
     db.exec("COMMIT");
     return result;
   } catch { return outcome(runId, "read_failed"); }

@@ -15,12 +15,13 @@ export type AutonomousBudgetReconciliationInput = {
     requestCount: number;
     inputTokens: number;
     outputTokens: number;
-    runtimeMs: number;
-    costMicrousd?: number;
+    runtimeMs: number | null;
+    costMicrousd?: number | null;
     costCents?: number;
   } | null;
   provider?: string | null;
   model?: string | null;
+  billingMode?: "metered_currency" | "subscription_included";
   rateCardVersion?: string | null;
   settlementEvidence?: {
     source: string;
@@ -28,7 +29,15 @@ export type AutonomousBudgetReconciliationInput = {
     runId: string;
     digestSha256: string;
     costBasis: string;
-    runtimeBasis: string;
+    runtimeBasis: string | null;
+    runtimeApplicability?: string | null;
+    billingMode?: string;
+    routePolicyId?: string;
+    routePolicyVersion?: number;
+    routePolicyDigest?: string;
+    credentialPrincipalId?: string;
+    rootChainRequestLimit?: number;
+    tokenAccountingBasis?: string;
   } | null;
 };
 
@@ -36,8 +45,8 @@ type NormalizedActual = {
   requestCount: number;
   inputTokens: number;
   outputTokens: number;
-  runtimeMs: number;
-  costMicrousd: number;
+  runtimeMs: number | null;
+  costMicrousd: number | null;
 };
 
 type SettlementState = NonNullable<
@@ -53,11 +62,24 @@ function nonNegativeInteger(value: number): number {
 
 function normalizeActual(
   actual: NonNullable<AutonomousBudgetReconciliationInput["actual"]>,
+  billingMode: "metered_currency" | "subscription_included",
 ): NormalizedActual {
   const explicitMicrousd =
-    actual.costMicrousd === undefined ? null : nonNegativeInteger(actual.costMicrousd);
+    actual.costMicrousd == null ? null : nonNegativeInteger(actual.costMicrousd);
   const legacyMicrousd =
     actual.costCents === undefined ? null : nonNegativeInteger(actual.costCents) * 10_000;
+  if (billingMode === "subscription_included") {
+    if (explicitMicrousd !== null || legacyMicrousd !== null) {
+      throw new Error("autonomous_budget_subscription_monetary_amount_forbidden");
+    }
+    return {
+      requestCount: nonNegativeInteger(actual.requestCount),
+      inputTokens: nonNegativeInteger(actual.inputTokens),
+      outputTokens: nonNegativeInteger(actual.outputTokens),
+      runtimeMs: actual.runtimeMs === null ? null : nonNegativeInteger(actual.runtimeMs),
+      costMicrousd: null,
+    };
+  }
   if (explicitMicrousd === null && legacyMicrousd === null) {
     throw new Error("autonomous_budget_reservation_invalid_amount");
   }
@@ -67,6 +89,9 @@ function normalizeActual(
     explicitMicrousd !== legacyMicrousd
   ) {
     throw new Error("autonomous_budget_reservation_conflicting_cost_units");
+  }
+  if (actual.runtimeMs === null) {
+    throw new Error("autonomous_budget_reservation_invalid_amount");
   }
   return {
     requestCount: nonNegativeInteger(actual.requestCount),
@@ -104,19 +129,21 @@ function deriveSettlementState(
 ): SettlementState {
   if (verifiedNoProviderActivity) return "released_zero_usage";
   if (!hasCompleteTelemetry || !actual) return "uncertain_requires_reconciliation";
+  const runtimeOver = actual.runtimeMs !== null && actual.runtimeMs > row.reservedRuntimeMs;
+  const runtimeUnder = actual.runtimeMs !== null && actual.runtimeMs < row.reservedRuntimeMs;
   if (
     actual.requestCount > row.reservedRequestCount ||
     actual.inputTokens > row.reservedInputTokens ||
     actual.outputTokens > row.reservedOutputTokens ||
-    actual.runtimeMs > row.reservedRuntimeMs ||
-    actual.costMicrousd > row.reservedCostMicrousd
+    runtimeOver ||
+    (actual.costMicrousd !== null && actual.costMicrousd > (row.reservedCostMicrousd ?? 0))
   ) return "consumed_over_reservation";
   if (
     actual.requestCount < row.reservedRequestCount ||
     actual.inputTokens < row.reservedInputTokens ||
     actual.outputTokens < row.reservedOutputTokens ||
-    actual.runtimeMs < row.reservedRuntimeMs ||
-    actual.costMicrousd < row.reservedCostMicrousd
+    runtimeUnder ||
+    (actual.costMicrousd !== null && actual.costMicrousd < (row.reservedCostMicrousd ?? 0))
   ) return "partially_consumed";
   return "consumed";
 }
@@ -129,7 +156,15 @@ export async function reconcileAutonomousBudget(
   settlementState: SettlementState;
   replayed: boolean;
 }> {
-  const actual = input.actual ? normalizeActual(input.actual) : null;
+  const billingMode = input.billingMode ?? "metered_currency";
+  const actual = input.actual ? normalizeActual(input.actual, billingMode) : null;
+  const runtimeUnavailable = billingMode === "subscription_included" &&
+    input.settlementEvidence?.contractVersion === 3 &&
+    input.settlementEvidence.runtimeBasis === null &&
+    input.settlementEvidence.runtimeApplicability === "unavailable_by_route";
+  if (actual?.runtimeMs === null && !runtimeUnavailable) {
+    throw new Error("autonomous_budget_reservation_invalid_amount");
+  }
   const hasCompleteTelemetry =
     input.providerActivityOccurred && actual !== null && Boolean(input.providerRequestId?.trim());
   const verifiedNoProviderActivity =
@@ -168,6 +203,18 @@ export async function reconcileAutonomousBudget(
     if (input.model !== undefined && row.model !== input.model) {
       throw new Error("autonomous_budget_reconciliation_model_mismatch");
     }
+    if (row.billingMode !== billingMode) {
+      throw new Error("autonomous_budget_reconciliation_billing_mode_mismatch");
+    }
+    if (billingMode === "subscription_included" &&
+        (input.settlementEvidence?.billingMode !== billingMode ||
+         input.settlementEvidence.routePolicyId !== row.routePolicyId ||
+         input.settlementEvidence.routePolicyVersion !== row.routePolicyVersion ||
+         input.settlementEvidence.routePolicyDigest !== row.routePolicyDigest ||
+         input.settlementEvidence.credentialPrincipalId !== row.credentialPrincipalId ||
+         input.settlementEvidence.rootChainRequestLimit !== row.rootChainRequestLimit)) {
+      throw new Error("autonomous_budget_reconciliation_route_policy_mismatch");
+    }
     const settlementState = deriveSettlementState(
       row,
       actual,
@@ -200,9 +247,8 @@ export async function reconcileAutonomousBudget(
         actualInputTokens: hasCompleteTelemetry ? actual.inputTokens : null,
         actualOutputTokens: hasCompleteTelemetry ? actual.outputTokens : null,
         actualRuntimeMs: hasCompleteTelemetry ? actual.runtimeMs : null,
-        actualCostCents: hasCompleteTelemetry
-          ? Math.ceil(actual.costMicrousd / 10_000)
-          : null,
+        actualCostCents: hasCompleteTelemetry && actual.costMicrousd !== null
+          ? Math.ceil(actual.costMicrousd / 10_000) : null,
         actualCostMicrousd: hasCompleteTelemetry ? actual.costMicrousd : null,
         overrunInputTokens: hasCompleteTelemetry
           ? Math.max(0, actual.inputTokens - row.reservedInputTokens)

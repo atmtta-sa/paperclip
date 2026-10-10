@@ -65,7 +65,10 @@ import {
 import { reconcileHermesPaperclipSkills } from "./skills.js";
 import { hermesBudgetTelemetry } from "./budget-telemetry.js";
 import { requireManagedHermesProfile, resolveHermesProfileHome } from "./profile-policy.js";
-import { readDurableHermesCallEvidence } from "./durable-call-evidence.js";
+import {
+  readDurableHermesCallEvidence,
+  type HermesBillingRoutePolicy,
+} from "./durable-call-evidence.js";
 import { readDurableHermesPretransportEvidence } from "./pretransport-evidence.js";
 
 // ---------------------------------------------------------------------------
@@ -122,6 +125,56 @@ function resolveManagedProgressPolicy(
     intent: "implementation",
     maxProviderResponsesWithoutDurableProgress: limit,
   } as const;
+}
+
+function validHttpsRoute(value: string | undefined): value is string {
+  if (!value) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function resolveBillingRoutePolicy(
+  config: Record<string, unknown>,
+  provider: string,
+  model: string,
+  autonomousBudgetEnabled: boolean,
+): HermesBillingRoutePolicy | undefined {
+  const raw = config.billingRoutePolicy;
+  if (raw == null) return undefined;
+  if (!autonomousBudgetEnabled || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("billing_route_policy_invalid");
+  }
+  const value = raw as Record<string, unknown>;
+  const policy = {
+    policyId: cfgString(value.policyId),
+    policyVersion: cfgNumber(value.policyVersion),
+    policyDigest: cfgString(value.policyDigest),
+    provider: cfgString(value.provider),
+    route: cfgString(value.route),
+    credentialPrincipalId: cfgString(value.credentialPrincipalId),
+    modelScope: cfgStringArray(value.modelScope),
+    billingMode: cfgString(value.billingMode),
+    status: cfgString(value.status),
+    validFrom: cfgString(value.validFrom),
+    validUntil: cfgString(value.validUntil),
+    maxRootChainProviderRequests: cfgNumber(value.maxRootChainProviderRequests),
+  };
+  const validFrom = Date.parse(policy.validFrom ?? "");
+  const validUntil = Date.parse(policy.validUntil ?? "");
+  const valid = policy.policyId && Number.isSafeInteger(policy.policyVersion) &&
+    (policy.policyVersion ?? 0) > 0 && policy.policyDigest &&
+    /^[a-f0-9]{64}$/.test(policy.policyDigest) && policy.provider === provider &&
+    validHttpsRoute(policy.route) && policy.credentialPrincipalId &&
+    policy.modelScope?.includes(model) && policy.billingMode === "subscription_included" &&
+    policy.status === "active" && Number.isFinite(validFrom) && Number.isFinite(validUntil) &&
+    validFrom <= Date.now() && Date.now() < validUntil &&
+    Number.isSafeInteger(policy.maxRootChainProviderRequests) &&
+    (policy.maxRootChainProviderRequests ?? 0) > 0;
+  if (!valid) throw new Error("billing_route_policy_invalid");
+  return policy as HermesBillingRoutePolicy;
 }
 
 type PaperclipContextRenderer = "legacy" | "structured_v1";
@@ -750,6 +803,12 @@ export async function execute(
     detectedApiMode: detectedConfig?.apiMode,
     model,
   });
+  const billingRoutePolicy = resolveBillingRoutePolicy(
+    config,
+    resolvedProvider,
+    model,
+    Boolean(ctx.autonomousBudgetEnvelope),
+  );
 
   // ── Load agent instructions file (Paperclip instruction bundles) ──────
   // Paperclip can materialize managed instructions into instructionsFilePath;
@@ -853,6 +912,9 @@ export async function execute(
   if (ctx.autonomousBudgetEnvelope) {
     env.HERMES_AUTONOMOUS_BUDGET_JSON = JSON.stringify(ctx.autonomousBudgetEnvelope);
   }
+  if (billingRoutePolicy) {
+    env.HERMES_BILLING_ROUTE_POLICY_JSON = JSON.stringify(billingRoutePolicy);
+  }
   const managedProgressPolicy = resolveManagedProgressPolicy(
     config,
     Boolean(ctx.autonomousBudgetEnvelope),
@@ -942,9 +1004,11 @@ export async function execute(
   });
   const childRuntimeMs = Math.ceil(performance.now() - childStartedAt);
   const runResult = await readHermesRunResult(runResultPath);
-  const durableCallEvidence = readDurableHermesCallEvidence(
-    resolveHermesProfileHome(config), ctx.runId, runResult,
-  );
+  const durableCallEvidence = billingRoutePolicy
+    ? readDurableHermesCallEvidence(
+        resolveHermesProfileHome(config), ctx.runId, runResult, billingRoutePolicy,
+      )
+    : readDurableHermesCallEvidence(resolveHermesProfileHome(config), ctx.runId, runResult);
 
   const pretransportEvidence = readDurableHermesPretransportEvidence(
     resolveHermesProfileHome(config), ctx.runId, runResult,
@@ -1024,18 +1088,24 @@ export async function execute(
   executionResult.budgetTelemetry = hermesBudgetTelemetry(runResult, childRuntimeMs);
   if (ctx.autonomousBudgetEnvelope) {
     executionResult.budgetTelemetry = undefined;
-    if (durableCallEvidence?.complete && durableCallEvidence.costMicrousd != null &&
-        durableCallEvidence.providerRuntimeMs != null &&
+    const validRuntime = durableCallEvidence?.providerRuntimeMs != null ||
+      (durableCallEvidence?.contractVersion === 3 &&
+       durableCallEvidence.runtimeBasis === null &&
+       durableCallEvidence.runtimeApplicability === "unavailable_by_route");
+    if (durableCallEvidence?.complete && validRuntime &&
         durableCallEvidence.providerRequestIds.length > 0) {
       const costMicrousd = durableCallEvidence.costMicrousd;
-      if (Number.isSafeInteger(costMicrousd)) {
+      const validCost = durableCallEvidence.billingMode === "subscription_included"
+        ? costMicrousd == null
+        : Number.isSafeInteger(costMicrousd);
+      if (validCost) {
         executionResult.budgetTelemetry = {
           providerRequestId: durableCallEvidence.providerRequestIds[0],
           requestCount: durableCallEvidence.requestCount,
           inputTokens: durableCallEvidence.inputTokens,
           outputTokens: durableCallEvidence.outputTokens,
           runtimeMs: durableCallEvidence.providerRuntimeMs,
-          costMicrousd,
+          costMicrousd: costMicrousd ?? null,
           rateCardVersion: `hermes-provider-evidence-v${durableCallEvidence.contractVersion}`,
         };
       }

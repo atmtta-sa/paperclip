@@ -638,6 +638,85 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     });
   });
 
+  it("uses one configured subscription policy for reservation and adapter execution", async () => {
+    const { agentId, issueId } = await seedCompanyAgentIssue();
+    const billingRoutePolicy = {
+      policyId: "codex-subscription-route",
+      policyVersion: 1,
+      policyDigest: "b".repeat(64),
+      provider: "openai-codex",
+      route: "https://chatgpt.com/backend-api/codex",
+      credentialPrincipalId: "managed-account:codex-uat",
+      modelScope: ["gpt-5.6-codex"],
+      billingMode: "subscription_included",
+      status: "active",
+      validFrom: "2026-01-01T00:00:00.000Z",
+      validUntil: "2027-01-01T00:00:00.000Z",
+      maxRootChainProviderRequests: 12,
+    };
+    await db.update(agents).set({
+      adapterType: "hermes_local",
+      adapterConfig: { provider: "openai-codex", model: "gpt-5.6-codex", billingRoutePolicy },
+    }).where(eq(agents.id, agentId));
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => ({
+      exitCode: 0, signal: null, timedOut: false,
+      provider: "openai-codex", model: "gpt-5.6-codex",
+      usage: { inputTokens: 120, outputTokens: 30 }, usageBasis: "per_run",
+      resultJson: { durableCallEvidence: {
+        status: "complete", source: "hermes_sqlite_transport_owner", contractVersion: 3,
+        runId: ctx.runId, complete: true, executionComplete: true, iterationAttempts: 1,
+        providerDispatches: 1, confirmedResponses: 1, pretransportDenials: 0,
+        rejectedAfterDispatch: 0, unknownOutcomes: 0, requestCount: 1,
+        inputTokens: 120, outputTokens: 30, providerRequestIds: ["response-sub-heartbeat"],
+        providerRuntimeMs: null, runtimeBasis: null,
+        runtimeApplicability: "unavailable_by_route",
+        costMicrousd: null, costBasis: "subscription_included",
+        costAuthority: "subscription_route_policy",
+        costAuthorityRef: `${billingRoutePolicy.policyId}:${billingRoutePolicy.policyVersion}`,
+        estimatedCostUsd: null, terminalDiscrepancies: [],
+        billingMode: "subscription_included", billingAggregation: "single_mode",
+        chargeApplicability: "not_applicable_per_request",
+        monetaryAmountMicrousd: null, monetaryCurrency: null,
+        tokenAccountingBasis: "provider_reported_tokens_v1",
+        routePolicyId: billingRoutePolicy.policyId,
+        routePolicyVersion: billingRoutePolicy.policyVersion,
+        routePolicyDigest: billingRoutePolicy.policyDigest,
+        credentialPrincipalId: billingRoutePolicy.credentialPrincipalId,
+        rootChainRequestLimit: billingRoutePolicy.maxRootChainProviderRequests,
+      } },
+      budgetTelemetry: {
+        providerRequestId: "response-sub-heartbeat", requestCount: 1,
+        inputTokens: 120, outputTokens: 30, runtimeMs: null, costMicrousd: null,
+        rateCardVersion: "hermes-provider-evidence-v3",
+      },
+    }));
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const call = mockAdapterExecute.mock.calls.at(-1)?.[0];
+    expect(call?.config?.billingRoutePolicy).toEqual(billingRoutePolicy);
+    expect(call?.autonomousBudgetEnvelope).toEqual({
+      requestCount: 8,
+      inputTokens: 64_000,
+      outputTokens: 8_000,
+      runtimeMs: 300_000,
+      costMicrousd: null,
+    });
+    const [reservation] = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.agentId, agentId));
+    expect(reservation).toMatchObject({
+      billingMode: "subscription_included",
+      routePolicyId: billingRoutePolicy.policyId,
+      routePolicyVersion: 1,
+      routePolicyDigest: billingRoutePolicy.policyDigest,
+      credentialPrincipalId: billingRoutePolicy.credentialPrincipalId,
+      rootChainRequestLimit: 12,
+      reservedCostMicrousd: null,
+      status: "reconciled",
+    });
+  });
+
   it("does not classify exit-zero compression cooldown as productive when no provider answered", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     mockAdapterExecute.mockImplementationOnce(async () => {
