@@ -13,7 +13,14 @@ import { seedSyntheticCompanyBudgets } from "./synthetic-autonomous-budgets.js";
 export async function settleSyntheticRetryPredecessor(
   db: Db,
   runId: string,
-  authority: { basis: "synthetic_completed_request" },
+  authority: {
+    basis: "synthetic_completed_request";
+    provider?: string;
+    settlementEvidence?: {
+      source: string; contractVersion: number; runId: string; digestSha256: string;
+      costBasis: string; runtimeBasis: string;
+    };
+  },
 ) {
   assert.equal(process.env.NODE_ENV, "test");
   assert.equal(authority.basis, "synthetic_completed_request");
@@ -30,16 +37,18 @@ export async function settleSyntheticRetryPredecessor(
   const issueId = run.nativeIssueId ?? run.contextSnapshot?.issueId;
   assert.equal(typeof issueId, "string");
   const scope = { companyId: run.companyId, agentId: run.agentId, issueId: issueId as string, runId };
+  const provider = authority.provider ?? "synthetic_retry_fixture";
   await seedSyntheticCompanyBudgets(db, run.companyId);
   const admission = await reserveAutonomousBudget(db, {
-    ...scope, provider: "synthetic_retry_fixture", model: "fixture-model",
+    ...scope, provider, model: "fixture-model",
   });
   assert.equal(admission.admitted, true);
   const settlement = await reconcileAutonomousBudget(db, {
     ...scope, providerActivityOccurred: true,
     providerRequestId: `synthetic-retry-receipt:${runId}`,
     actual: { requestCount: 1, inputTokens: 1, outputTokens: 1, runtimeMs: 1, costMicrousd: 1 },
-    provider: "synthetic_retry_fixture", model: "fixture-model", rateCardVersion: "component-fixture-v1",
+    provider, model: "fixture-model", rateCardVersion: "component-fixture-v1",
+    settlementEvidence: authority.settlementEvidence ?? null,
   });
   assert.equal(settlement.status, "reconciled");
   assert.equal(settlement.settlementState, "partially_consumed");

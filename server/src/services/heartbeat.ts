@@ -38,9 +38,9 @@ import {
 import { recordAutonomousProviderCircuitOutcome } from "./autonomous-provider-circuit.js";
 import { recordContinuityCircuitAlert } from "./continuity-circuit-alert.js";
 import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js";
-import { resolveManagedBudgetVerifier, type ManagedBudgetVerifier } from "./managed-budget-evidence.js";
+import { managedHermesSettlementProvenance, resolveManagedBudgetVerifier, type ManagedBudgetVerifier } from "./managed-budget-evidence.js";
 import { verifyManagedPretransportEvidence } from "./managed-pretransport-evidence.js";
-import { lockEligibleAutomaticSuccessorSettlement, predecessorRetryPolicyAllows } from "./automatic-successor-settlement.js";
+import { lockEligibleAutomaticSuccessorSettlement, managedHermesSuccessorBinding, predecessorRetryAuthorityAllows } from "./automatic-successor-settlement.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import { parseExecutionCheckpoint } from "./execution-checkpoint.js";
@@ -15719,12 +15719,18 @@ export function heartbeatService(
           return { outcome: "not_scheduled", reason: "Predecessor budget is not durably settled for retry.",
             errorCode: "predecessor_budget_unsettled", issueId, details: {} };
         }
-        if (!predecessorRetryPolicyAllows(durablePredecessor) ||
+        if (!predecessorRetryAuthorityAllows(durablePredecessor) ||
             (retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON &&
               !readTransientRecoveryContractFromRun(durablePredecessor) &&
               !hasConversationContinuationPolicy(durablePredecessor.resultJson))) {
           return { outcome: "not_scheduled", reason: "Predecessor retry policy does not permit this successor.",
             errorCode: "predecessor_retry_not_permitted", issueId, details: {} };
+        }
+        const managedHermesPredecessorSettlement = await managedHermesSuccessorBinding(
+          tx as unknown as Db, durablePredecessor,
+        );
+        if (managedHermesPredecessorSettlement) {
+          retryContextSnapshot.managedHermesPredecessorSettlement = managedHermesPredecessorSettlement;
         }
         // All automatic failure paths share the same predecessor claim. A
         // duplicate monitor, restart sweep or wake must reuse its successor.
@@ -24674,9 +24680,13 @@ export function heartbeatService(
           adapterResult.executionRecovery.providerWorkStarted === false;
         const verifiedHermesPretransportFailure = agent.adapterType === "hermes_local" &&
           verifyManagedPretransportEvidence(adapterResult, run.id);
-        const verifiedNoProviderActivity =
-          preProviderSessionRollover || verifiedPreProviderFailure || verifiedHermesPretransportFailure;
-        const budgetTelemetry = verifyBudgetEvidence(adapterResult, rawUsage);
+        const verifiedNoProviderActivity = agent.adapterType === "hermes_local"
+          ? verifiedHermesPretransportFailure
+          : preProviderSessionRollover || verifiedPreProviderFailure;
+        const budgetTelemetry = verifyBudgetEvidence(adapterResult, rawUsage, run.id);
+        const settlementEvidence = agent.adapterType === "hermes_local" &&
+          (budgetTelemetry || verifiedHermesPretransportFailure)
+          ? managedHermesSettlementProvenance(adapterResult, run.id) : null;
         const budgetReconciliation = await reconcileAutonomousBudget(db, {
           companyId: run.companyId,
           agentId: run.agentId,
@@ -24697,6 +24707,7 @@ export function heartbeatService(
               }
             : null,
           rateCardVersion: budgetTelemetry?.rateCardVersion ?? null,
+          settlementEvidence,
         });
         const telemetryMissing =
           budgetReconciliation.status === "retained_missing_telemetry";
@@ -24778,10 +24789,17 @@ export function heartbeatService(
         const cacheAdjustedCostUsd = resolveCacheAdjustedCostUsd(adapterResult);
         const usageJson =
           normalizedUsage ||
+          budgetTelemetry != null ||
           adapterResult.costUsd != null ||
           cacheAdjustedCostUsd != null
             ? ({
                 ...(normalizedUsage ?? {}),
+                ...(budgetTelemetry ? {
+                  inputTokens: budgetTelemetry.inputTokens,
+                  outputTokens: budgetTelemetry.outputTokens,
+                  requestCount: budgetTelemetry.requestCount,
+                  runtimeMs: budgetTelemetry.runtimeMs,
+                } : {}),
                 ...(rawUsage
                   ? {
                       rawInputTokens: rawUsage.inputTokens,
@@ -26816,9 +26834,15 @@ export function heartbeatService(
               // accounting identity. Never manufacture independence by clearing it.
               if (!parent ||
                 (parent.nativeIssueId ?? parent.contextSnapshot?.issueId ?? parent.contextSnapshot?.taskId) !== issueId ||
-                !predecessorRetryPolicyAllows(parent) ||
+                !predecessorRetryAuthorityAllows(parent) ||
                 !await lockEligibleAutomaticSuccessorSettlement(tx as unknown as Db, parent)) {
                 return { kind: "skipped" as const };
+              }
+              const managedHermesPredecessorSettlement = await managedHermesSuccessorBinding(
+                tx as unknown as Db, parent,
+              );
+              if (managedHermesPredecessorSettlement) {
+                enrichedContextSnapshot.managedHermesPredecessorSettlement = managedHermesPredecessorSettlement;
               }
               automaticParentAgentId = parent.agentId;
             }

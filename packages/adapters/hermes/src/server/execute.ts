@@ -417,6 +417,9 @@ export function normalizeManagedBudgetCode(
   code: string | undefined,
   failureReason: string | undefined,
 ): { code: string; valid: boolean } | null {
+  if (code === "run_request_budget_exhausted") {
+    return { code, valid: true };
+  }
   const derived = failureReason === "cumulative_input_tokens_exceeded"
     ? "execution_input_budget_exceeded"
     : failureReason && MODEL_CONTEXT_FAILURE_REASONS.has(failureReason)
@@ -1008,7 +1011,7 @@ export async function execute(
     // even when the transcript/session ID is resumed.
     executionResult.usageBasis = "per_run";
   }
-  if (durableCallEvidence && durableCallEvidence.confirmedResponses > 0) {
+  if (durableCallEvidence?.complete && durableCallEvidence.confirmedResponses > 0) {
     executionResult.usage = {
       inputTokens: durableCallEvidence.inputTokens,
       outputTokens: durableCallEvidence.outputTokens,
@@ -1019,6 +1022,25 @@ export async function execute(
     executionResult.costUsd = runResult.estimated_cost_usd;
   }
   executionResult.budgetTelemetry = hermesBudgetTelemetry(runResult, childRuntimeMs);
+  if (ctx.autonomousBudgetEnvelope) {
+    executionResult.budgetTelemetry = undefined;
+    if (durableCallEvidence?.complete && durableCallEvidence.costMicrousd != null &&
+        durableCallEvidence.providerRuntimeMs != null &&
+        durableCallEvidence.providerRequestIds.length > 0) {
+      const costMicrousd = durableCallEvidence.costMicrousd;
+      if (Number.isSafeInteger(costMicrousd)) {
+        executionResult.budgetTelemetry = {
+          providerRequestId: durableCallEvidence.providerRequestIds[0],
+          requestCount: durableCallEvidence.requestCount,
+          inputTokens: durableCallEvidence.inputTokens,
+          outputTokens: durableCallEvidence.outputTokens,
+          runtimeMs: durableCallEvidence.providerRuntimeMs,
+          costMicrousd,
+          rateCardVersion: `hermes-provider-evidence-v${durableCallEvidence.contractVersion}`,
+        };
+      }
+    }
+  }
   const codexSubscriptionTelemetryComplete = Boolean(
     executionResult.budgetTelemetry && runResult?.version === 2 &&
     runResult.provider === "openai-codex" && runResult.cost_status === "included" &&
@@ -1043,9 +1065,11 @@ export async function execute(
       billingType: codexSubscriptionTelemetryComplete
         ? "subscription"
         : runResult.provider === "openrouter" ? "metered" : "unknown",
-      budgetTelemetryComplete: Boolean(
-        runResult.usage_telemetry_complete || codexSubscriptionTelemetryComplete,
-      ),
+      budgetTelemetryComplete: ctx.autonomousBudgetEnvelope
+        ? Boolean(durableCallEvidence?.complete &&
+          durableCallEvidence.terminalDiscrepancies.length === 0 &&
+          executionResult.budgetTelemetry)
+        : Boolean(runResult.usage_telemetry_complete || codexSubscriptionTelemetryComplete),
       apiCalls: runResult.api_calls,
       successfulProviderResponses: runResult.successful_provider_responses,
       usageTelemetryComplete: runResult.usage_telemetry_complete,
@@ -1053,6 +1077,7 @@ export async function execute(
       costSource: runResult.cost_source ?? null,
       costUnavailableReason: runResult.cost_unavailable_reason ?? null,
       endpointClass: runResult.endpoint_class ?? "unknown",
+      childRuntimeMs,
       providerRequestIds: runResult.provider_request_ids ?? [],
       providerInputTokens: runResult.provider_input_tokens ?? null,
       ...(runResult.budget_failure_reason !== undefined

@@ -3,6 +3,7 @@ import {
   boolean,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -52,6 +53,14 @@ export const autonomousBudgetReservations = pgTable(
     providerActivityOccurred: boolean("provider_activity_occurred").notNull().default(false),
     credentialIdentifierHash: text("credential_identifier_hash"),
     rateCardVersion: text("rate_card_version"),
+    settlementEvidence: jsonb("settlement_evidence").$type<{
+      source: string;
+      contractVersion: number;
+      runId: string;
+      digestSha256: string;
+      costBasis: string;
+      runtimeBasis: string;
+    } | null>(),
     reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
