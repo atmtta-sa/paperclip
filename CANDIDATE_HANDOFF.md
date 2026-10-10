@@ -238,11 +238,11 @@ rollout and historical reconciliation remain separate authorization boundaries.
 
 ## Online continuity canary — PASS
 
-A disposable real-provider continuity canary passed through actual Paperclip orchestration and the
-matching Hermes runtime using `openai-codex` / `gpt-5.6-sol`. One manual initial wake produced exactly
-two successful logical runs and one automatic successor. Run
-`91fb9c99-b1da-433c-b3e0-a18a2b8aac8e` completed `alpha`; run
-`f40a9d00-576b-456e-a568-6a56fef393a4` completed `beta`. Each run made three confirmed provider
+A disposable post-commit real-provider continuity canary passed through actual Paperclip orchestration
+and Hermes commit `83963838b5` using `openai-codex` / `gpt-5.6-sol`. One manual initial wake produced
+exactly two successful logical runs and one automatic successor. Run
+`44db8f04-972b-4e1f-adfb-f1c8b6710847` completed `alpha`; run
+`a20183ec-c0c1-4399-a73e-5e22f672dcd0` completed `beta`. Each run made three confirmed provider
 requests, within the approved maximum of four per run. Both contract-v3 reservations reconciled with
 `subscription_included`, null per-request monetary cost, and
 `runtimeApplicability: "unavailable_by_route"`. Session continuity persisted; there were no retries,
