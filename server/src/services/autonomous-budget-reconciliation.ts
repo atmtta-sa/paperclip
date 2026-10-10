@@ -22,6 +22,14 @@ export type AutonomousBudgetReconciliationInput = {
   provider?: string | null;
   model?: string | null;
   rateCardVersion?: string | null;
+  settlementEvidence?: {
+    source: string;
+    contractVersion: number;
+    runId: string;
+    digestSha256: string;
+    costBasis: string;
+    runtimeBasis: string;
+  } | null;
 };
 
 type NormalizedActual = {
@@ -83,7 +91,8 @@ function reconciliationMatches(
     row.actualInputTokens === (actual?.inputTokens ?? null) &&
     row.actualOutputTokens === (actual?.outputTokens ?? null) &&
     row.actualRuntimeMs === (actual?.runtimeMs ?? null) &&
-    row.actualCostMicrousd === (actual?.costMicrousd ?? null)
+    row.actualCostMicrousd === (actual?.costMicrousd ?? null) &&
+    JSON.stringify(row.settlementEvidence ?? null) === JSON.stringify(input.settlementEvidence ?? null)
   );
 }
 
@@ -199,6 +208,7 @@ export async function reconcileAutonomousBudget(
           ? Math.max(0, actual.inputTokens - row.reservedInputTokens)
           : 0,
         rateCardVersion: input.rateCardVersion ?? row.rateCardVersion,
+        settlementEvidence: input.settlementEvidence ?? null,
         reconciledAt: new Date(),
         updatedAt: new Date(),
       })

@@ -59,6 +59,17 @@ import { buildPrompt, execute, normalizeManagedBudgetCode } from "./execute.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
 import * as serverUtils from "@paperclipai/adapter-utils/server-utils";
 
+const noDurableEvidence = {
+  status: "read_failed" as const, source: "hermes_sqlite_transport_owner" as const,
+  contractVersion: null, runId: "test-run-1", complete: false,
+  iterationAttempts: 0, providerDispatches: 0, confirmedResponses: 0,
+  pretransportDenials: 0, unknownOutcomes: 0, requestCount: 0,
+  inputTokens: 0, outputTokens: 0, providerRequestIds: [], estimatedCostUsd: null,
+  providerRuntimeMs: null, runtimeBasis: null, costMicrousd: null, costBasis: null,
+  costAuthority: null, costAuthorityRef: null,
+  rateCardSnapshots: [], terminalDiscrepancies: [],
+};
+
 function makeCtx(overrides: Record<string, unknown> = {}) {
   const onSpawn = vi.fn(async () => undefined);
   return {
@@ -100,7 +111,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
 describe("hermes-local adapter onSpawn forwarding", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(readDurableHermesCallEvidence).mockReset().mockReturnValue(null);
+    vi.mocked(readDurableHermesCallEvidence).mockReset().mockReturnValue(noDurableEvidence);
     vi.mocked(readDurableHermesPretransportEvidence).mockReset().mockReturnValue(null);
   });
 
@@ -123,9 +134,13 @@ describe("hermes-local adapter onSpawn forwarding", () => {
   it("recovers attributed usage when terminal output is absent without certifying billing", async () => {
     const { ctx } = makeCtx();
     const evidence = {
-      runId: ctx.runId, complete: true, requestCount: 1, confirmedResponses: 1,
+      status: "complete" as const, source: "hermes_sqlite_transport_owner" as const,
+      contractVersion: 1, runId: ctx.runId, complete: true,
+      iterationAttempts: 1, providerDispatches: 1, pretransportDenials: 0,
+      unknownOutcomes: 0, requestCount: 1, confirmedResponses: 1,
       inputTokens: 100, outputTokens: 20, providerRequestIds: ["synthetic-1"],
-      estimatedCostUsd: 0.00014, externalBillingVerified: false as const,
+      estimatedCostUsd: 0.00014, providerRuntimeMs: null, runtimeBasis: null,
+      costMicrousd: null, costBasis: null, costAuthority: null, costAuthorityRef: null,
       rateCardSnapshots: [], terminalDiscrepancies: [],
     };
     vi.mocked(readDurableHermesCallEvidence).mockReturnValueOnce(evidence);
@@ -576,6 +591,36 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     });
   });
 
+  it("normalizes request-cap exhaustion as non-retryable", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json")
+        ? JSON.stringify({
+            version: 2,
+            failed: true,
+            partial: true,
+            stop_reason: "run_request_budget_exhausted",
+            turn_exit_reason: "run_request_budget_exhausted",
+            provider: "openai-codex",
+            model: "gpt-5.3-codex",
+            api_calls: 2,
+            successful_provider_responses: 1,
+            usage_telemetry_complete: false,
+          })
+        : "",
+    );
+    const { ctx } = makeCtx();
+
+    const result = await execute(ctx as any);
+
+    expect(result.errorCode).toBe("run_request_budget_exhausted");
+    expect(result.retryHint).toBe("non_retryable");
+    expect(result.clearSession).toBeUndefined();
+    expect(result.resultJson).toMatchObject({
+      turn_exit_reason: "run_request_budget_exhausted",
+      retryHint: "non_retryable",
+    });
+  });
+
   it("preserves a modern model-context limit as non-retryable", async () => {
     vi.mocked(fs.readFile).mockImplementation(async (file) =>
       String(file).endsWith(".result.json")
@@ -797,6 +842,49 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(result.resultJson).toMatchObject({
       provider: "openai-codex", billingType: "subscription",
       budgetTelemetryComplete: true, usageTelemetryComplete: false, costSource: "none",
+    });
+  });
+
+  it("settles one durable dispatch when the second iteration is denied pretransport", async () => {
+    vi.mocked(fs.readFile).mockImplementation(async (file) =>
+      String(file).endsWith(".result.json") ? JSON.stringify({
+        version: 2, provider: "openai-codex", model: "gpt-5.6-sol",
+        endpoint_class: "unknown", api_calls: 2, successful_provider_responses: 1,
+        usage_telemetry_complete: false, input_tokens: 100, provider_input_tokens: 100,
+        output_tokens: 20, estimated_cost_usd: 0, cost_status: "included", cost_source: "none",
+        cost_unavailable_reason: null, provider_request_ids: ["response-1"],
+        turn_exit_reason: "run_request_budget_exhausted", failed: true, partial: true,
+      }) : "",
+    );
+    const durableCallEvidence = {
+      status: "complete" as const, source: "hermes_sqlite_transport_owner" as const,
+      contractVersion: 2, runId: "test-run-1", complete: true,
+      iterationAttempts: 2, providerDispatches: 1, confirmedResponses: 1,
+      pretransportDenials: 1, unknownOutcomes: 0, requestCount: 1,
+      inputTokens: 100, outputTokens: 20, providerRequestIds: ["response-1"],
+      providerRuntimeMs: 10, runtimeBasis: "confirmed_provider_call_ms_v1" as const,
+      costMicrousd: 280, costBasis: "provider_actual" as const,
+      costAuthority: "provider_usage_response" as const,
+      costAuthorityRef: "response-1", estimatedCostUsd: 0,
+      rateCardSnapshots: [{ rate_card_id: "a".repeat(64), currency: "USD" }],
+      terminalDiscrepancies: [],
+    };
+    vi.mocked(readDurableHermesCallEvidence).mockReturnValueOnce(durableCallEvidence);
+    const { ctx } = makeCtx({ provider: "openai-codex" });
+    (ctx as any).autonomousBudgetEnvelope = {
+      requestCount: 1, inputTokens: 1_000, outputTokens: 500,
+      runtimeMs: 300_000, costMicrousd: 1_000,
+    };
+
+    const result = await execute(ctx as any);
+
+    expect(result.errorCode).toBe("run_request_budget_exhausted");
+    expect(result.retryHint).toBe("non_retryable");
+    expect(result.budgetTelemetry).toMatchObject({ requestCount: 1,
+      providerRequestId: "response-1", inputTokens: 100, outputTokens: 20, costMicrousd: 280 });
+    expect(result.resultJson?.durableCallEvidence).toMatchObject({
+      iterationAttempts: 2, providerDispatches: 1, confirmedResponses: 1,
+      pretransportDenials: 1, requestCount: 1,
     });
   });
 

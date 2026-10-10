@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { reserveAutonomousBudget } from "../services/autonomous-budget-reservations.js";
 import { reconcileAutonomousBudget } from "../services/autonomous-budget-reconciliation.js";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -119,24 +119,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     // table status poll cannot see.
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     mockAdapterExecute.mockReset();
-    mockAdapterExecute.mockImplementation(async () => ({
-      exitCode: 0,
-      signal: null,
-      timedOut: false,
-      errorMessage: null,
-      summary: "Issue rewake throttle test run.",
-      provider: "test",
-      model: "test-model",
-      budgetTelemetry: {
-        providerRequestId: randomUUID(),
-        requestCount: 1,
-        inputTokens: 10,
-        outputTokens: 5,
-        runtimeMs: 100,
-        costMicrousd: 1,
-        rateCardVersion: "test-v1",
-      },
-    }));
+    mockAdapterExecute.mockImplementation(successfulAdapterResult);
     // Post-run bookkeeping (run-event records, follow-up wake scheduling) can
     // still write for a moment after a run reaches a terminal status, so a
     // single delete sweep can hit a foreign-key violation when a late insert
@@ -196,6 +179,59 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         evidence: ["No unresolved issue dependency"],
       },
       nextAction: "Run the focused typecheck.",
+    };
+  }
+
+  function durableEvidence(runId: string, receipt: {
+    providerRequestIds: string[]; inputTokens: number; outputTokens: number;
+    costMicrousd: number; runtimeMs?: number; pretransportDenials?: number;
+  }) {
+    const pretransportDenials = receipt.pretransportDenials ?? 0;
+    const dispatched = receipt.providerRequestIds.length > 0;
+
+    return {
+      status: "complete", source: "hermes_sqlite_transport_owner", contractVersion: 2,
+      runId, complete: true,
+      iterationAttempts: receipt.providerRequestIds.length + pretransportDenials,
+      providerDispatches: receipt.providerRequestIds.length,
+      confirmedResponses: receipt.providerRequestIds.length,
+      pretransportDenials, unknownOutcomes: 0,
+      requestCount: receipt.providerRequestIds.length,
+      inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens,
+      providerRequestIds: receipt.providerRequestIds,
+      providerRuntimeMs: dispatched ? (receipt.runtimeMs ?? 100) : 0,
+      runtimeBasis: "confirmed_provider_call_ms_v1",
+      costMicrousd: receipt.costMicrousd,
+      costBasis: dispatched
+        ? "provider_actual"
+        : "pretransport_zero",
+      costAuthority: dispatched
+        ? "provider_usage_response"
+        : "transport_owner_never_crossed",
+      costAuthorityRef: receipt.providerRequestIds[0] ?? `exact-run-denial:${runId}`,
+      estimatedCostUsd: receipt.costMicrousd / 1_000_000,
+      terminalDiscrepancies: [],
+    };
+  }
+
+  async function successfulAdapterResult(
+    ctx: { runId: string },
+    continueConversation = false,
+  ) {
+    const providerRequestId = randomUUID();
+    return {
+      exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+      summary: "Issue rewake throttle test run.", provider: "test", model: "test-model",
+      usage: { inputTokens: 10, outputTokens: 5 }, usageBasis: "per_run" as const,
+      budgetTelemetry: { providerRequestId, requestCount: 1, inputTokens: 10,
+        outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "test-v1" },
+      resultJson: { successfulProviderResponses: 1, usageTelemetryComplete: true,
+        ...(continueConversation ? { conversationContinuation: "continue_conversation_v1" } : {}),
+        providerRequestIds: [providerRequestId], costStatus: "actual", cost_usd: 0.000001,
+        durableCallEvidence: durableEvidence(ctx.runId, {
+          providerRequestIds: [providerRequestId], inputTokens: 10,
+          outputTokens: 5, costMicrousd: 1,
+        }) },
     };
   }
 
@@ -331,11 +367,13 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         errorCode: "managed_progress_policy_invalid", retryHint: "non_retryable",
         errorMessage: "Error: managed_progress_baseline_unavailable",
         resultJson: { turn_exit_reason: "managed_progress_policy_invalid", successfulProviderResponses: 0,
-          ...(variant === "confirmed_usage" ? { durableCallEvidence: { confirmedResponses: 1 } } : {}),
-          pretransportEvidence: { version: 1, source: "hermes_sqlite_transport_owner",
-            runId: variant === "wrong_run" ? randomUUID() : ctx.runId, sessionId: "shared",
-            attestationId: randomUUID(), startedAt: 1, sealedAt: 2,
-            boundary: "never_crossed", complete: true, terminalReason: "managed_progress_policy_invalid" } },
+          durableCallEvidence: variant === "confirmed_usage"
+            ? durableEvidence(ctx.runId, { providerRequestIds: [randomUUID()], inputTokens: 1,
+              outputTokens: 0, costMicrousd: 1 })
+            : durableEvidence(variant === "wrong_run" ? randomUUID() : ctx.runId, {
+              providerRequestIds: [], inputTokens: 0, outputTokens: 0,
+              costMicrousd: 0, pretransportDenials: 1,
+            }) },
       })) as any);
       expect(await assignmentWake(agentId, issueId)).not.toBeNull();
       await drainHeartbeatRunsToQuiescence(db, heartbeat);
@@ -379,6 +417,46 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
           settlementState: "uncertain_requires_reconciliation", accountingErrorCode: "telemetry_missing" } });
     },
   );
+
+  it("settles one confirmed request and creates no successor after request-cap denial", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db.update(agents).set({ adapterType: "hermes_local" }).where(eq(agents.id, agentId));
+    mockAdapterExecute.mockImplementation((async (ctx: { runId: string }) => ({
+      exitCode: 1, signal: null, timedOut: false, provider: "openai-codex", model: "fixture",
+      errorCode: "adapter_failed", errorMessage: "Error: run_request_budget_exhausted",
+      usageBasis: "per_run", usage: { inputTokens: 100, outputTokens: 20 },
+      budgetTelemetry: { providerRequestId: "response-1", requestCount: 1,
+        inputTokens: 100, outputTokens: 20, runtimeMs: 10, costMicrousd: 0,
+        rateCardVersion: "hermes-provider-evidence-v1" },
+      resultJson: {
+        provider: "openai-codex", turn_exit_reason: "run_request_budget_exhausted",
+        conversationContinuation: "continue_conversation_v1", budgetTelemetryComplete: true,
+        usageTelemetryComplete: false,
+        durableCallEvidence: {
+          status: "complete", source: "hermes_sqlite_transport_owner", contractVersion: 2,
+          runId: ctx.runId, complete: true, iterationAttempts: 2, providerDispatches: 1,
+          confirmedResponses: 1, pretransportDenials: 1, unknownOutcomes: 0,
+          requestCount: 1, inputTokens: 100, outputTokens: 20,
+          providerRequestIds: ["response-1"], providerRuntimeMs: 10,
+          runtimeBasis: "confirmed_provider_call_ms_v1", costMicrousd: 0,
+          costBasis: "provider_actual",
+          costAuthority: "provider_usage_response",
+          costAuthorityRef: "response-1", estimatedCostUsd: 0,
+          terminalDiscrepancies: [],
+        },
+      },
+    })) as any);
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", errorCode: "adapter_failed" });
+    const [reservation] = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, runs[0]!.id));
+    expect(reservation).toMatchObject({ actualRequestCount: 1 });
+  });
 
   it("does not erase a different-agent predecessor to bypass uncertain accounting", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
@@ -454,7 +532,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("contains a failing fake provider within one logical execution", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
-    mockAdapterExecute.mockImplementation(async () => {
+    mockAdapterExecute.mockImplementation(async (ctx: { runId: string }) => {
       const providerRequestId = randomUUID();
       return {
         exitCode: 1,
@@ -478,6 +556,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
           costStatus: "actual",
           cost_usd: 0.000001,
           providerRequestIds: [providerRequestId],
+          durableCallEvidence: durableEvidence(ctx.runId, {
+            providerRequestIds: [providerRequestId], inputTokens: 10,
+            outputTokens: 5, costMicrousd: 1,
+          }),
         },
         budgetTelemetry: {
           providerRequestId,
@@ -588,14 +670,18 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
   it("does not classify a response-free Hermes run as productive when issue state changes", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     const providerRequestId = randomUUID();
-    mockAdapterExecute.mockImplementationOnce(async () => {
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => {
       await db.update(issues).set({ title: "Changed independently during empty response" }).where(eq(issues.id, issueId));
       return {
         exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
         usage: { inputTokens: 10, outputTokens: 5 }, usageBasis: "per_run" as const,
         resultJson: { result: "", apiCalls: 1, successfulProviderResponses: 1,
           usageTelemetryComplete: true, costStatus: "actual", cost_usd: 0.000001,
-          providerRequestIds: [providerRequestId] },
+          providerRequestIds: [providerRequestId],
+          durableCallEvidence: durableEvidence(ctx.runId, {
+            providerRequestIds: [providerRequestId], inputTokens: 10,
+            outputTokens: 5, costMicrousd: 1,
+          }) },
         budgetTelemetry: { providerRequestId, requestCount: 1, inputTokens: 10,
           outputTokens: 5, runtimeMs: 100, costMicrousd: 1, rateCardVersion: "test-v1" },
       };
@@ -637,9 +723,9 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(reservation?.status).not.toBe("reconciled");
   });
 
-  it("reconciles an attributed OpenAI Codex subscription response without metered cost", async () => {
+  it("retains self-asserted OpenAI Codex subscription authority", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
-    mockAdapterExecute.mockImplementationOnce(async () => ({
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => ({
       exitCode: 0, signal: null, timedOut: false,
       provider: "openai-codex", model: "gpt-5.6-sol",
       usage: { inputTokens: 35_643, outputTokens: 468 }, usageBasis: "per_run",
@@ -652,9 +738,20 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
           "resp_subscription_1", "resp_subscription_2", "resp_subscription_3",
           "resp_subscription_4", "resp_subscription_5", "resp_subscription_6",
         ],
+        durableCallEvidence: {
+          ...durableEvidence(ctx.runId, {
+            providerRequestIds: [
+              "resp_subscription_1", "resp_subscription_2", "resp_subscription_3",
+              "resp_subscription_4", "resp_subscription_5", "resp_subscription_6",
+            ], inputTokens: 35_643, outputTokens: 468, costMicrousd: 0,
+            pretransportDenials: 1,
+          }),
+          costBasis: "subscription_included",
+          costAuthority: "openai_codex_authenticated_subscription",
+        },
       },
       budgetTelemetry: {
-        providerRequestId: "resp_subscription_1", requestCount: 7,
+        providerRequestId: "resp_subscription_1", requestCount: 6,
         inputTokens: 35_643, outputTokens: 468, runtimeMs: 100, costMicrousd: 0,
         rateCardVersion: "openai-codex-subscription-v1",
       },
@@ -664,12 +761,12 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     const [reservation] = await db.select({ status: autonomousBudgetReservations.status })
       .from(autonomousBudgetReservations).where(eq(autonomousBudgetReservations.companyId, companyId));
-    expect(reservation?.status).toBe("reconciled");
+    expect(reservation?.status).toBe("retained_missing_telemetry");
     const runs = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode,
       resultJson: heartbeatRuns.resultJson }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
     const run = runs.find((row) =>
       (row.resultJson as Record<string, unknown> | null)?.billingType === "subscription");
-    expect(run).toMatchObject({ status: "succeeded", errorCode: null });
+    expect(run).toMatchObject({ status: "failed", errorCode: "telemetry_missing" });
   });
 
   it("retains the reservation when Hermes cost is estimated despite nominal budget telemetry", async () => {
@@ -748,12 +845,16 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("reconciles one matching Hermes request only with actual cost evidence", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
-    mockAdapterExecute.mockImplementationOnce(async () => ({
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => ({
       exitCode: 0, signal: null, timedOut: false, provider: "test", model: "test-model",
       usage: { inputTokens: 10, outputTokens: 5 }, usageBasis: "per_run",
       resultJson: { result: "Finished", apiCalls: 1, successfulProviderResponses: 1,
         usageTelemetryComplete: true, costStatus: "actual", costUnavailableReason: null,
-        cost_usd: 0.002, providerRequestIds: ["gen-response-actual"] },
+        cost_usd: 0.002, providerRequestIds: ["gen-response-actual"],
+        durableCallEvidence: durableEvidence(ctx.runId, {
+          providerRequestIds: ["gen-response-actual"], inputTokens: 10,
+          outputTokens: 5, costMicrousd: 2000,
+        }) },
       budgetTelemetry: { providerRequestId: "gen-response-actual", requestCount: 1,
         inputTokens: 10, outputTokens: 5, runtimeMs: 100, costMicrousd: 2000,
         rateCardVersion: "test-v1" },
@@ -843,34 +944,26 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         ].join("\n"),
       })
       .where(eq(issues.id, issueId));
-    const rolloverResult = () => ({
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: "Session rollover required",
-      errorCode: SESSION_ROLLOVER_WAKE_REASON,
-      clearSession: true,
-      summary: "Checkpointed work; verification remains.",
-      provider: "test",
-      model: "test-model",
-      resultJson: {
-        turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON,
-        executionCheckpoint: validExecutionCheckpoint(),
-      },
-      budgetTelemetry: {
-        providerRequestId: randomUUID(),
-        requestCount: 1,
-        inputTokens: 10,
-        outputTokens: 5,
-        runtimeMs: 100,
-        costMicrousd: 1,
-        rateCardVersion: "test-v1",
-      },
-    });
+    const rolloverResult = async (ctx: { runId: string }) => {
+      const completed = await successfulAdapterResult(ctx);
+      return {
+        ...completed,
+        exitCode: 1,
+        errorMessage: "Session rollover required",
+        errorCode: SESSION_ROLLOVER_WAKE_REASON,
+        clearSession: true,
+        summary: "Checkpointed work; verification remains.",
+        resultJson: {
+          ...completed.resultJson,
+          turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON,
+          executionCheckpoint: validExecutionCheckpoint(),
+        },
+      };
+    };
     mockAdapterExecute.mockClear();
     mockAdapterExecute
-      .mockImplementationOnce(async () => rolloverResult())
-      .mockImplementationOnce(async () => rolloverResult());
+      .mockImplementationOnce(rolloverResult)
+      .mockImplementationOnce(rolloverResult);
 
     const inheritedFingerprint = await loadIssueTaskStateFingerprint({
       db,
@@ -946,9 +1039,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("does not misclassify a pre-provider session rollover as missing telemetry", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db.update(agents).set({ adapterType: "hermes_local" }).where(eq(agents.id, agentId));
     mockAdapterExecute.mockClear();
     mockAdapterExecute
-      .mockImplementationOnce(async () => ({
+      .mockImplementationOnce(async (ctx: { runId: string }) => ({
         exitCode: 1,
         signal: null,
         timedOut: false,
@@ -959,14 +1053,19 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         model: "test-model",
         resultJson: {
           turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON,
+          conversationContinuation: "continue_conversation_v1",
           executionCheckpoint: validExecutionCheckpoint(),
           apiCalls: 0,
           successfulProviderResponses: 0,
           providerRequestIds: [],
           usageTelemetryComplete: false,
+          durableCallEvidence: durableEvidence(ctx.runId, {
+            providerRequestIds: [], inputTokens: 0, outputTokens: 0,
+            costMicrousd: 0, pretransportDenials: 1,
+          }),
         },
       }))
-      .mockImplementationOnce(async () => ({
+      .mockImplementationOnce(async (ctx: { runId: string }) => ({
         exitCode: 0,
         signal: null,
         timedOut: false,
@@ -984,6 +1083,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
           successfulProviderResponses: 1,
           providerRequestIds: ["rollover-success-request"],
           usageTelemetryComplete: true,
+          durableCallEvidence: durableEvidence(ctx.runId, {
+            providerRequestIds: ["rollover-success-request"], inputTokens: 10,
+            outputTokens: 5, costMicrousd: 0,
+          }),
         },
         usage: { inputTokens: 10, outputTokens: 5 },
         usageBasis: "per_run" as const,
@@ -1007,6 +1110,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       errorCode: heartbeatRuns.errorCode,
       scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
       scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+      contextSnapshot: heartbeatRuns.contextSnapshot,
     }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))
       .orderBy(heartbeatRuns.createdAt);
     expect(runs).toHaveLength(2);
@@ -1017,6 +1121,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(runs[1]).toMatchObject({
       status: "scheduled_retry",
       scheduledRetryReason: SESSION_ROLLOVER_RETRY_REASON,
+    });
+    expect(runs[1]?.contextSnapshot?.managedHermesPredecessorSettlement).toMatchObject({
+      source: "hermes_sqlite_transport_owner", contractVersion: 2, runId: runs[0]?.id,
+      digestSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
 
     const reservations = await db.select({ status: autonomousBudgetReservations.status })
@@ -1168,7 +1276,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("settles attributed execution-input exhaustion without scheduling a retry", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
-    mockAdapterExecute.mockResolvedValueOnce({
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => ({
       exitCode: 1,
       signal: null,
       timedOut: false,
@@ -1205,8 +1313,12 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         usageTelemetryComplete: true,
         turn_exit_reason: "execution_input_budget_exceeded",
         budgetFailureReason: "cumulative_input_tokens_exceeded",
+        durableCallEvidence: durableEvidence(ctx.runId, {
+          providerRequestIds: ["phase9-request-1", "phase9-request-2", "phase9-request-3"],
+          inputTokens: 29_729, outputTokens: 634, costMicrousd: 0, runtimeMs: 90_000,
+        }),
       },
-    });
+    }));
 
     expect(await assignmentWake(agentId, issueId)).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
@@ -1305,7 +1417,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("settles attributed no-progress usage without scheduling a retry", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
-    mockAdapterExecute.mockResolvedValueOnce({
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => ({
       exitCode: 1,
       signal: null,
       timedOut: false,
@@ -1345,8 +1457,12 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
           workspace_changed: false,
           verification_commands: 0,
         },
+        durableCallEvidence: durableEvidence(ctx.runId, {
+          providerRequestIds: ["no-progress-request-1", "no-progress-request-2"],
+          inputTokens: 12_000, outputTokens: 500, costMicrousd: 0, runtimeMs: 45_000,
+        }),
       },
-    });
+    }));
 
     expect(await assignmentWake(agentId, issueId)).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
@@ -1425,6 +1541,8 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementation((ctx: { runId: string }) =>
+      successfulAdapterResult(ctx, true));
 
     expect(await assignmentWake(agentId, issueId)).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
@@ -1567,28 +1685,14 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       outcome: "provider_quota",
       now: new Date("2020-01-01T00:00:00.000Z"),
     });
-    mockAdapterExecute.mockImplementationOnce(async () => {
+    mockAdapterExecute.mockImplementationOnce(async (ctx: { runId: string }) => {
       await db
         .update(issues)
         .set({ description: "Verified provider progress" })
         .where(eq(issues.id, issueId));
       return {
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        errorMessage: null,
+        ...await successfulAdapterResult(ctx),
         summary: "Completed verified work.",
-        provider: "test",
-        model: "test-model",
-        budgetTelemetry: {
-          providerRequestId: randomUUID(),
-          requestCount: 1,
-          inputTokens: 10,
-          outputTokens: 5,
-          runtimeMs: 100,
-          costMicrousd: 1,
-          rateCardVersion: "test-v1",
-        },
       };
     });
 
@@ -1619,6 +1723,8 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
 
   it("reopens a nonproductive half-open probe without counting a provider failure", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    mockAdapterExecute.mockImplementation((ctx: { runId: string }) =>
+      successfulAdapterResult(ctx, true));
     const lastFailureRunId = randomUUID();
     await recordAutonomousProviderCircuitOutcome(db, {
       companyId,
@@ -1635,7 +1741,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     const [run] = await db
       .select()
       .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.companyId, companyId));
+      .where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        isNull(heartbeatRuns.retryOfRunId),
+      ));
     expect(run).toMatchObject({ status: "succeeded", workOutcome: "no_progress" });
     const [providerCircuit] = await db
       .select()
@@ -1834,6 +1943,8 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
   it("replays 247 unchanged blocker wakes without another fake-provider dispatch", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     mockAdapterExecute.mockClear();
+    mockAdapterExecute.mockImplementation((ctx: { runId: string }) =>
+      successfulAdapterResult(ctx, true));
 
     expect(await assignmentWake(agentId, issueId)).not.toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
@@ -1864,8 +1975,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(runs).toHaveLength(2);
     expect(runs.some((run) => run.continuityCircuitState === "open")).toBe(true);
     const calls = mockAdapterExecute.mock.calls;
-    expect(calls.every(([context]) => context.autonomousBudgetEnvelope?.inputTokens === 64_000
-      && context.autonomousBudgetEnvelope?.costMicrousd === 250_000)).toBe(true);
+    expect(calls.map(([context]) => context.autonomousBudgetEnvelope?.inputTokens))
+      .toEqual([64_000, 63_990]);
+    expect(calls.map(([context]) => context.autonomousBudgetEnvelope?.costMicrousd))
+      .toEqual([250_000, 249_999]);
     const fakeResults = await Promise.all(mockAdapterExecute.mock.results.map((result) => result.value));
     expect(fakeResults.every((result) => result.budgetTelemetry.inputTokens <= 64_000)).toBe(true);
     expect(fakeResults.reduce((cost, result) => cost + result.budgetTelemetry.costMicrousd, 0))

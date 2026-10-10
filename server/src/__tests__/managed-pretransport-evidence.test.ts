@@ -11,8 +11,8 @@ function result() {
 }
 
 describe("managed pre-transport settlement evidence", () => {
-  it("accepts completed exact-run transport-owner evidence without claiming billing", () => {
-    expect(verifyManagedPretransportEvidence(result(), "run-A")).toBe(true);
+  it("rejects legacy v1 transport-owner evidence for new successor authority", () => {
+    expect(verifyManagedPretransportEvidence(result(), "run-A")).toBe(false);
   });
   it.each([
     { runId: "run-B" }, { complete: false }, { source: "agent_claim" },

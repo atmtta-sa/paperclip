@@ -7,7 +7,12 @@ import { settleSyntheticRetryPredecessor } from "./helpers/synthetic-retry-settl
 import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 import { reserveAutonomousBudget } from "../services/autonomous-budget-reservations.js";
 import { reconcileAutonomousBudget } from "../services/autonomous-budget-reconciliation.js";
-import { lockEligibleAutomaticSuccessorSettlement } from "../services/automatic-successor-settlement.js";
+import {
+  lockEligibleAutomaticSuccessorSettlement,
+  predecessorRetryAuthorityAllows,
+  predecessorRetryPolicyAllows,
+} from "../services/automatic-successor-settlement.js";
+import { managedHermesSettlementProvenance } from "../services/managed-budget-evidence.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 
@@ -24,12 +29,12 @@ describe("automatic successor accounting eligibility", () => {
     await database?.cleanup();
   });
 
-  async function fixture() {
+  async function fixture(adapterType = "hermes_local") {
     const [company] = await db.insert(companies).values({
       name: "Successor accounting fixture", issuePrefix: randomUUID(), autonomousExecutionPaused: false,
     }).returning();
     const [agent] = await db.insert(agents).values({
-      companyId: company!.id, name: "Fixture", role: "engineer", adapterType: "hermes_local",
+      companyId: company!.id, name: "Fixture", role: "engineer", adapterType,
     }).returning();
     const [issue] = await db.insert(issues).values({
       companyId: company!.id, title: "Accounting prerequisite", status: "in_progress",
@@ -58,7 +63,9 @@ describe("automatic successor accounting eligibility", () => {
     await db.update(heartbeatRuns).set({ resultJson: {
       executionRecovery: { kind: "provider", providerWorkStarted: true },
     } }).where(eq(heartbeatRuns.id, run.id));
-    await settleSyntheticRetryPredecessor(db, run.id, { basis: "synthetic_completed_request" });
+    await settleSyntheticRetryPredecessor(db, run.id, {
+      basis: "synthetic_completed_request", provider: "hermes_local",
+    });
     return run;
   }
 
@@ -77,8 +84,62 @@ describe("automatic successor accounting eligibility", () => {
       verifiedNoProviderActivity: true, providerRequestId: null, actual: null });
   }
 
-  it("permits a terminal exact-run accounting-owner settlement", async () => {
-    expect(await eligible(await settled())).toBe(true);
+  it("rejects a consumed managed Hermes predecessor without v2 durable evidence", async () => {
+    expect(await eligible(await settled())).toBe(false);
+  });
+
+  it("preserves legacy non-Hermes settlement eligibility without usage projection", async () => {
+    const run = await fixture("test");
+    await update(run, { resultJson: {
+      executionRecovery: { kind: "provider", providerWorkStarted: true },
+    } });
+    await settleSyntheticRetryPredecessor(db, run.id, {
+      basis: "synthetic_completed_request", provider: "test",
+    });
+    expect(await eligible(run)).toBe(true);
+  });
+
+  it("requires v2 durable evidence for a consumed managed Hermes predecessor", async () => {
+    const run = await fixture();
+    const durableCallEvidence = {
+      status: "complete", source: "hermes_sqlite_transport_owner", contractVersion: 2,
+      runId: run.id, complete: true, iterationAttempts: 1, providerDispatches: 1,
+      confirmedResponses: 1, pretransportDenials: 0, unknownOutcomes: 0,
+      requestCount: 1, inputTokens: 1, outputTokens: 1,
+      providerRuntimeMs: 1, runtimeBasis: "confirmed_provider_call_ms_v1",
+      providerRequestIds: [`synthetic-retry-receipt:${run.id}`],
+      costMicrousd: 1, costBasis: "provider_actual",
+      costAuthority: "provider_usage_response",
+      costAuthorityRef: `synthetic-retry-receipt:${run.id}`,
+      estimatedCostUsd: 0.000001, terminalDiscrepancies: [],
+    };
+    const adapterResult = { resultJson: { durableCallEvidence } } as any;
+    await update(run, { resultJson: {
+      executionRecovery: { kind: "provider", providerWorkStarted: true },
+      durableCallEvidence,
+    } });
+    await settleSyntheticRetryPredecessor(db, run.id, {
+      basis: "synthetic_completed_request",
+      provider: "hermes_local",
+      settlementEvidence: managedHermesSettlementProvenance(adapterResult, run.id)!,
+    });
+    const changed = await update(run, { usageJson: {
+      inputTokens: 1, outputTokens: 1, requestCount: 1, runtimeMs: 1,
+    } });
+    expect(await eligible(changed)).toBe(true);
+  });
+
+  it("denies the persisted request-cap shape despite conversation continuation", () => {
+    const persisted = {
+      errorCode: "adapter_failed",
+      resultJson: {
+        turn_exit_reason: "run_request_budget_exhausted",
+        conversationContinuation: "continue_conversation_v1",
+      },
+    } as Pick<Run, "errorCode" | "resultJson">;
+
+    expect(predecessorRetryPolicyAllows(persisted)).toBe(false);
+    expect(predecessorRetryAuthorityAllows(persisted)).toBe(false);
   });
 
   it.each(["queued", "running", "scheduled_retry", "unknown"])(
@@ -146,6 +207,20 @@ describe("automatic successor accounting eligibility", () => {
     } }))).toBe(false);
   });
 
+  it("rejects malformed durable evidence even when attributed to the same run", async () => {
+    const run = await settled();
+    expect(await eligible(await update(run, { resultJson: {
+      durableCallEvidence: {
+        status: "complete", source: "untrusted", contractVersion: 1, runId: run.id,
+        complete: true, iterationAttempts: 1, providerDispatches: 1,
+        confirmedResponses: 1, pretransportDenials: 0, unknownOutcomes: 0,
+        requestCount: 1, inputTokens: 1, outputTokens: 1,
+        providerRequestIds: [`synthetic-retry-receipt:${run.id}`], estimatedCostUsd: 0.000001,
+        terminalDiscrepancies: [],
+      },
+    } }))).toBe(false);
+  });
+
   it.each([
     { usageJson: { inputTokens: 2, outputTokens: 1 } },
     { resultJson: { budgetSettlement: { settlementState: "uncertain_requires_reconciliation" } } },
@@ -162,7 +237,7 @@ describe("automatic successor accounting eligibility", () => {
     expect(await eligible(run)).toBe(false);
   });
 
-  it("accepts exact-run sealed never-crossed evidence separately from retry permission", async () => {
+  it("rejects legacy exact-run never-crossed evidence for successor authority", async () => {
     const run = await fixture();
     await zeroRelease(run);
     const changed = await update(run, { errorCode: "managed_progress_policy_invalid", resultJson: {
@@ -171,6 +246,6 @@ describe("automatic successor accounting eligibility", () => {
         sessionId: "fixture-session", attestationId: "fixture-attestation", startedAt: 1, sealedAt: 2,
         boundary: "never_crossed", complete: true, terminalReason: "managed_progress_policy_invalid" },
     } });
-    expect(await eligible(changed)).toBe(true);
+    expect(await eligible(changed)).toBe(false);
   });
 });
