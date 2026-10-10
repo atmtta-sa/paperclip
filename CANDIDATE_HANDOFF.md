@@ -263,5 +263,6 @@ Output digests:
 - beta: `93861dbc1638a10f4756f3c8cb13178244585560c0bd470b8f7351cc53042de6`
 
 No deployment, push, merge, shared migration, shared scheduler mutation, historical reconciliation, or
-production/customer-data mutation occurred. The Paperclip reader correction, its regression, this
-handoff update, and the matching Hermes runtime changes remain uncommitted pending repository finish.
+production/customer-data mutation occurred. The Paperclip reader correction and regression are committed
+at `6166c7461`; the matching Hermes runtime/evidence changes and regressions are committed at
+`83963838b5`. Both commits remain local pending separate push/merge authorization.
