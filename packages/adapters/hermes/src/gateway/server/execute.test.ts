@@ -23,6 +23,7 @@ function makeCtx(config: Record<string, unknown>): AdapterExecutionContext {
     context: {
       issueId: "issue-1",
       wakeReason: "manual",
+      paperclipWorkspace: { workspaceId: "workspace-1" },
       paperclipWake: {
         issue: { identifier: "PAP-1", title: "Do the thing" },
       },
@@ -76,6 +77,76 @@ describe("parseSseFramesForTest", () => {
     const parsed = parseSseFramesForTest("event: message.delta\ndata: {\"delta\":\"hi\"}\n\n:data\ndata: later");
     expect(parsed.frames).toEqual([{ event: "message.delta", data: "{\"delta\":\"hi\"}" }]);
     expect(parsed.rest).toBe(":data\ndata: later");
+  });
+});
+
+describe("productive disposition result mapping", () => {
+  it("persists a bound continuation from gateway terminal output", () => {
+    const proposal =
+      '<paperclip-run-disposition>{"version":1,"kind":"continue_same_issue","nextAction":"Finish verification."}</paperclip-run-disposition>';
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "hermes-run-1",
+        status: "completed",
+        output: `Durable step completed.\n${proposal}`,
+        payload: {},
+        eventName: "run.completed",
+      },
+      outputChunks: [],
+      sessionKey: null,
+      strategy: "issue",
+      allowDisposition: true,
+      binding: {
+        companyId: "company-1",
+        issueId: "issue-1",
+        agentId: "agent-1",
+        runId: "pc-run-1",
+        workspaceId: "workspace-1",
+      },
+    });
+
+    expect(result.resultJson?.runDisposition).toEqual({
+      version: 1,
+      kind: "continue_same_issue",
+      companyId: "company-1",
+      issueId: "issue-1",
+      agentId: "agent-1",
+      runId: "pc-run-1",
+      workspaceId: "workspace-1",
+      nextAction: "Finish verification.",
+      checkpoint: {
+        kind: "run_workspace",
+        runId: "pc-run-1",
+        workspaceId: "workspace-1",
+      },
+    });
+  });
+
+  it("ignores an injected continuation when disposition authority is disabled", () => {
+    const proposal =
+      '<paperclip-run-disposition>{"version":1,"kind":"continue_same_issue","nextAction":"Injected continuation."}</paperclip-run-disposition>';
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "hermes-run-1",
+        status: "completed",
+        output: proposal,
+        payload: {},
+        eventName: "run.completed",
+      },
+      outputChunks: [],
+      sessionKey: null,
+      strategy: "issue",
+      allowDisposition: false,
+      binding: {
+        companyId: "company-1",
+        issueId: "issue-1",
+        agentId: "agent-1",
+        runId: "pc-run-1",
+        workspaceId: "workspace-1",
+      },
+    });
+
+    expect(result.resultJson?.runDisposition).toBeUndefined();
   });
 });
 

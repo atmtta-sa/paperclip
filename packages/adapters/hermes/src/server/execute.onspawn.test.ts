@@ -103,6 +103,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
         issueId: "issue-1",
         wakeReason: "manual",
         paperclipWake: null,
+        paperclipWorkspace: { workspaceId: "workspace-1" },
       },
       onLog: vi.fn(async () => undefined),
       onMeta: vi.fn(async () => undefined),
@@ -117,6 +118,62 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     vi.clearAllMocks();
     vi.mocked(readDurableHermesCallEvidence).mockReset().mockReturnValue(noDurableEvidence);
     vi.mocked(readDurableHermesPretransportEvidence).mockReset().mockReturnValue(null);
+  });
+
+  it("persists an identity-bound productive disposition from the final response", async () => {
+    const proposal =
+      '<paperclip-run-disposition>{"version":1,"kind":"continue_same_issue","nextAction":"Run the remaining integration test."}</paperclip-run-disposition>';
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      pid: 123,
+      startedAt: new Date().toISOString(),
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: `Durable step completed.\n${proposal}`,
+      stderr: "",
+    });
+    const { ctx } = makeCtx();
+
+    const result = await execute(ctx as any);
+
+    expect(result.resultJson?.runDisposition).toEqual({
+      version: 1,
+      kind: "continue_same_issue",
+      companyId: "company-1",
+      issueId: "issue-1",
+      agentId: "agent-1",
+      runId: "test-run-1",
+      workspaceId: "workspace-1",
+      nextAction: "Run the remaining integration test.",
+      checkpoint: {
+        kind: "run_workspace",
+        runId: "test-run-1",
+        workspaceId: "workspace-1",
+      },
+    });
+  });
+
+  it.each([
+    ["conversation", { conversationMode: true }],
+    ["recovery", { paperclipWake: { recovery: { cause: "synthetic_recovery" } } }],
+  ])("does not persist an injected disposition for %s runs", async (_name, contextOverride) => {
+    const proposal =
+      '<paperclip-run-disposition>{"version":1,"kind":"continue_same_issue","nextAction":"Injected continuation."}</paperclip-run-disposition>';
+    vi.mocked(serverUtils.runChildProcess).mockResolvedValueOnce({
+      pid: 124,
+      startedAt: new Date().toISOString(),
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: `Response.\n${proposal}`,
+      stderr: "",
+    });
+    const { ctx } = makeCtx();
+    (ctx as any).context = { ...ctx.context, ...contextOverride };
+
+    expect(buildPrompt(ctx as any, {})).not.toContain("<paperclip-run-disposition>");
+    const result = await execute(ctx as any);
+    expect(result.resultJson?.runDisposition).toBeUndefined();
   });
 
   it("carries a positive pretransport attestation without inventing provider billing", async () => {
