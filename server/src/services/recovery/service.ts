@@ -32,6 +32,7 @@ import {
   agents,
   agentTaskSessions,
   agentWakeupRequests,
+  automaticSuccessorIntents,
   approvals,
   activityLog,
   chatConversations,
@@ -73,6 +74,11 @@ import {
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { budgetService } from "../budgets.js";
+import {
+  buildAutomaticSuccessorWakeIdempotencyKey,
+  decideProductiveRecoveryIntent,
+  settleAutomaticSuccessorIntent,
+} from "../productive-continuation.js";
 import { unadmittedChatWakeupCondition } from "../durable-chat-wakeup.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import {
@@ -1925,10 +1931,39 @@ export function recoveryService(
       )
         return null;
     }
+    const isProductiveIntentRecovery =
+      Boolean(input.retryOfRunId) &&
+      input.source === "issue.productive_terminal_continuation_recovery";
+    const successorIntent = isProductiveIntentRecovery
+      ? await db
+          .select()
+          .from(automaticSuccessorIntents)
+          .where(
+            and(
+              eq(automaticSuccessorIntents.predecessorRunId, input.retryOfRunId!),
+              eq(automaticSuccessorIntents.issueId, input.issueId),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+      : null;
+    if (
+      isProductiveIntentRecovery &&
+      decideProductiveRecoveryIntent(successorIntent).kind !== "materialize"
+    ) {
+      return null;
+    }
     const queued = await deps.enqueueWakeup(input.agentId, {
       source: "automation",
       triggerDetail: "system",
       reason: input.reason,
+      ...(successorIntent
+        ? {
+            idempotencyKey: buildAutomaticSuccessorWakeIdempotencyKey(
+              successorIntent.id,
+            ),
+          }
+        : {}),
       // The sweep can combine an old in-progress issue snapshot with a newer
       // successful run. Validate eligibility under the enqueue issue lock so
       // completion or reassignment cannot create a redundant continuation.
@@ -1944,6 +1979,14 @@ export function recoveryService(
         {
           issueId: input.issueId,
           ...(input.retryOfRunId ? { retryOfRunId: input.retryOfRunId } : {}),
+          ...(successorIntent
+            ? {
+                automaticSuccessorIntentId: successorIntent.id,
+                productiveContinuation: true,
+                checkpointRef: successorIntent.checkpointRef,
+                nextAction: successorIntent.nextAction,
+              }
+            : {}),
           ...(input.extraContext ?? {}),
         },
         "normal_model",
@@ -1958,11 +2001,37 @@ export function recoveryService(
           retryReason: input.retryReason,
           source: input.source,
           ...(input.retryOfRunId ? { retryOfRunId: input.retryOfRunId } : {}),
+          ...(successorIntent
+            ? {
+                automaticSuccessorIntentId: successorIntent.id,
+                productiveContinuation: true,
+                checkpointRef: successorIntent.checkpointRef,
+                nextAction: successorIntent.nextAction,
+              }
+            : {}),
           ...(input.extraContext ?? {}),
         },
         "normal_model",
       ),
     });
+
+    if (successorIntent) {
+      await settleAutomaticSuccessorIntent(
+        db,
+        queued
+          ? {
+              intentId: successorIntent.id,
+              outcome: "materialized",
+              wakeupRequestId: queued.wakeupRequestId,
+              successorRunId: queued.id,
+            }
+          : {
+              intentId: successorIntent.id,
+              outcome: "denied",
+              denialReason: "materialization_denied",
+            },
+      );
+    }
 
     if (queued && input.retryOfRunId) {
       return db
