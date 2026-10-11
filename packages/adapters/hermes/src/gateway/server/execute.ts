@@ -25,6 +25,11 @@ import {
   isRemotePlainHttp,
   remotePlainHttpDeniedMessage,
 } from "./transport-security.js";
+import {
+  PAPERCLIP_RUN_DISPOSITION_INSTRUCTION,
+  extractPaperclipRunDisposition,
+  paperclipRunDispositionBinding,
+} from "../../server/run-disposition.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 
@@ -315,6 +320,9 @@ function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null
           wakePayloadJson,
           "```",
         ]
+      : []),
+    ...(ctx.context.conversationMode !== true && !isPaperclipRecoveryWakePayload(ctx.context.paperclipWake)
+      ? ["", PAPERCLIP_RUN_DISPOSITION_INSTRUCTION]
       : []),
   ];
   return lines.filter((line) => line !== null && line !== undefined).join("\n").trim();
@@ -664,6 +672,8 @@ export function mapFinalResultForTest(input: {
   sessionKey: string | null;
   strategy: SessionKeyStrategy;
   redactText?: TextRedactor;
+  allowDisposition?: boolean;
+  binding?: Parameters<typeof extractPaperclipRunDisposition>[1];
 }): AdapterExecutionResult {
   const redactText = input.redactText ?? sanitizeSensitiveText;
   const payload = input.terminal.payload ?? {};
@@ -677,6 +687,9 @@ export function mapFinalResultForTest(input: {
   const costUsd = parseCostUsd(payload);
   const errorMessage = mapped.errorCode
     ? redactText(extractErrorMessage(payload) ?? `Hermes run ${input.terminal.status}`)
+    : null;
+  const runDisposition = input.allowDisposition === true && input.binding
+    ? extractPaperclipRunDisposition(output, input.binding)
     : null;
   return {
     exitCode: mapped.exitCode,
@@ -704,6 +717,7 @@ export function mapFinalResultForTest(input: {
       output: output ?? "",
       usage: usage ?? null,
       cost_usd: costUsd,
+      ...(runDisposition ? { runDisposition } : {}),
     },
   };
 }
@@ -963,5 +977,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     sessionKey,
     strategy,
     redactText,
+    allowDisposition:
+      ctx.context.conversationMode !== true &&
+      !isPaperclipRecoveryWakePayload(ctx.context.paperclipWake),
+    binding: paperclipRunDispositionBinding(
+      ctx as Parameters<typeof paperclipRunDispositionBinding>[0],
+    ),
   });
 }

@@ -63,6 +63,11 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
+import {
+  PAPERCLIP_RUN_DISPOSITION_INSTRUCTION,
+  extractPaperclipRunDisposition,
+  paperclipRunDispositionBinding,
+} from "./run-disposition.js";
 import { hermesBudgetTelemetry } from "./budget-telemetry.js";
 import { requireManagedHermesProfile, resolveHermesProfileHome } from "./profile-policy.js";
 import {
@@ -390,6 +395,9 @@ export function buildPrompt(
     context.paperclipWake?.issue?.workMode !== "planning"
       ? BOUNDED_REPOSITORY_EXECUTION_PROMPT
       : "";
+  const allowRunDisposition =
+    context.conversationMode !== true &&
+    !isPaperclipRecoveryWakePayload(context.paperclipWake);
   return joinPromptSections([
     structuredContextMarkdown,
     wakePrompt,
@@ -397,6 +405,7 @@ export function buildPrompt(
     paperclipTaskMarkdown,
     boundedRepositoryExecution,
     rendered,
+    allowRunDisposition ? PAPERCLIP_RUN_DISPOSITION_INSTRUCTION : "",
   ]);
 }
 
@@ -1121,6 +1130,14 @@ export async function execute(
   if (parsed.response) {
     executionResult.summary = parsed.response.slice(0, 2000);
   }
+  const runDisposition = parsed.response &&
+    (ctx as any).context?.conversationMode !== true &&
+    !isPaperclipRecoveryWakePayload((ctx as any).context?.paperclipWake)
+    ? extractPaperclipRunDisposition(
+        parsed.response,
+        paperclipRunDispositionBinding(ctx as Parameters<typeof paperclipRunDispositionBinding>[0]),
+      )
+    : null;
 
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
@@ -1164,6 +1181,7 @@ export async function execute(
       ? { executionCheckpoint: runResult.execution_checkpoint }
       : {}),
     ...(turnExitReason ? { turn_exit_reason: turnExitReason } : {}),
+    ...(runDisposition ? { runDisposition } : {}),
   };
 
   // Store session ID for next run
