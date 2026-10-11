@@ -173,24 +173,6 @@ function recordedMetric(
   }
 }
 
-function remainingChainEnvelope(
-  envelope: NormalizedAutonomousBudgetRequest,
-  rows: Array<typeof autonomousBudgetReservations.$inferSelect>,
-): NormalizedAutonomousBudgetRequest {
-  const remaining = (metric: BudgetMetric) =>
-    Math.max(
-      0,
-      requestedMetric(envelope, metric) -
-        rows.reduce((total, row) => total + recordedMetric(row, metric), 0),
-    );
-  return {
-    requestCount: remaining("request_count"),
-    inputTokens: remaining("input_tokens"),
-    outputTokens: remaining("output_tokens"),
-    runtimeMs: remaining("runtime_ms"),
-    costMicrousd: envelope.costMicrousd === null ? null : remaining("billed_microusd"),
-  };
-}
 
 function windowStart(windowKind: BudgetWindowKind, now: Date): Date | null {
   if (windowKind === "calendar_day_utc") {
@@ -481,9 +463,7 @@ export async function reserveAutonomousBudget(
       );
     const requested = input.requested
       ? normalizeBudgetRequest(input.requested, billingMode)
-      : input.previousRunId
-        ? remainingChainEnvelope(deriveRunEnvelope(policies, billingMode), chainRows)
-        : deriveRunEnvelope(policies, billingMode);
+      : deriveRunEnvelope(policies, billingMode);
     const committedChainRequests = chainRows.reduce(
       (total, row) => total + recordedMetric(row, "request_count"), 0,
     );
@@ -519,7 +499,7 @@ export async function reserveAutonomousBudget(
               );
       const rows =
         policy.windowKind === "per_run"
-          ? chainRows
+          ? []
           : await tx
               .select()
               .from(autonomousBudgetReservations)
