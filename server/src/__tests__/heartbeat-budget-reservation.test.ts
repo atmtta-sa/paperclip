@@ -403,7 +403,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       .toEqual([{ executionStage: "launching" }]);
   });
 
-  it("atomically bounds concurrent continuations by one chain envelope", async () => {
+  it("atomically bounds concurrent continuations by explicit lifetime policies", async () => {
     const scope = await createCostBudgetFixture(500);
     await db.insert(budgetPolicies).values([
       { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "request_count", windowKind: "per_run", amount: 8 },
@@ -411,6 +411,11 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "output_tokens", windowKind: "per_run", amount: 8_000 },
       { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "runtime_ms", windowKind: "per_run", amount: 300_000 },
       { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "billed_microusd", windowKind: "per_run", amount: 250_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "request_count", windowKind: "lifetime", amount: 8 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "input_tokens", windowKind: "lifetime", amount: 64_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "output_tokens", windowKind: "lifetime", amount: 8_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "runtime_ms", windowKind: "lifetime", amount: 300_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "billed_microusd", windowKind: "lifetime", amount: 250_000 },
     ]);
     const rootRunId = randomUUID();
     const halfEnvelope = {
@@ -448,7 +453,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     expect(new Set(reservations.map((row) => row.chainRootRunId))).toEqual(new Set([rootRunId]));
   });
 
-  it("allocates only the remaining envelope to a continuation", async () => {
+  it("allocates a fresh per-run envelope to a continuation", async () => {
     const scope = await createCostBudgetFixture(500);
     await db.insert(budgetPolicies).values([
       { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "request_count", windowKind: "per_run", amount: 8 },
@@ -479,7 +484,79 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
 
     expect(continuation).toMatchObject({
       admitted: true,
-      envelope: halfEnvelope,
+      envelope: {
+        requestCount: 8,
+        inputTokens: 64_000,
+        outputTokens: 8_000,
+        runtimeMs: 300_000,
+        costMicrousd: 250_000,
+      },
+    });
+  });
+
+  it("allocates runtime to a subscription successor when predecessor runtime is unavailable", async () => {
+    const scope = await createCostBudgetFixture(500);
+    await db.insert(budgetPolicies).values([
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "request_count", windowKind: "per_run", amount: 4 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "input_tokens", windowKind: "per_run", amount: 32_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "output_tokens", windowKind: "per_run", amount: 4_000 },
+      { companyId: scope.companyId, scopeType: "task", scopeId: scope.issueId, metric: "runtime_ms", windowKind: "per_run", amount: 150_000 },
+    ]);
+    const rootRunId = randomUUID();
+    const billingPolicy = {
+      policyId: "codex-subscription-route",
+      policyVersion: 1,
+      policyDigest: "b".repeat(64),
+      billingMode: "subscription_included" as const,
+      credentialPrincipalId: "managed-account:codex-uat",
+      maxRootChainProviderRequests: 8,
+    };
+    expect(await reserveAutonomousBudget(db, {
+      ...scope,
+      runId: rootRunId,
+      billingPolicy,
+    })).toMatchObject({ admitted: true });
+    await reconcileAutonomousBudget(db, {
+      ...scope,
+      runId: rootRunId,
+      providerActivityOccurred: true,
+      providerRequestId: "response-subscription-root",
+      billingMode: "subscription_included",
+      actual: { requestCount: 4, inputTokens: 200, outputTokens: 40, runtimeMs: null },
+      settlementEvidence: {
+        source: "hermes_sqlite_transport_owner",
+        contractVersion: 3,
+        runId: rootRunId,
+        digestSha256: "a".repeat(64),
+        costBasis: "subscription_included",
+        runtimeBasis: null,
+        runtimeApplicability: "unavailable_by_route",
+        billingMode: "subscription_included",
+        routePolicyId: billingPolicy.policyId,
+        routePolicyVersion: billingPolicy.policyVersion,
+        routePolicyDigest: billingPolicy.policyDigest,
+        credentialPrincipalId: billingPolicy.credentialPrincipalId,
+        rootChainRequestLimit: billingPolicy.maxRootChainProviderRequests,
+        tokenAccountingBasis: "provider_reported_tokens_v1",
+      },
+    });
+
+    const successor = await reserveAutonomousBudget(db, {
+      ...scope,
+      runId: randomUUID(),
+      previousRunId: rootRunId,
+      billingPolicy,
+    });
+
+    expect(successor).toMatchObject({
+      admitted: true,
+      envelope: {
+        requestCount: 4,
+        inputTokens: 32_000,
+        outputTokens: 4_000,
+        runtimeMs: 150_000,
+        costMicrousd: null,
+      },
     });
   });
 
