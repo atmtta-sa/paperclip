@@ -1,8 +1,18 @@
-import { and, eq } from "drizzle-orm";
-import { autonomousBudgetReservations, heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { and, eq, inArray } from "drizzle-orm";
+import {
+  automaticSuccessorIntents,
+  autonomousBudgetReservations,
+  heartbeatRuns,
+  issues,
+  type Db,
+} from "@paperclipai/db";
 import { verifyManagedPretransportEvidence } from "./managed-pretransport-evidence.js";
 import { hasConversationContinuationPolicy } from "./conversation-continuation.js";
 import { managedHermesEvidenceDigest } from "./managed-budget-evidence.js";
+import {
+  predecessorProductiveContinuationAuthorityAllows,
+  productiveContinuationBindingFromRuns,
+} from "./productive-continuation.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 
@@ -301,7 +311,40 @@ export async function lockEligibleAutomaticSuccessorLaunchSettlement(
     eq(heartbeatRuns.id, input.previousRunId),
     eq(heartbeatRuns.companyId, input.companyId),
   )).for("update").then((rows) => rows[0] ?? null);
-  if (!predecessor || !predecessorRetryAuthorityAllows(predecessor) ||
-      !await matchingSuccessorBinding(db, successor, predecessor)) return false;
+  if (!predecessor || !await matchingSuccessorBinding(db, successor, predecessor)) return false;
+
+  const productiveBinding = productiveContinuationBindingFromRuns(
+    predecessor,
+    successor,
+    input.issueId,
+  );
+  if (productiveBinding) {
+    const successorContext = object(successor.contextSnapshot);
+    const intentId = successorContext?.automaticSuccessorIntentId;
+    const [intent] = typeof intentId === "string"
+      ? await db.select().from(automaticSuccessorIntents).where(and(
+          eq(automaticSuccessorIntents.id, intentId),
+          eq(automaticSuccessorIntents.companyId, input.companyId),
+          eq(automaticSuccessorIntents.issueId, input.issueId),
+          eq(automaticSuccessorIntents.agentId, input.agentId),
+          eq(automaticSuccessorIntents.predecessorRunId, input.previousRunId),
+          eq(automaticSuccessorIntents.kind, "productive"),
+          inArray(automaticSuccessorIntents.status, ["pending", "materialized"]),
+        )).for("update")
+      : [];
+    const authorizationBinding = object(intent?.authorizationBinding);
+    if (
+      !intent ||
+      authorizationBinding?.workspaceId !== productiveBinding.workspaceId ||
+      !predecessorProductiveContinuationAuthorityAllows(
+        predecessor,
+        productiveBinding,
+      )
+    ) {
+      return false;
+    }
+  } else if (!predecessorRetryAuthorityAllows(predecessor)) {
+    return false;
+  }
   return lockEligibleAutomaticSuccessorSettlement(db, predecessor);
 }

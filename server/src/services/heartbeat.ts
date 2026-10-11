@@ -42,6 +42,14 @@ import { reconcileAutonomousBudget } from "./autonomous-budget-reconciliation.js
 import { managedHermesSettlementProvenance, resolveManagedBudgetVerifier, type ManagedBudgetVerifier } from "./managed-budget-evidence.js";
 import { verifyManagedPretransportEvidence } from "./managed-pretransport-evidence.js";
 import { lockEligibleAutomaticSuccessorSettlement, managedHermesSuccessorBinding, predecessorRetryAuthorityAllows } from "./automatic-successor-settlement.js";
+import {
+  buildAutomaticSuccessorWakeIdempotencyKey,
+  claimAutomaticSuccessorIntent,
+  parseProductiveRunDisposition,
+  predecessorProductiveContinuationAuthorityAllows,
+  productiveContinuationBindingFromRuns,
+  settleAutomaticSuccessorIntent,
+} from "./productive-continuation.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import { parseExecutionCheckpoint } from "./execution-checkpoint.js";
@@ -127,6 +135,8 @@ import {
   agentSessionGoalActions,
   agentTaskSessions,
   agentWakeupRequests,
+  automaticSuccessorIntents,
+  autonomousBudgetReservations,
   activityLog,
   approvals,
   assets,
@@ -13333,6 +13343,211 @@ export function heartbeatService(
     );
   }
 
+  async function handleProductiveRunContinuation(
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<boolean> {
+    if (run.status !== "succeeded") return false;
+    const context = parseObject(run.contextSnapshot);
+    const issueId =
+      readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
+    const workspaceId = readNonEmptyString(
+      parseObject(context.paperclipWorkspace).workspaceId,
+    );
+    if (!issueId || run.resultJson?.runDisposition == null) return false;
+
+    const prepared = await db.transaction(async (tx) => {
+      await tx.execute(sql`select id from companies where id = ${run.companyId} for update`);
+      const [issue] = await tx
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+          autonomousExecutionPaused: issues.autonomousExecutionPaused,
+        })
+        .from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+        .for("update");
+      const [current] = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.id, run.id),
+            eq(heartbeatRuns.companyId, run.companyId),
+            eq(heartbeatRuns.agentId, run.agentId),
+          ),
+        )
+        .for("update");
+      if (!issue || !current) return null;
+
+      const binding = {
+        companyId: current.companyId,
+        issueId,
+        agentId: current.agentId,
+        runId: current.id,
+        workspaceId: workspaceId ?? "",
+      };
+      const decision = parseProductiveRunDisposition(current.resultJson, binding);
+      if (decision.kind === "legacy_missing") return null;
+
+      const [reservation] = await tx
+        .select()
+        .from(autonomousBudgetReservations)
+        .where(
+          and(
+            eq(autonomousBudgetReservations.runId, current.id),
+            eq(autonomousBudgetReservations.companyId, current.companyId),
+            eq(autonomousBudgetReservations.agentId, current.agentId),
+          ),
+        )
+        .limit(1);
+      const chainRootRunId = reservation?.chainRootRunId ?? current.id;
+      const authorizationBinding = {
+        issueId,
+        agentId: current.agentId,
+        workspaceId: workspaceId ?? null,
+        provider: reservation?.provider ?? null,
+        model: reservation?.model ?? null,
+        routePolicyId: reservation?.routePolicyId ?? null,
+        routePolicyVersion: reservation?.routePolicyVersion ?? null,
+        routePolicyDigest: reservation?.routePolicyDigest ?? null,
+      };
+      let status: "pending" | "denied" | "cancelled" = "pending";
+      let denialReason: string | null = null;
+      let reason = "explicit_productive_disposition";
+      let checkpointRef: string | null = null;
+
+      if (decision.kind === "denied") {
+        status = "denied";
+        denialReason = decision.reason;
+        reason = "invalid_run_disposition";
+      } else if (decision.kind === "no_successor") {
+        const expectedStatus: Record<string, string[]> = {
+          complete: ["done"],
+          blocked: ["blocked"],
+          needs_human: ["blocked"],
+          in_review: ["in_review"],
+          cancelled: ["cancelled"],
+        };
+        if (!(expectedStatus[decision.dispositionKind] ?? []).includes(issue.status)) {
+          status = "denied";
+          denialReason = "disposition_state_mismatch";
+        } else {
+          status = "cancelled";
+        }
+        reason = `run_disposition_${decision.dispositionKind}`;
+      } else {
+        checkpointRef = `run-workspace:${current.id}:${decision.disposition.workspaceId}`;
+        if (
+          issue.status !== "in_progress" ||
+          issue.assigneeAgentId !== current.agentId ||
+          issue.autonomousExecutionPaused ||
+          !reservation ||
+          !(await lockEligibleAutomaticSuccessorSettlement(
+            tx as unknown as Db,
+            current,
+          ))
+        ) {
+          status = "denied";
+          denialReason = "productive_authority_or_settlement_denied";
+        }
+      }
+
+      const claimed = await claimAutomaticSuccessorIntent(tx as unknown as Db, {
+        companyId: current.companyId,
+        issueId,
+        agentId: current.agentId,
+        predecessorRunId: current.id,
+        chainRootRunId,
+        kind: "productive",
+        status,
+        reason,
+        denialReason,
+        checkpointRef,
+        nextAction:
+          decision.kind === "continue_same_issue"
+            ? decision.disposition.nextAction
+            : null,
+        authorizationBinding,
+        policyVersion: reservation?.routePolicyVersion ?? 1,
+        budgetSnapshot: reservation
+          ? {
+              chainRootRunId,
+              reservedRequestCount: reservation.reservedRequestCount,
+              actualRequestCount: reservation.actualRequestCount,
+            }
+          : null,
+      });
+      return { decision, issue, ...claimed };
+    });
+
+    if (!prepared) return true;
+    if (
+      prepared.decision.kind !== "continue_same_issue" ||
+      prepared.intent.kind !== "productive" ||
+      prepared.intent.status !== "pending"
+    ) {
+      return true;
+    }
+
+    const idempotencyKey = buildAutomaticSuccessorWakeIdempotencyKey(
+      prepared.intent.id,
+    );
+    let successor = await db
+      .select({ runId: agentWakeupRequests.runId })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, run.companyId),
+          eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0]?.runId ? getRun(rows[0].runId) : null);
+    if (!successor) {
+      successor = await enqueueWakeup(run.agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_continuation_needed",
+        payload: {
+          issueId,
+          intent: "continue_same_issue",
+          nextAction: prepared.decision.disposition.nextAction,
+        },
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          retryOfRunId: run.id,
+          parentRunId: run.id,
+          automaticSuccessorIntentId: prepared.intent.id,
+          productiveContinuation: true,
+          checkpointRef: prepared.intent.checkpointRef,
+          nextAction: prepared.decision.disposition.nextAction,
+        },
+        idempotencyKey,
+        requestedByActorType: "system",
+      });
+    }
+
+    await settleAutomaticSuccessorIntent(
+      db,
+      successor
+        ? {
+            intentId: prepared.intent.id,
+            outcome: "materialized",
+            wakeupRequestId: successor.wakeupRequestId,
+            successorRunId: successor.id,
+          }
+        : {
+            intentId: prepared.intent.id,
+            outcome: "denied",
+            denialReason: "materialization_denied",
+          },
+    );
+    return true;
+  }
+
   async function handleSuccessfulRunHandoff(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -13593,6 +13808,53 @@ export function heartbeatService(
 
     if (decision.kind !== "enqueue" || !issue) return;
 
+    const reservation = await db
+      .select()
+      .from(autonomousBudgetReservations)
+      .where(
+        and(
+          eq(autonomousBudgetReservations.runId, run.id),
+          eq(autonomousBudgetReservations.companyId, run.companyId),
+          eq(autonomousBudgetReservations.agentId, run.agentId),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    const correctiveIntent = reservation
+      ? await claimAutomaticSuccessorIntent(db, {
+          companyId: run.companyId,
+          issueId: issue.id,
+          agentId: run.agentId,
+          predecessorRunId: run.id,
+          chainRootRunId: reservation.chainRootRunId,
+          kind: "corrective",
+          reason: SUCCESSFUL_RUN_MISSING_STATE_REASON,
+          authorizationBinding: {
+            issueId: issue.id,
+            agentId: run.agentId,
+            workspaceId:
+              readNonEmptyString(
+                parseObject(parseObject(run.contextSnapshot).paperclipWorkspace)
+                  .workspaceId,
+              ) ?? null,
+          },
+          policyVersion: reservation.routePolicyVersion ?? 1,
+          budgetSnapshot: {
+            chainRootRunId: reservation.chainRootRunId,
+            reservedRequestCount: reservation.reservedRequestCount,
+            actualRequestCount: reservation.actualRequestCount,
+          },
+        })
+      : null;
+    if (
+      correctiveIntent &&
+      (correctiveIntent.intent.kind !== "corrective" ||
+        correctiveIntent.intent.status !== "pending")
+    ) {
+      return;
+    }
+    const handoffIdempotencyKey = decision.idempotencyKey;
+
     if (hasUnmanagedBackgroundTaskEvidence(parseObject(run.resultJson))) {
       await db
         .update(heartbeatRuns)
@@ -13616,10 +13878,27 @@ export function heartbeatService(
         originIdentityContextId: null,
         parentRunId: run.id,
       },
-      idempotencyKey: decision.idempotencyKey,
+      idempotencyKey: handoffIdempotencyKey,
       requestedByActorType: "system",
       requestedByActorId: "heartbeat",
     });
+    if (correctiveIntent) {
+      await settleAutomaticSuccessorIntent(
+        db,
+        handoffRun
+          ? {
+              intentId: correctiveIntent.intent.id,
+              outcome: "materialized",
+              wakeupRequestId: handoffRun.wakeupRequestId,
+              successorRunId: handoffRun.id,
+            }
+          : {
+              intentId: correctiveIntent.intent.id,
+              outcome: "denied",
+              denialReason: "materialization_denied",
+            },
+      );
+    }
     if (!handoffRun) return;
 
     await addSuccessfulRunHandoffCommentOnce({
@@ -25251,16 +25530,20 @@ export function heartbeatService(
           if (!conversationSettled) {
           await handleRunLivenessContinuation(livenessRun);
           await handleIssueReviewPathDisposition(livenessRun);
-          await handleSuccessfulRunHandoff(
-            issueCommentPolicyResult.outcome === "retry_queued" ||
-              issueCommentPolicyResult.outcome === "retry_exhausted"
-              ? {
-                  ...livenessRun,
-                  issueCommentStatus: issueCommentPolicyResult.outcome,
-                }
-              : livenessRun,
-            agent,
-          );
+          const structuredDispositionHandled =
+            await handleProductiveRunContinuation(livenessRun);
+          if (!structuredDispositionHandled) {
+            await handleSuccessfulRunHandoff(
+              issueCommentPolicyResult.outcome === "retry_queued" ||
+                issueCommentPolicyResult.outcome === "retry_exhausted"
+                ? {
+                    ...livenessRun,
+                    issueCommentStatus: issueCommentPolicyResult.outcome,
+                  }
+                : livenessRun,
+              agent,
+            );
+          }
           }
           if (
             outcome === "succeeded" &&
@@ -26850,11 +27133,26 @@ export function heartbeatService(
                 )
                 .for("update")
                 .limit(1);
+              const productiveBinding = parent
+                ? productiveContinuationBindingFromRuns(
+                    parent,
+                    { contextSnapshot: enrichedContextSnapshot },
+                    issueId,
+                  )
+                : null;
+              const automaticAuthorityAllows = parent
+                ? productiveBinding
+                  ? predecessorProductiveContinuationAuthorityAllows(
+                      parent,
+                      productiveBinding,
+                    )
+                  : predecessorRetryAuthorityAllows(parent)
+                : false;
               // A handoff changes the successor owner, not the predecessor's
               // accounting identity. Never manufacture independence by clearing it.
               if (!parent ||
                 (parent.nativeIssueId ?? parent.contextSnapshot?.issueId ?? parent.contextSnapshot?.taskId) !== issueId ||
-                !predecessorRetryAuthorityAllows(parent) ||
+                !automaticAuthorityAllows ||
                 !await lockEligibleAutomaticSuccessorSettlement(tx as unknown as Db, parent)) {
                 return { kind: "skipped" as const };
               }

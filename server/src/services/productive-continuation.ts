@@ -1,0 +1,291 @@
+import { and, eq, or } from "drizzle-orm";
+import { automaticSuccessorIntents, type Db } from "@paperclipai/db";
+
+type ProductiveContinuationBinding = {
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  runId: string;
+  workspaceId: string;
+};
+
+type ProductiveRunDisposition = {
+  version: 1;
+  kind: "continue_same_issue";
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  runId: string;
+  workspaceId: string;
+  nextAction: string;
+  checkpoint: {
+    kind: "run_workspace";
+    runId: string;
+    workspaceId: string;
+  };
+};
+
+export type ProductiveRunDispositionDecision =
+  | { kind: "legacy_missing" }
+  | { kind: "continue_same_issue"; disposition: ProductiveRunDisposition }
+  | { kind: "no_successor"; dispositionKind: string }
+  | {
+      kind: "denied";
+      reason:
+        | "unsupported_disposition"
+        | "disposition_invalid"
+        | "authorization_binding_mismatch"
+        | "checkpoint_invalid"
+        | "next_action_invalid";
+    };
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function boundedText(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= maxLength
+    ? normalized
+    : null;
+}
+
+export function parseProductiveRunDisposition(
+  resultJson: unknown,
+  binding: ProductiveContinuationBinding,
+): ProductiveRunDispositionDecision {
+  const result = record(resultJson);
+  if (!result || result.runDisposition == null) return { kind: "legacy_missing" };
+
+  const raw = record(result.runDisposition);
+  if (!raw) return { kind: "denied", reason: "disposition_invalid" };
+  if (raw.version !== 1) {
+    return { kind: "denied", reason: "unsupported_disposition" };
+  }
+
+  if (
+    typeof raw.kind !== "string" ||
+    ![
+      "complete",
+      "continue_same_issue",
+      "blocked",
+      "needs_human",
+      "in_review",
+      "cancelled",
+    ].includes(raw.kind)
+  ) {
+    return { kind: "denied", reason: "disposition_invalid" };
+  }
+  if (raw.kind !== "continue_same_issue") {
+    return { kind: "no_successor", dispositionKind: raw.kind };
+  }
+
+  if (
+    raw.companyId !== binding.companyId ||
+    raw.issueId !== binding.issueId ||
+    raw.agentId !== binding.agentId ||
+    raw.runId !== binding.runId ||
+    raw.workspaceId !== binding.workspaceId
+  ) {
+    return { kind: "denied", reason: "authorization_binding_mismatch" };
+  }
+
+  const nextAction = boundedText(raw.nextAction, 2_000);
+  if (!nextAction) return { kind: "denied", reason: "next_action_invalid" };
+
+  const checkpoint = record(raw.checkpoint);
+  if (
+    !checkpoint ||
+    checkpoint.kind !== "run_workspace" ||
+    checkpoint.runId !== binding.runId ||
+    checkpoint.workspaceId !== binding.workspaceId
+  ) {
+    return { kind: "denied", reason: "checkpoint_invalid" };
+  }
+
+  return {
+    kind: "continue_same_issue",
+    disposition: {
+      version: 1,
+      kind: "continue_same_issue",
+      companyId: binding.companyId,
+      issueId: binding.issueId,
+      agentId: binding.agentId,
+      runId: binding.runId,
+      workspaceId: binding.workspaceId,
+      nextAction,
+      checkpoint: {
+        kind: "run_workspace",
+        runId: binding.runId,
+        workspaceId: binding.workspaceId,
+      },
+    },
+  };
+}
+
+export function predecessorProductiveContinuationAuthorityAllows(
+  run: { status: string; errorCode?: string | null; resultJson?: unknown },
+  binding: ProductiveContinuationBinding,
+): boolean {
+  if (run.status !== "succeeded" || run.errorCode != null) return false;
+  return parseProductiveRunDisposition(run.resultJson, binding).kind ===
+    "continue_same_issue";
+}
+
+export function productiveContinuationBindingFromRuns(
+  predecessor: {
+    id: string;
+    companyId: string;
+    agentId: string;
+    contextSnapshot?: unknown;
+  },
+  successor: { contextSnapshot?: unknown },
+  issueId: string,
+): ProductiveContinuationBinding | null {
+  const successorContext = record(successor.contextSnapshot);
+  if (
+    successorContext?.productiveContinuation !== true ||
+    boundedText(successorContext.automaticSuccessorIntentId, 100) === null ||
+    successorContext.issueId !== issueId
+  ) {
+    return null;
+  }
+  const predecessorContext = record(predecessor.contextSnapshot);
+  const workspace = record(predecessorContext?.paperclipWorkspace);
+  const workspaceId = boundedText(workspace?.workspaceId, 100);
+  if (!workspaceId || predecessorContext?.issueId !== issueId) return null;
+  return {
+    companyId: predecessor.companyId,
+    issueId,
+    agentId: predecessor.agentId,
+    runId: predecessor.id,
+    workspaceId,
+  };
+}
+
+type AutomaticSuccessorIntentInput = {
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  predecessorRunId: string;
+  chainRootRunId: string;
+  kind: "productive" | "corrective" | "recovery";
+  status?: "pending" | "materialized" | "denied" | "cancelled";
+  checkpointRef?: string | null;
+  nextAction?: string | null;
+  authorizationBinding: Record<string, unknown>;
+  policyVersion: number;
+  budgetSnapshot?: Record<string, unknown> | null;
+  reason: string;
+  denialReason?: string | null;
+};
+
+export function buildAutomaticSuccessorWakeIdempotencyKey(intentId: string): string {
+  return `automatic-successor:${intentId}`;
+}
+
+export function decideProductiveRecoveryIntent(
+  intent: Pick<typeof automaticSuccessorIntents.$inferSelect, "kind" | "status"> | null,
+): { kind: "materialize" } | { kind: "skip" } {
+  return intent?.kind === "productive" && intent.status === "pending"
+    ? { kind: "materialize" }
+    : { kind: "skip" };
+}
+
+export async function settleAutomaticSuccessorIntent(
+  db: Db,
+  input:
+    | {
+        intentId: string;
+        outcome: "materialized";
+        wakeupRequestId: string | null;
+        successorRunId: string;
+      }
+    | {
+        intentId: string;
+        outcome: "denied";
+        denialReason: string;
+      },
+) {
+  const now = new Date();
+  if (input.outcome === "materialized") {
+    await db
+      .update(automaticSuccessorIntents)
+      .set({
+        status: "materialized",
+        denialReason: null,
+        wakeupRequestId: input.wakeupRequestId,
+        successorRunId: input.successorRunId,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(automaticSuccessorIntents.id, input.intentId),
+          or(
+            eq(automaticSuccessorIntents.status, "pending"),
+            and(
+              eq(automaticSuccessorIntents.status, "denied"),
+              eq(
+                automaticSuccessorIntents.denialReason,
+                "materialization_denied",
+              ),
+            ),
+          ),
+        ),
+      );
+  } else {
+    await db
+      .update(automaticSuccessorIntents)
+      .set({
+        status: "denied",
+        denialReason: input.denialReason,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(automaticSuccessorIntents.id, input.intentId),
+          eq(automaticSuccessorIntents.status, "pending"),
+        ),
+      );
+  }
+  return db
+    .select()
+    .from(automaticSuccessorIntents)
+    .where(eq(automaticSuccessorIntents.id, input.intentId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+export async function claimAutomaticSuccessorIntent(
+  db: Db,
+  input: AutomaticSuccessorIntentInput,
+) {
+  const [created] = await db
+    .insert(automaticSuccessorIntents)
+    .values(input)
+    .onConflictDoNothing({
+      target: [
+        automaticSuccessorIntents.companyId,
+        automaticSuccessorIntents.predecessorRunId,
+      ],
+    })
+    .returning();
+
+  if (created) return { intent: created, created: true };
+
+  const [existing] = await db
+    .select()
+    .from(automaticSuccessorIntents)
+    .where(
+      and(
+        eq(automaticSuccessorIntents.companyId, input.companyId),
+        eq(automaticSuccessorIntents.predecessorRunId, input.predecessorRunId),
+      ),
+    )
+    .limit(1);
+  if (!existing) throw new Error("Automatic successor intent conflict could not be read");
+  return { intent: existing, created: false };
+}
