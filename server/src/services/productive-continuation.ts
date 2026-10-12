@@ -6,11 +6,11 @@ type ProductiveContinuationBinding = {
   issueId: string;
   agentId: string;
   runId: string;
-  workspaceId: string;
+  workspaceId: string | null;
 };
 
 type ProductiveRunDisposition = {
-  version: 1;
+  version: 1 | 2;
   kind: "continue_same_issue";
   companyId: string;
   issueId: string;
@@ -25,10 +25,40 @@ type ProductiveRunDisposition = {
   };
 };
 
+export const TERMINAL_RUN_DISPOSITION_KINDS = [
+  "complete",
+  "blocked",
+  "needs_human",
+  "in_review",
+  "cancelled",
+] as const;
+export type TerminalRunDispositionKind =
+  (typeof TERMINAL_RUN_DISPOSITION_KINDS)[number];
+
+/**
+ * Version-2 normalized disposition: the adapter injects the trusted runtime
+ * binding from execution context and discards any model-supplied identity, so
+ * every field here is authoritative once it matches the server's own binding.
+ */
+export type BoundRunDisposition = {
+  version: 2;
+  kind: TerminalRunDispositionKind;
+  companyId: string;
+  issueId: string | null;
+  agentId: string;
+  runId: string;
+  workspaceId: string | null;
+};
+
 export type ProductiveRunDispositionDecision =
   | { kind: "legacy_missing" }
   | { kind: "continue_same_issue"; disposition: ProductiveRunDisposition }
   | { kind: "no_successor"; dispositionKind: string }
+  | {
+      kind: "terminal";
+      dispositionKind: TerminalRunDispositionKind;
+      disposition: BoundRunDisposition;
+    }
   | {
       kind: "denied";
       reason:
@@ -62,7 +92,7 @@ export function parseProductiveRunDisposition(
 
   const raw = record(result.runDisposition);
   if (!raw) return { kind: "denied", reason: "disposition_invalid" };
-  if (raw.version !== 1) {
+  if (raw.version !== 1 && raw.version !== 2) {
     return { kind: "denied", reason: "unsupported_disposition" };
   }
 
@@ -79,7 +109,12 @@ export function parseProductiveRunDisposition(
   ) {
     return { kind: "denied", reason: "disposition_invalid" };
   }
-  if (raw.kind !== "continue_same_issue") {
+
+  // Version 1 is the legacy adapter contract: terminal kinds carried no
+  // binding and only confirm a state the issue already reached. Version 2
+  // dispositions are fully bound by the adapter and must match the server's
+  // trusted execution binding exactly before they decide anything.
+  if (raw.version === 1 && raw.kind !== "continue_same_issue") {
     return { kind: "no_successor", dispositionKind: raw.kind };
   }
 
@@ -88,8 +123,38 @@ export function parseProductiveRunDisposition(
     raw.issueId !== binding.issueId ||
     raw.agentId !== binding.agentId ||
     raw.runId !== binding.runId ||
-    raw.workspaceId !== binding.workspaceId
+    (raw.workspaceId ?? null) !== (binding.workspaceId ?? null)
   ) {
+    return { kind: "denied", reason: "authorization_binding_mismatch" };
+  }
+
+  if (
+    raw.version === 2 &&
+    (TERMINAL_RUN_DISPOSITION_KINDS as readonly string[]).includes(raw.kind)
+  ) {
+    return {
+      kind: "terminal",
+      dispositionKind: raw.kind as TerminalRunDispositionKind,
+      // The returned disposition is rebuilt from the trusted binding, never
+      // from the parsed payload.
+      disposition: {
+        version: 2,
+        kind: raw.kind as TerminalRunDispositionKind,
+        companyId: binding.companyId,
+        issueId: binding.issueId,
+        agentId: binding.agentId,
+        runId: binding.runId,
+        workspaceId: binding.workspaceId ?? null,
+      },
+    };
+  }
+  if (raw.kind !== "continue_same_issue") {
+    return { kind: "denied", reason: "disposition_invalid" };
+  }
+
+  // Continuation requires a workspace checkpoint; a workspaceless binding can
+  // never authorize one, regardless of what the payload claims.
+  if (!binding.workspaceId) {
     return { kind: "denied", reason: "authorization_binding_mismatch" };
   }
 
@@ -109,7 +174,7 @@ export function parseProductiveRunDisposition(
   return {
     kind: "continue_same_issue",
     disposition: {
-      version: 1,
+      version: raw.version,
       kind: "continue_same_issue",
       companyId: binding.companyId,
       issueId: binding.issueId,
@@ -172,7 +237,7 @@ type AutomaticSuccessorIntentInput = {
   agentId: string;
   predecessorRunId: string;
   chainRootRunId: string;
-  kind: "productive" | "corrective" | "recovery";
+  kind: "productive" | "corrective" | "recovery" | "terminal";
   status?: "pending" | "materialized" | "denied" | "cancelled";
   checkpointRef?: string | null;
   nextAction?: string | null;
