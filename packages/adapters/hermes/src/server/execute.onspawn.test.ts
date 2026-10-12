@@ -137,7 +137,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     const result = await execute(ctx as any);
 
     expect(result.resultJson?.runDisposition).toEqual({
-      version: 1,
+      version: 2,
       kind: "continue_same_issue",
       companyId: "company-1",
       issueId: "issue-1",
