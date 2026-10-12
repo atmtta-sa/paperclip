@@ -22,7 +22,7 @@ export const automaticSuccessorIntents = pgTable(
     predecessorRunId: uuid("predecessor_run_id").notNull(),
     chainRootRunId: uuid("chain_root_run_id").notNull(),
     kind: text("kind")
-      .$type<"productive" | "corrective" | "recovery">()
+      .$type<"productive" | "corrective" | "recovery" | "terminal">()
       .notNull(),
     status: text("status")
       .$type<"pending" | "materialized" | "denied" | "cancelled">()
