@@ -592,7 +592,7 @@ describeEmbeddedPostgres("terminal run disposition finalization", () => {
         issueId: deniedFixture.issueId,
         runId: deniedFixture.runId,
       });
-      expect(deniedReplay.kind).toBe("skip");
+      expect(deniedReplay.kind).toBe("suppressed");
       expect((await readIssue(deniedFixture.issueId))?.status).toBe(
         "in_progress",
       );

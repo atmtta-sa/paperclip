@@ -377,6 +377,7 @@ import {
 } from "./issue-rewake-throttle.js";
 import {
   logActivity,
+  publishActivity,
   publishPluginDomainEvent,
   type LogActivityInput,
 } from "./activity-log.js";
@@ -404,7 +405,8 @@ import {
   readManagedWorktreeInstanceOwnership,
   WORKTREE_INSTANCE_ROOT_METADATA_KEY,
 } from "./workspace-instance-cleanup.js";
-import { issueService } from "./issues.js";
+import { executeIssuePostCommitActions, issueService } from "./issues.js";
+import { terminalRunDispositionService } from "./terminal-run-disposition.js";
 import {
   blockRunnerGoalRecovery,
   failRunnerGoalAction,
@@ -9413,6 +9415,7 @@ export function heartbeatService(
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const terminalDispositionsSvc = terminalRunDispositionService(db);
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const environmentsSvc = environmentService(db);
@@ -13386,7 +13389,7 @@ export function heartbeatService(
         issueId,
         agentId: current.agentId,
         runId: current.id,
-        workspaceId: workspaceId ?? "",
+        workspaceId,
       };
       const decision = parseProductiveRunDisposition(current.resultJson, binding);
       if (decision.kind === "legacy_missing") return null;
@@ -13413,6 +13416,31 @@ export function heartbeatService(
         routePolicyVersion: reservation?.routePolicyVersion ?? null,
         routePolicyDigest: reservation?.routePolicyDigest ?? null,
       };
+
+      // Version-2 terminal dispositions are decided by the terminal
+      // finalization service: Paperclip is the atomic terminal authority, so
+      // an accepted complete transitions this exact issue to done inside this
+      // transaction and never claims a productive successor intent.
+      if (decision.kind === "terminal") {
+        const terminal = await terminalDispositionsSvc.finalizeTerminalRunDisposition(
+          tx as unknown as Db,
+          {
+            runId: current.id,
+            companyId: current.companyId,
+            agentId: current.agentId,
+            issueId,
+            workspaceId: workspaceId ?? null,
+            disposition: decision.disposition,
+            reservation: reservation ?? null,
+            chainRootRunId,
+            authorizationBinding,
+            policyVersion: reservation?.routePolicyVersion ?? 1,
+          },
+        );
+        if (!terminal) return null;
+        return { decision, issue, intent: terminal.intent, created: terminal.created, terminal };
+      }
+
       let status: "pending" | "denied" | "cancelled" = "pending";
       let denialReason: string | null = null;
       let reason = "explicit_productive_disposition";
@@ -13479,10 +13507,19 @@ export function heartbeatService(
             }
           : null,
       });
-      return { decision, issue, ...claimed };
+      return { decision, issue, ...claimed, terminal: null };
     });
 
     if (!prepared) return true;
+    if (prepared.terminal) {
+      // Terminal side effects (native question cancellation, activity
+      // publications) run only after the finalization transaction commits.
+      for (const publication of prepared.terminal.activityPublications) {
+        publishActivity(publication);
+      }
+      await executeIssuePostCommitActions(db, prepared.terminal.postCommitActions);
+      return true;
+    }
     if (
       prepared.decision.kind !== "continue_same_issue" ||
       prepared.intent.kind !== "productive" ||

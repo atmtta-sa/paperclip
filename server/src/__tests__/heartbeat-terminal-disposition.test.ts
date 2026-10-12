@@ -431,6 +431,58 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
     expect(await readIntents(fixture.companyId)).toHaveLength(1);
   }, 30_000);
 
+  it("suppresses productive recovery when a denied terminal intent exists", async () => {
+    await seedFixture();
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: fixture.companyId,
+      agentId: fixture.agentId,
+      invocationSource: "assignment",
+      status: "succeeded",
+      livenessState: "advanced",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId: fixture.issueId },
+      resultJson: {
+        runDisposition: {
+          version: 2,
+          kind: "complete",
+          companyId: fixture.companyId,
+          issueId: fixture.issueId,
+          agentId: fixture.agentId,
+          runId,
+          workspaceId: null,
+        },
+      },
+    });
+    await db.insert(automaticSuccessorIntents).values({
+      companyId: fixture.companyId,
+      issueId: fixture.issueId,
+      agentId: fixture.agentId,
+      predecessorRunId: runId,
+      chainRootRunId: runId,
+      kind: "terminal",
+      status: "denied",
+      reason: "run_disposition_complete",
+      denialReason: "terminal_settlement_unreconciled",
+      authorizationBinding: {
+        issueId: fixture.issueId,
+        agentId: fixture.agentId,
+        workspaceId: null,
+      },
+      policyVersion: 1,
+    });
+
+    const sweep = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(sweep.terminalFinalizationSuppressed).toBe(1);
+    expect((await readIssue(fixture.issueId))?.status).toBe("in_progress");
+    expect(await continuationWakes(fixture.companyId)).toHaveLength(0);
+    expect(await successorRuns(runId)).toHaveLength(0);
+    expect(terminalFault.executeCalls).toBe(0);
+    expect(await readIntents(fixture.companyId)).toHaveLength(1);
+  }, 30_000);
+
   it("rolls back the issue transition and the intent when the transaction fails", async () => {
     await seedFixture();
     terminalFault.armPostFinalizationFailure = true;

@@ -96,6 +96,7 @@ export type TerminalFinalizationReplayResult =
   | { kind: "replayed" }
   | { kind: "already_done" }
   | { kind: "skip" }
+  | { kind: "suppressed" }
   | { kind: "conflicted" };
 
 function isHttpConflict(error: unknown): error is HttpError {
@@ -360,13 +361,16 @@ export function terminalRunDispositionService(db: Db) {
           eq(automaticSuccessorIntents.issueId, input.issueId),
           eq(automaticSuccessorIntents.predecessorRunId, input.runId),
           eq(automaticSuccessorIntents.kind, "terminal"),
-          eq(automaticSuccessorIntents.status, "materialized"),
         ),
       )
       .limit(1);
     // Only an accepted `complete` is terminal-finalization authority.
-    if (!intent || intent.reason !== "run_disposition_complete") {
-      return { kind: "skip" };
+    if (!intent) return { kind: "skip" };
+    if (
+      intent.status !== "materialized" ||
+      intent.reason !== "run_disposition_complete"
+    ) {
+      return { kind: "suppressed" };
     }
 
     const postCommitActions: IssuePostCommitAction[] = [];
