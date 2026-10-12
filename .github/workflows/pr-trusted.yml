@@ -1,10 +1,46 @@
 name: Trusted PR CI
 
-# Rollout is intentionally two-step: merge this reusable workflow first, then
-# replace pr.yml with an immutable-SHA caller so the active CI definition cannot
-# drift from this file.
+# The caller validates and freezes PR metadata before invoking this workflow.
+# This keeps native and manual runs on the same verified execution path.
 on:
   workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      head_ref:
+        required: true
+        type: string
+      base_sha:
+        required: true
+        type: string
+      base_ref:
+        required: true
+        type: string
+      author_login:
+        required: true
+        type: string
+      author_id:
+        required: true
+        type: string
+      sender_id:
+        required: true
+        type: string
+      base_repository_id:
+        required: true
+        type: string
+      merge_sha:
+        required: true
+        type: string
+      action:
+        required: true
+        type: string
+      stack_json:
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -12,7 +48,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  group: pr-${{ inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -35,15 +71,15 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_REPOSITORY: ${{ github.repository }}
           EVENT_REPOSITORY_ID: ${{ github.repository_id }}
-          EVENT_ACTION: ${{ github.event.action }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_PR_AUTHOR_ID: ${{ github.event.pull_request.user.id }}
-          EVENT_SENDER_ID: ${{ github.event.sender.id }}
-          EVENT_BASE_REPOSITORY_ID: ${{ github.event.pull_request.base.repo.id }}
-          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          EVENT_MERGE_SHA: ${{ github.sha }}
+          EVENT_ACTION: ${{ inputs.action }}
+          EVENT_PR_NUMBER: ${{ inputs.pr_number }}
+          EVENT_PR_AUTHOR_ID: ${{ inputs.author_id }}
+          EVENT_SENDER_ID: ${{ inputs.sender_id }}
+          EVENT_BASE_REPOSITORY_ID: ${{ inputs.base_repository_id }}
+          EVENT_BASE_REF: ${{ inputs.base_ref }}
+          EVENT_BASE_SHA: ${{ inputs.base_sha }}
+          EVENT_HEAD_SHA: ${{ inputs.head_sha }}
+          EVENT_MERGE_SHA: ${{ inputs.merge_sha }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -u
@@ -222,8 +258,8 @@ jobs:
         id: scope
         shell: bash
         env:
-          STACK_JSON: ${{ toJSON(github.event.pull_request.stack) }}
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          STACK_JSON: ${{ inputs.stack_json }}
+          PR_BASE_REF: ${{ inputs.base_ref }}
         run: |
           set -euo pipefail
 
@@ -264,17 +300,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
           fetch-depth: 0
 
       - name: Block manual lockfile edits
         if: >-
-          github.head_ref != 'chore/refresh-lockfile' &&
-          github.event.pull_request.user.login != 'dependabot[bot]'
+          inputs.head_ref != 'chore/refresh-lockfile' &&
+          inputs.author_login != 'dependabot[bot]'
         run: |
           # Diff the PR branch against its merge base so recent base-branch commits
           # do not masquerade as changes made by the PR itself.
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
+          changed="$(git diff --name-only "${{ inputs.base_sha }}...${{ inputs.head_sha }}")"
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
             echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
             exit 1
@@ -299,8 +336,8 @@ jobs:
       - name: Validate migration ordering against target branch
         run: >-
           node .github/scripts/check-pr-migration-order.mjs
-          "${{ github.event.pull_request.base.sha }}"
-          "${{ github.event.pull_request.head.sha }}"
+          "${{ inputs.base_sha }}"
+          "${{ inputs.head_sha }}"
 
       - name: Validate Dockerfile deps stage
         run: node ./scripts/check-docker-deps-stage.mjs
@@ -340,8 +377,8 @@ jobs:
 
       - name: Verify release package bootstrap for changed manifests
         run: |
-          mapfile -t changed_paths < <(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")
-          PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
+          mapfile -t changed_paths < <(git diff --name-only "${{ inputs.base_sha }}...${{ inputs.head_sha }}")
+          PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA="${{ inputs.base_sha }}" \
             node ./scripts/check-release-package-bootstrap.mjs "${changed_paths[@]}"
 
       - name: Validate dependency resolution and regenerate stale lockfile
@@ -378,6 +415,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       - name: Setup Node.js for pnpm bootstrap
@@ -484,6 +522,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       - name: Setup Node.js for pnpm bootstrap
@@ -546,6 +585,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       # Not every runner the gate can select ships the Buildx plugin —
@@ -616,6 +656,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       - name: Setup Node.js for pnpm bootstrap
@@ -672,6 +713,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       - name: Setup Node.js for pnpm bootstrap
@@ -756,6 +798,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       - name: Setup Node.js for pnpm bootstrap
@@ -812,6 +855,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       - name: Setup Node.js for pnpm bootstrap
@@ -909,6 +953,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
       - name: Setup Node.js for pnpm bootstrap
