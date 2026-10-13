@@ -68,7 +68,7 @@ describe("productive same-issue continuation contract", () => {
   it("preserves an unknown disposition version but denies a successor", () => {
     expect(
       parseProductiveRunDisposition(
-        { runDisposition: disposition({ version: 2 }) },
+        { runDisposition: disposition({ version: 3 }) },
         binding,
       ),
     ).toEqual({
@@ -143,6 +143,119 @@ describe("productive same-issue continuation contract", () => {
     expect(
       decideProductiveRecoveryIntent({ kind: "corrective", status: "pending" }),
     ).toEqual({ kind: "skip" });
+    expect(
+      decideProductiveRecoveryIntent({ kind: "terminal", status: "materialized" }),
+    ).toEqual({ kind: "skip" });
+    expect(
+      decideProductiveRecoveryIntent({ kind: "terminal", status: "denied" }),
+    ).toEqual({ kind: "skip" });
+  });
+});
+
+describe("bound terminal disposition contract (version 2)", () => {
+  function boundTerminal(overrides: Record<string, unknown> = {}) {
+    return {
+      version: 2,
+      kind: "complete",
+      companyId: binding.companyId,
+      issueId: binding.issueId,
+      agentId: binding.agentId,
+      runId: binding.runId,
+      workspaceId: binding.workspaceId,
+      ...overrides,
+    };
+  }
+
+  it("accepts an exactly bound terminal disposition as a terminal decision", () => {
+    expect(
+      parseProductiveRunDisposition({ runDisposition: boundTerminal() }, binding),
+    ).toEqual({
+      kind: "terminal",
+      dispositionKind: "complete",
+      disposition: boundTerminal(),
+    });
+  });
+
+  it("accepts a bound terminal disposition for a run without a workspace", () => {
+    const workspacelessBinding = { ...binding, workspaceId: null };
+    expect(
+      parseProductiveRunDisposition(
+        { runDisposition: boundTerminal({ workspaceId: null }) },
+        workspacelessBinding,
+      ),
+    ).toEqual({
+      kind: "terminal",
+      dispositionKind: "complete",
+      disposition: boundTerminal({ workspaceId: null }),
+    });
+  });
+
+  it.each([
+    ["wrong company", { companyId: "company-2" }],
+    ["wrong issue", { issueId: "issue-2" }],
+    ["missing issue scope", { issueId: null }],
+    ["wrong agent", { agentId: "agent-2" }],
+    ["wrong run", { runId: "run-2" }],
+    ["wrong workspace", { workspaceId: "workspace-2" }],
+    ["missing workspace", { workspaceId: null }],
+  ])("denies a terminal disposition with %s", (_label, override) => {
+    expect(
+      parseProductiveRunDisposition(
+        { runDisposition: boundTerminal(override) },
+        binding,
+      ),
+    ).toEqual({ kind: "denied", reason: "authorization_binding_mismatch" });
+  });
+
+  it.each(["blocked", "needs_human", "in_review", "cancelled"])(
+    "accepts a bound %s disposition as a terminal decision",
+    (kind) => {
+      expect(
+        parseProductiveRunDisposition(
+          { runDisposition: boundTerminal({ kind }) },
+          binding,
+        ),
+      ).toEqual({
+        kind: "terminal",
+        dispositionKind: kind,
+        disposition: boundTerminal({ kind }),
+      });
+    },
+  );
+
+  it("accepts an exactly bound version-two continuation", () => {
+    expect(
+      parseProductiveRunDisposition(
+        { runDisposition: disposition({ version: 2 }) },
+        binding,
+      ),
+    ).toEqual({
+      kind: "continue_same_issue",
+      disposition: disposition({ version: 2 }),
+    });
+  });
+
+  it.each([
+    ["wrong issue", { version: 2, issueId: "issue-2" }, "authorization_binding_mismatch"],
+    ["wrong workspace", { version: 2, workspaceId: "workspace-2" }, "authorization_binding_mismatch"],
+    ["wrong checkpoint run", { version: 2, checkpoint: { kind: "run_workspace", runId: "run-2", workspaceId: binding.workspaceId } }, "checkpoint_invalid"],
+    ["empty next action", { version: 2, nextAction: "  " }, "next_action_invalid"],
+  ])("denies a version-two continuation with %s", (_label, override, reason) => {
+    expect(
+      parseProductiveRunDisposition(
+        { runDisposition: disposition(override) },
+        binding,
+      ),
+    ).toEqual({ kind: "denied", reason });
+  });
+
+  it("keeps legacy version-one terminal dispositions on the no-successor path", () => {
+    expect(
+      parseProductiveRunDisposition(
+        { runDisposition: { version: 1, kind: "complete" } },
+        binding,
+      ),
+    ).toEqual({ kind: "no_successor", dispositionKind: "complete" });
   });
 });
 

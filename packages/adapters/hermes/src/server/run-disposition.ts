@@ -47,10 +47,23 @@ export function paperclipRunDispositionBinding(ctx: {
   };
 }
 
+// The model's wire envelope stays version 1. The adapter normalizes every
+// accepted disposition to version 2: the trusted runtime binding (company,
+// issue, agent, run, workspace) is injected here, from execution context, and
+// any identity fields the model emitted are discarded. Version 2 is the
+// normalized contract the server validates; it never appears on the wire.
 type RunDisposition =
-  | { version: 1; kind: "complete" | "blocked" | "needs_human" | "in_review" | "cancelled" }
   | {
-      version: 1;
+      version: 2;
+      kind: "complete" | "blocked" | "needs_human" | "in_review" | "cancelled";
+      companyId: string;
+      issueId: string | null;
+      agentId: string;
+      runId: string;
+      workspaceId: string | null;
+    }
+  | {
+      version: 2;
       kind: "continue_same_issue";
       companyId: string;
       issueId: string;
@@ -99,7 +112,15 @@ export function extractPaperclipRunDisposition(
   if (!raw || raw.version !== 1 || typeof raw.kind !== "string") return null;
 
   if (TERMINAL_KINDS.has(raw.kind)) {
-    return { version: 1, kind: raw.kind } as RunDisposition;
+    return {
+      version: 2,
+      kind: raw.kind as "complete" | "blocked" | "needs_human" | "in_review" | "cancelled",
+      companyId: binding.companyId,
+      issueId: binding.issueId,
+      agentId: binding.agentId,
+      runId: binding.runId,
+      workspaceId: binding.workspaceId,
+    };
   }
   if (raw.kind !== "continue_same_issue") return null;
 
@@ -109,7 +130,7 @@ export function extractPaperclipRunDisposition(
   if (!nextAction || !issueId || !workspaceId) return null;
 
   return {
-    version: 1,
+    version: 2,
     kind: "continue_same_issue",
     companyId: binding.companyId,
     issueId,

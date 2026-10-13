@@ -28,7 +28,7 @@ describe("Hermes productive disposition transport", () => {
         binding,
       ),
     ).toEqual({
-      version: 1,
+      version: 2,
       kind: "continue_same_issue",
       ...binding,
       nextAction: "Run the remaining integration test.",
@@ -40,13 +40,75 @@ describe("Hermes productive disposition transport", () => {
     });
   });
 
-  it("transports bounded terminal dispositions without continuation authority", () => {
+  it("binds terminal dispositions to authoritative run identity", () => {
     expect(
       extractPaperclipRunDisposition(
         envelope({ version: 1, kind: "complete" }),
         binding,
       ),
-    ).toEqual({ version: 1, kind: "complete" });
+    ).toEqual({ version: 2, kind: "complete", ...binding });
+  });
+
+  it("binds terminal dispositions for runs without an issue or workspace scope", () => {
+    expect(
+      extractPaperclipRunDisposition(
+        envelope({ version: 1, kind: "blocked" }),
+        { ...binding, issueId: null, workspaceId: null },
+      ),
+    ).toEqual({
+      version: 2,
+      kind: "blocked",
+      ...binding,
+      issueId: null,
+      workspaceId: null,
+    });
+  });
+
+  it("overrides model-supplied identity fields with the trusted binding", () => {
+    expect(
+      extractPaperclipRunDisposition(
+        envelope({
+          version: 1,
+          kind: "complete",
+          companyId: "company-2",
+          issueId: "issue-2",
+          agentId: "agent-2",
+          runId: "run-2",
+          workspaceId: "workspace-2",
+        }),
+        binding,
+      ),
+    ).toEqual({ version: 2, kind: "complete", ...binding });
+    expect(
+      extractPaperclipRunDisposition(
+        envelope({
+          version: 1,
+          kind: "continue_same_issue",
+          companyId: "company-2",
+          issueId: "issue-2",
+          agentId: "agent-2",
+          runId: "run-2",
+          workspaceId: "workspace-2",
+          nextAction: "Run the remaining integration test.",
+          checkpoint: {
+            kind: "run_workspace",
+            runId: "run-2",
+            workspaceId: "workspace-2",
+          },
+        }),
+        binding,
+      ),
+    ).toEqual({
+      version: 2,
+      kind: "continue_same_issue",
+      ...binding,
+      nextAction: "Run the remaining integration test.",
+      checkpoint: {
+        kind: "run_workspace",
+        runId: "run-1",
+        workspaceId: "workspace-1",
+      },
+    });
   });
 
   it.each([
