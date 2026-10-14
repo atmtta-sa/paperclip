@@ -8,6 +8,7 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   agents,
+  automaticSuccessorIntents,
   autonomousBudgetReservations,
   autonomousProviderCircuits,
   budgetIncidents,
@@ -130,6 +131,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         await db.delete(costEvents);
         await db.delete(issueRecoveryActions);
         await db.delete(issueComments);
+        await db.delete(automaticSuccessorIntents);
         await db.delete(issues);
         await db.delete(heartbeatRunEvents);
         await db.delete(activityLog);
@@ -2055,9 +2057,9 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(runs.some((run) => run.continuityCircuitState === "open")).toBe(true);
     const calls = mockAdapterExecute.mock.calls;
     expect(calls.map(([context]) => context.autonomousBudgetEnvelope?.inputTokens))
-      .toEqual([64_000, 63_990]);
+      .toEqual([64_000, 64_000]);
     expect(calls.map(([context]) => context.autonomousBudgetEnvelope?.costMicrousd))
-      .toEqual([250_000, 249_999]);
+      .toEqual([250_000, 250_000]);
     const fakeResults = await Promise.all(mockAdapterExecute.mock.results.map((result) => result.value));
     expect(fakeResults.every((result) => result.budgetTelemetry.inputTokens <= 64_000)).toBe(true);
     expect(fakeResults.reduce((cost, result) => cost + result.budgetTelemetry.costMicrousd, 0))
