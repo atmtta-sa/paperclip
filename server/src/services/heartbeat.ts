@@ -25017,6 +25017,16 @@ export function heartbeatService(
           ? verifiedHermesPretransportFailure
           : preProviderSessionRollover || verifiedPreProviderFailure;
         const budgetTelemetry = verifyBudgetEvidence(adapterResult, rawUsage, run.id);
+        const durableEvidence = parseObject(resultEvidence.durableCallEvidence);
+        // An attempt that crossed the transport boundary without a conclusive
+        // outcome (connection loss, ambiguous post-dispatch failure) must be
+        // reported as unknown provider outcome — never collapsed into a
+        // route-policy identity mismatch or a generic missing-telemetry signal.
+        const unresolvedPostDispatchOutcomes =
+          (typeof durableEvidence.unknownOutcomes === "number" &&
+            durableEvidence.unknownOutcomes > 0) ||
+          (typeof durableEvidence.rejectedAfterDispatch === "number" &&
+            durableEvidence.rejectedAfterDispatch > 0);
         const settlementEvidence = agent.adapterType === "hermes_local" &&
           (budgetTelemetry || verifiedHermesPretransportFailure)
           ? managedHermesSettlementProvenance(adapterResult, run.id) : null;
@@ -25055,7 +25065,9 @@ export function heartbeatService(
           resultEvidence.turn_exit_reason === "managed_progress_policy_invalid"
             ? "managed_progress_policy_invalid" : null);
         const runErrorMessage = telemetryMissing && !executionErrorCode
-          ? "Provider activity missing required usage telemetry"
+          ? unresolvedPostDispatchOutcomes
+            ? "Provider outcome unknown after dispatch; reservation retained pending reconciliation"
+            : "Provider activity missing required usage telemetry"
           : outcome === "cancelled"
             ? (latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled")
             : outcome === "succeeded"
@@ -25076,7 +25088,10 @@ export function heartbeatService(
           adapterResult.executionRecovery?.kind === "bootstrap" &&
           adapterResult.executionRecovery.providerWorkStarted === false;
         const runErrorCode = telemetryMissing && !preProviderQuotaRejection
-          ? (executionErrorCode ?? "telemetry_missing")
+          ? (executionErrorCode ??
+            (unresolvedPostDispatchOutcomes
+              ? "provider_outcome_unknown"
+              : "telemetry_missing"))
           : outcome === "timed_out"
             ? "timeout"
             : outcome === "cancelled"
@@ -25200,10 +25215,15 @@ export function heartbeatService(
                   ? { executionRecovery: adapterResult.executionRecovery }
                   : {}),
                 configFreshness: configFreshnessResultMetadata,
+                rootChainCommittedRequests:
+                  budgetReconciliation.rootChainCommittedRequests,
                 ...(telemetryMissing ? { budgetSettlement: {
                   status: budgetReconciliation.status,
                   settlementState: budgetReconciliation.settlementState,
-                  accountingErrorCode: "telemetry_missing",
+                  accountingErrorCode: unresolvedPostDispatchOutcomes
+                    ? "provider_outcome_unknown"
+                    : "telemetry_missing",
+                  unresolvedPostDispatchOutcomes,
                 } } : {}),
               },
               errorFamily: adapterResult.errorFamily ?? null,

@@ -1,4 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
 import type { Db } from "@paperclipai/db";
 import { autonomousBudgetReservations, companies } from "@paperclipai/db";
 import { recordAutonomousPromptGrowthAlert } from "./autonomous-prompt-growth-alert.js";
@@ -102,6 +103,26 @@ function normalizeActual(
   };
 }
 
+function hasCompleteSubscriptionPolicyEvidence(
+  evidence: AutonomousBudgetReconciliationInput["settlementEvidence"],
+  runId: string,
+): boolean {
+  return evidence?.source === "hermes_sqlite_transport_owner" &&
+    evidence.contractVersion === 3 &&
+    evidence.runId === runId &&
+    /^[a-f0-9]{64}$/.test(evidence.digestSha256) &&
+    evidence.costBasis === "subscription_included" &&
+    evidence.billingMode === "subscription_included" &&
+    typeof evidence.routePolicyId === "string" && evidence.routePolicyId.length > 0 &&
+    Number.isSafeInteger(evidence.routePolicyVersion) && evidence.routePolicyVersion! > 0 &&
+    typeof evidence.routePolicyDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(evidence.routePolicyDigest) &&
+    typeof evidence.credentialPrincipalId === "string" &&
+    evidence.credentialPrincipalId.length > 0 &&
+    Number.isSafeInteger(evidence.rootChainRequestLimit) && evidence.rootChainRequestLimit! > 0 &&
+    evidence.tokenAccountingBasis === "provider_reported_tokens_v1";
+}
+
 function reconciliationMatches(
   row: typeof autonomousBudgetReservations.$inferSelect,
   input: AutonomousBudgetReconciliationInput,
@@ -117,7 +138,7 @@ function reconciliationMatches(
     row.actualOutputTokens === (actual?.outputTokens ?? null) &&
     row.actualRuntimeMs === (actual?.runtimeMs ?? null) &&
     row.actualCostMicrousd === (actual?.costMicrousd ?? null) &&
-    JSON.stringify(row.settlementEvidence ?? null) === JSON.stringify(input.settlementEvidence ?? null)
+    isDeepStrictEqual(row.settlementEvidence ?? null, input.settlementEvidence ?? null)
   );
 }
 
@@ -167,7 +188,9 @@ export async function reconcileAutonomousBudget(
     throw new Error("autonomous_budget_reservation_invalid_amount");
   }
   const hasCompleteTelemetry =
-    input.providerActivityOccurred && actual !== null && Boolean(input.providerRequestId?.trim());
+    input.providerActivityOccurred && actual !== null && Boolean(input.providerRequestId?.trim()) &&
+    (billingMode !== "subscription_included" ||
+      hasCompleteSubscriptionPolicyEvidence(input.settlementEvidence, input.runId));
   const verifiedNoProviderActivity =
     input.verifiedNoProviderActivity === true &&
     !input.providerActivityOccurred &&
@@ -219,7 +242,8 @@ export async function reconcileAutonomousBudget(
         ["credential_principal_id", input.settlementEvidence.credentialPrincipalId, row.credentialPrincipalId],
         ["root_chain_request_limit", input.settlementEvidence.rootChainRequestLimit, row.rootChainRequestLimit],
       ] as const;
-      const mismatch = fields.find(([, evidenceValue, storedValue]) => evidenceValue !== storedValue);
+      const mismatch = fields.find(([, evidenceValue, storedValue]) =>
+        evidenceValue !== undefined && evidenceValue !== storedValue);
       if (mismatch) {
         throw new Error(`autonomous_budget_reconciliation_route_policy_mismatch:${mismatch[0]}`);
       }
@@ -232,33 +256,37 @@ export async function reconcileAutonomousBudget(
     );
     // Cumulative root-chain consumption: reserved requests stand in for
     // consumption until reconciled actuals replace them (conservative).
-    const chainRows = row.chainRootRunId
-      ? await tx
-          .select({
-            status: autonomousBudgetReservations.status,
-            reservedRequestCount: autonomousBudgetReservations.reservedRequestCount,
-            actualRequestCount: autonomousBudgetReservations.actualRequestCount,
-          })
-          .from(autonomousBudgetReservations)
-          .where(
-            and(
-              eq(autonomousBudgetReservations.companyId, input.companyId),
-              eq(autonomousBudgetReservations.chainRootRunId, row.chainRootRunId),
-              inArray(autonomousBudgetReservations.status, [
-                "reserved",
-                "reconciled",
-                "retained_missing_telemetry",
-              ]),
-            ),
-          )
-      : [];
-    const rootChainCommittedRequests = chainRows.reduce(
-      (total, chainRow) =>
-        total + (chainRow.status === "reconciled"
-          ? chainRow.actualRequestCount ?? chainRow.reservedRequestCount
-          : chainRow.reservedRequestCount),
-      0,
-    );
+    // Read after any state transition so first settlement and replay expose
+    // the same post-settlement total.
+    const readRootChainCommittedRequests = async () => {
+      const chainRows = row.chainRootRunId
+        ? await tx
+            .select({
+              status: autonomousBudgetReservations.status,
+              reservedRequestCount: autonomousBudgetReservations.reservedRequestCount,
+              actualRequestCount: autonomousBudgetReservations.actualRequestCount,
+            })
+            .from(autonomousBudgetReservations)
+            .where(
+              and(
+                eq(autonomousBudgetReservations.companyId, input.companyId),
+                eq(autonomousBudgetReservations.chainRootRunId, row.chainRootRunId),
+                inArray(autonomousBudgetReservations.status, [
+                  "reserved",
+                  "reconciled",
+                  "retained_missing_telemetry",
+                ]),
+              ),
+            )
+        : [];
+      return chainRows.reduce(
+        (total, chainRow) =>
+          total + (chainRow.status === "reconciled"
+            ? chainRow.actualRequestCount ?? chainRow.reservedRequestCount
+            : chainRow.reservedRequestCount),
+        0,
+      );
+    };
     const recoveringAuthoritativeTelemetry =
       row.status === "retained_missing_telemetry" &&
       row.settlementState === "uncertain_requires_reconciliation" &&
@@ -269,6 +297,7 @@ export async function reconcileAutonomousBudget(
         reconciliationMatches(row, input, actual, status) &&
         row.settlementState === settlementState
       ) {
+        const rootChainCommittedRequests = await readRootChainCommittedRequests();
         return { status, settlementState, replayed: true, rootChainCommittedRequests };
       }
       throw new Error("autonomous_budget_reconciliation_conflict");
@@ -300,6 +329,7 @@ export async function reconcileAutonomousBudget(
 
     if (hasCompleteTelemetry) await recordAutonomousPromptGrowthAlert(tx, row, actual);
 
+    const rootChainCommittedRequests = await readRootChainCommittedRequests();
     return { status, settlementState, replayed: false, rootChainCommittedRequests };
   });
 }

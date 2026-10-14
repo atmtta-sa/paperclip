@@ -242,7 +242,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       status: "released",
       settlementState: "released_zero_usage",
       replayed: false,
-      rootChainCommittedRequests: 1,
+      rootChainCommittedRequests: 0,
     });
     expect(await reconcileAutonomousBudget(db, reconciliation)).toEqual({
       status: "released",
@@ -829,7 +829,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       status: "reconciled",
       settlementState: "consumed_over_reservation",
       replayed: false,
-      rootChainCommittedRequests: 4,
+      rootChainCommittedRequests: 3,
     });
     expect(await reconcileAutonomousBudget(db, recovered)).toEqual({
       status: "reconciled",

@@ -156,6 +156,39 @@ describeEmbeddedPostgres("autonomous budget reconciliation evidence classificati
     });
   });
 
+  it.each([
+    ["absent", null],
+    ["partial", { billingMode: "subscription_included", routePolicyId: billingPolicy.policyId }],
+  ])("retains complete usage telemetry when route-policy evidence is %s", async (_label, evidence) => {
+    const scope = await createScope();
+    const runId = randomUUID();
+    await reserveSubscription(scope, runId);
+
+    const result = await reconcileAutonomousBudget(db, {
+      ...scope,
+      runId,
+      providerActivityOccurred: true,
+      providerRequestId: "response-sub-incomplete-policy",
+      billingMode: "subscription_included",
+      actual: { requestCount: 1, inputTokens: 100, outputTokens: 20, runtimeMs: 1_000 },
+      settlementEvidence: evidence as ReturnType<typeof completeEvidence> | null,
+    });
+
+    expect(result).toMatchObject({
+      status: "retained_missing_telemetry",
+      settlementState: "uncertain_requires_reconciliation",
+      replayed: false,
+      rootChainCommittedRequests: 4,
+    });
+    const row = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.runId, runId)).then((rows) => rows[0]);
+    expect(row).toMatchObject({
+      status: "retained_missing_telemetry",
+      settlementState: "uncertain_requires_reconciliation",
+      actualRequestCount: null,
+    });
+  });
+
   it("recovers a retained subscription reservation when authoritative telemetry arrives", async () => {
     const scope = await createScope();
     const runId = randomUUID();
@@ -176,6 +209,20 @@ describeEmbeddedPostgres("autonomous budget reconciliation evidence classificati
       status: "reconciled",
       settlementState: "partially_consumed",
       replayed: false,
+      rootChainCommittedRequests: 2,
+    });
+
+    const replayed = await reconcileAutonomousBudget(db, {
+      ...scope, runId, providerActivityOccurred: true, providerRequestId: "response-sub-1",
+      billingMode: "subscription_included",
+      actual: { requestCount: 2, inputTokens: 200, outputTokens: 40, runtimeMs: null },
+      settlementEvidence: completeEvidence(runId),
+    });
+    expect(replayed).toMatchObject({
+      status: "reconciled",
+      settlementState: "partially_consumed",
+      replayed: true,
+      rootChainCommittedRequests: 2,
     });
   });
 
