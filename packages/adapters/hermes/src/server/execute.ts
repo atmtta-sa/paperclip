@@ -1139,6 +1139,35 @@ export async function execute(
       )
     : null;
 
+  // Non-secret budget-sufficiency telemetry: lets operators judge whether the
+  // admitted per-run allowance and root-chain ceiling are operationally
+  // sufficient. Counts every attempt that crossed the transport boundary
+  // (completed, failed_after_dispatch, outcome_unknown) as consumed; a
+  // pre-transport denial does not consume the allowance. Never records
+  // credentials, authorization values, or prompts.
+  const admittedPerRunAllowance = ctx.autonomousBudgetEnvelope
+    ? ctx.autonomousBudgetEnvelope.requestCount
+    : null;
+  const budgetSufficiency = (ctx.autonomousBudgetEnvelope || durableCallEvidence)
+    ? {
+        admittedPerRunRequestAllowance: admittedPerRunAllowance,
+        requestsDispatched: durableCallEvidence?.providerDispatches ?? null,
+        completedResponses: durableCallEvidence?.confirmedResponses ?? null,
+        pretransportDenials: durableCallEvidence?.pretransportDenials ?? null,
+        unknownPostDispatchOutcomes: durableCallEvidence?.unknownOutcomes ?? null,
+        dispatchedBeyondAdmittedAllowance:
+          admittedPerRunAllowance != null && durableCallEvidence
+            ? durableCallEvidence.providerDispatches > admittedPerRunAllowance
+            : null,
+        rootChainRequestLimit: billingRoutePolicy?.maxRootChainProviderRequests ?? null,
+        turnCeilingTermination: turnExitReason || null,
+        finalDisposition: runDisposition?.kind ?? null,
+        usefulWorkRemained: runDisposition
+          ? runDisposition.kind !== "complete" && runDisposition.kind !== "cancelled"
+          : null,
+      }
+    : null;
+
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
     result: parsed.response || "",
@@ -1147,6 +1176,7 @@ export async function execute(
     cost_usd: executionResult.costUsd ?? null,
     ...(durableCallEvidence ? { durableCallEvidence } : {}),
     ...(pretransportEvidence ? { pretransportEvidence } : {}),
+    ...(budgetSufficiency ? { budgetSufficiency } : {}),
     ...(runResult?.version === 2 ? {
       provider: runResult.provider ?? null,
       billingType: codexSubscriptionTelemetryComplete
