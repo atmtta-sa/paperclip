@@ -19,6 +19,7 @@ import {
   instanceSettings,
   issueComments,
   issueDocuments,
+  issueRelations,
   issues,
 } from "@paperclipai/db";
 import {
@@ -29,6 +30,10 @@ import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.j
 import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
 import { heartbeatService, resolveHeartbeatSchedulingSuppression } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import {
+  buildIssueBlockerStateFingerprint,
+  buildIssueBlockersResolvedWakeStateKey,
+} from "../services/issue-dependency-wakeups.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -309,6 +314,216 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     });
     expect(userRun).not.toBeNull();
     await heartbeat.waitForRunExecutionDrain(userRun!.id);
+  }, 10_000);
+
+  it("allows a productive successor bound to a post-cutoff predecessor for a pre-cutoff issue", async () => {
+    const { companyId, agentId, issueId } = await insertAgentAndIssue();
+    const cutoff = new Date(Date.now() - 1_000);
+    await db
+      .update(issues)
+      .set({ createdAt: new Date(cutoff.getTime() - 1_000) })
+      .where(eq(issues.id, issueId));
+    await armWorktreeRunExecution(cutoff);
+    const predecessorRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: predecessorRunId,
+      companyId,
+      agentId,
+      nativeIssueId: issueId,
+      status: "succeeded",
+      responsibleUserId: "responsible-user",
+      contextSnapshot: { issueId },
+      createdAt: new Date(cutoff.getTime() + 500),
+      startedAt: new Date(cutoff.getTime() + 500),
+      finishedAt: new Date(cutoff.getTime() + 750),
+    });
+    const heartbeat = heartbeatService(db, {
+      runtimeEnv: {
+        PAPERCLIP_IN_WORKTREE: "true",
+        PAPERCLIP_INSTANCE_ID: "test-worktree",
+      },
+    });
+
+    const successor = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      payload: { issueId, intent: "continue_same_issue" },
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        retryOfRunId: predecessorRunId,
+        parentRunId: predecessorRunId,
+        automaticSuccessorIntentId: randomUUID(),
+        productiveContinuation: true,
+      },
+      requestedByActorType: "system",
+    });
+
+    expect(successor).not.toBeNull();
+    await heartbeat.waitForRunExecutionDrain(successor!.id);
+  }, 10_000);
+
+  it("allows a dependency wake bound to the exact post-cutoff completion of an explicitly configured pre-cutoff target", async () => {
+    const { companyId, agentId, issueId: dependentIssueId } = await insertAgentAndIssue();
+    const blockerIssueId = randomUUID();
+    const completionRunId = randomUUID();
+    const unboundSucceededRunId = randomUUID();
+    const cutoff = new Date(Date.now() - 2_000);
+    const blockedTransitionAt = new Date(cutoff.getTime() - 2_000);
+    const configuredAt = new Date(cutoff.getTime() + 250);
+    const completedAt = new Date(cutoff.getTime() + 500);
+    await db.update(issues).set({
+      status: "blocked",
+      createdAt: new Date(cutoff.getTime() - 3_000),
+      blockedTransitionAt,
+      executionWorkspacePreference: "isolated_workspace",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree" },
+      },
+      updatedAt: configuredAt,
+    }).where(eq(issues.id, dependentIssueId));
+    await db.insert(issues).values({
+      id: blockerIssueId,
+      companyId,
+      title: "Completed blocker",
+      status: "done",
+      priority: "high",
+      assigneeAgentId: agentId,
+      responsibleUserId: "responsible-user",
+      completedAt,
+      createdAt: new Date(cutoff.getTime() - 3_000),
+      updatedAt: completedAt,
+    });
+    const blockerState = {
+      blockerIssueId,
+      blockerKind: "issue_dependency",
+      requiredEvidenceVersion: "issue_done_v1",
+      resolutionState: "resolved" as const,
+      evidenceRevision: 1,
+    };
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerIssueId,
+      relatedIssueId: dependentIssueId,
+      type: "blocks",
+      ...blockerState,
+      resolutionEvidence: {
+        blockerIssueId,
+        status: "done",
+        statusVersion: 1,
+        completedAt: completedAt.toISOString(),
+      },
+      resolvedAt: completedAt,
+    });
+    await db.insert(heartbeatRuns).values([
+      {
+        id: completionRunId,
+        companyId,
+        agentId,
+        nativeIssueId: blockerIssueId,
+        status: "succeeded",
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { issueId: blockerIssueId, taskId: blockerIssueId },
+        createdAt: completedAt,
+        startedAt: completedAt,
+        finishedAt: completedAt,
+      },
+      {
+        id: unboundSucceededRunId,
+        companyId,
+        agentId,
+        nativeIssueId: blockerIssueId,
+        status: "succeeded",
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { issueId: blockerIssueId, taskId: blockerIssueId },
+        createdAt: new Date(completedAt.getTime() + 1),
+        startedAt: new Date(completedAt.getTime() + 1),
+        finishedAt: new Date(completedAt.getTime() + 1),
+      },
+    ]);
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      runId: completionRunId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: blockerIssueId,
+      details: { status: "done" },
+      createdAt: completedAt,
+    });
+    await armWorktreeRunExecution(cutoff);
+    const blockerStateFingerprint = buildIssueBlockerStateFingerprint([blockerState]);
+    const heartbeat = heartbeatService(db, {
+      runtimeEnv: {
+        PAPERCLIP_IN_WORKTREE: "true",
+        PAPERCLIP_INSTANCE_ID: "test-worktree",
+      },
+    });
+
+    const wakeDependency = (
+      causalCompletionRunId: string | null,
+    ) => heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: dependentIssueId,
+        resolvedBlockerIssueId: blockerIssueId,
+        blockerIssueIds: [blockerIssueId],
+        ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
+      },
+      contextSnapshot: {
+        issueId: dependentIssueId,
+        taskId: dependentIssueId,
+        wakeReason: "issue_blockers_resolved",
+        resolvedBlockerIssueId: blockerIssueId,
+        ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
+      },
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId,
+        blockerIssueIds: [blockerIssueId],
+        blockerStates: [blockerState],
+        blockedTransitionAt,
+      }),
+      blockerStateFingerprint,
+      requestedByActorType: "system",
+      requestedByActorId: "dependency-reconciliation",
+    });
+
+    await expect(wakeDependency(completionRunId)).resolves.toBeNull();
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "board-user",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: dependentIssueId,
+      details: {
+        authorizationReason: "allow_board_actor",
+        executionWorkspaceSettings: {
+          mode: "isolated_workspace",
+          workspaceStrategy: { type: "git_worktree" },
+        },
+      },
+      createdAt: configuredAt,
+    });
+    await expect(wakeDependency(null)).resolves.toBeNull();
+    await expect(wakeDependency(randomUUID())).resolves.toBeNull();
+    await expect(wakeDependency(unboundSucceededRunId)).resolves.toBeNull();
+    const targetRunsBeforeAuthorizedWake = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(heartbeatRuns)
+      .where(sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${dependentIssueId}`)
+      .then((rows) => rows[0]?.count ?? 0);
+    expect(targetRunsBeforeAuthorizedWake).toBe(0);
+
+    const successor = await wakeDependency(completionRunId);
+
+    expect(successor).not.toBeNull();
+    await heartbeat.waitForRunExecutionDrain(successor!.id);
   }, 10_000);
 
   it("creates live-plane assignment runs but fails closed without usage evidence", async () => {

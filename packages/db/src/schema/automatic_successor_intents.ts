@@ -37,6 +37,7 @@ export const automaticSuccessorIntents = pgTable(
       .notNull(),
     policyVersion: integer("policy_version").notNull(),
     budgetSnapshot: jsonb("budget_snapshot").$type<Record<string, unknown>>(),
+    notBeforeAt: timestamp("not_before_at", { withTimezone: true }),
     wakeupRequestId: uuid("wakeup_request_id"),
     successorRunId: uuid("successor_run_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -51,6 +52,10 @@ export const automaticSuccessorIntents = pgTable(
       table.companyId,
       table.status,
       table.createdAt,
+    ),
+    dueIdx: index("automatic_successor_intents_due_idx").on(
+      table.status,
+      table.notBeforeAt,
     ),
   }),
 );

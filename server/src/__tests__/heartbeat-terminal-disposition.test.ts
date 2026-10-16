@@ -24,6 +24,8 @@ import {
   heartbeatRuns,
   issueRelations,
   issues,
+  projects,
+  projectWorkspaces,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -104,7 +106,10 @@ type Fixture = {
 // executeRun path, so it can build the bound version-2 disposition with the
 // server-assigned run id — exactly what the Hermes adapter ships after
 // normalizing the model's wire envelope with trusted execution context.
-let adapterBehavior: (ctx: { runId: string }) => Promise<AdapterExecutionResult>;
+let adapterBehavior: (ctx: {
+  runId: string;
+  workspaceId: string | null;
+}) => Promise<AdapterExecutionResult>;
 
 async function waitForRunToFinish(
   heartbeat: ReturnType<typeof heartbeatService>,
@@ -147,7 +152,16 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
       type: TEST_ADAPTER_TYPE,
       execute: async (ctx) => {
         terminalFault.executeCalls += 1;
-        return adapterBehavior({ runId: ctx.runId });
+        const paperclipWorkspace = ctx.context.paperclipWorkspace as
+          | Record<string, unknown>
+          | undefined;
+        return adapterBehavior({
+          runId: ctx.runId,
+          workspaceId:
+            typeof paperclipWorkspace?.workspaceId === "string"
+              ? paperclipWorkspace.workspaceId
+              : null,
+        });
       },
       testEnvironment: async () => ({
         adapterType: TEST_ADAPTER_TYPE,
@@ -164,7 +178,7 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
     // Default behavior: a successful run whose adapter emits a bound v2
     // complete disposition plus the budget telemetry the settlement path
     // reconciles into a consumed reservation.
-    adapterBehavior = async ({ runId }) => ({
+    adapterBehavior = async ({ runId, workspaceId }) => ({
       exitCode: 0,
       signal: null,
       timedOut: false,
@@ -177,7 +191,7 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
           issueId: fixture.issueId,
           agentId: fixture.agentId,
           runId,
-          workspaceId: null,
+          workspaceId,
         },
       },
       budgetTelemetry: {
@@ -227,10 +241,13 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
     await tempDb?.cleanup();
   });
 
-  async function seedFixture(overrides: { issueStatus?: string } = {}): Promise<Fixture> {
+  async function seedFixture(
+    overrides: { issueStatus?: string; withWorkspace?: boolean } = {},
+  ): Promise<Fixture> {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
+    const projectId = overrides.withWorkspace ? randomUUID() : null;
     await db.insert(companies).values({
       id: companyId,
       name: "Terminal heartbeat",
@@ -252,9 +269,26 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
       },
       permissions: {},
     });
+    if (projectId) {
+      await db.insert(projects).values({
+        id: projectId,
+        companyId,
+        name: "Terminal heartbeat workspace",
+        status: "active",
+      });
+      await db.insert(projectWorkspaces).values({
+        id: randomUUID(),
+        companyId,
+        projectId,
+        name: "Primary",
+        cwd: paperclipHome!,
+        isPrimary: true,
+      });
+    }
     await db.insert(issues).values({
       id: issueId,
       companyId,
+      projectId,
       title: "Finalize through the heartbeat",
       status: overrides.issueStatus ?? "in_progress",
       priority: "high",
@@ -361,6 +395,136 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.companyId, fixture.companyId));
     expect(companyRuns).toHaveLength(1);
+  }, 30_000);
+
+  it("denies a productive successor at the issue-assignee run ceiling", async () => {
+    await seedFixture({ withWorkspace: true });
+    await db.insert(heartbeatRuns).values(
+      Array.from({ length: 11 }, () => ({
+        id: randomUUID(),
+        companyId: fixture.companyId,
+        agentId: fixture.agentId,
+        invocationSource: "assignment",
+        status: "failed",
+        startedAt: new Date(Date.now() - 10_000),
+        finishedAt: new Date(Date.now() - 9_000),
+        contextSnapshot: { issueId: fixture.issueId },
+      })),
+    );
+    adapterBehavior = async ({ runId, workspaceId }) => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      summary: "More implementation remains",
+      resultJson: {
+        runDisposition: {
+          version: 2,
+          kind: "continue_same_issue",
+          companyId: fixture.companyId,
+          issueId: fixture.issueId,
+          agentId: fixture.agentId,
+          runId,
+          workspaceId,
+          nextAction: "Continue the bounded implementation.",
+          checkpoint: {
+            kind: "run_workspace",
+            runId,
+            workspaceId,
+          },
+        },
+      },
+      budgetTelemetry: {
+        providerRequestId: `req_${runId}`,
+        requestCount: 1,
+        inputTokens: 100,
+        outputTokens: 50,
+        runtimeMs: 2_000,
+        costMicrousd: 500,
+      },
+    });
+
+    const { run } = await invokeAndDrain();
+    const [intent] = await db
+      .select()
+      .from(automaticSuccessorIntents)
+      .where(eq(automaticSuccessorIntents.predecessorRunId, run.id));
+    expect(intent).toMatchObject({
+      status: "denied",
+      denialReason: "issue_activation_logical_run_budget_exhausted",
+    });
+    expect(await successorRuns(run.id)).toHaveLength(0);
+  }, 30_000);
+
+  it("denies a fourth provider-backed successor before cooldown promotion", async () => {
+    await seedFixture({ withWorkspace: true });
+    adapterBehavior = async ({ runId, workspaceId }) => {
+      if (terminalFault.executeCalls === 1) {
+        await db
+          .update(issues)
+          .set({ description: "Verified first-run progress", updatedAt: new Date() })
+          .where(eq(issues.id, fixture.issueId));
+      }
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        summary: "More implementation remains",
+        resultJson: {
+        runDisposition: {
+          version: 2,
+          kind: "continue_same_issue",
+          companyId: fixture.companyId,
+          issueId: fixture.issueId,
+          agentId: fixture.agentId,
+          runId,
+          workspaceId,
+          nextAction: "Continue the bounded implementation.",
+            checkpoint: { kind: "run_workspace", runId, workspaceId },
+          },
+        },
+        budgetTelemetry: {
+          providerRequestId: `req_${runId}`,
+          requestCount: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+          runtimeMs: 2_000,
+          costMicrousd: 500,
+        },
+      };
+    };
+
+    await invokeAndDrain();
+    let runs = await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, fixture.companyId))
+      .orderBy(heartbeatRuns.createdAt);
+    expect(runs).toHaveLength(3);
+    expect(runs.map((run) => ({
+      status: run.status,
+      streak: run.noProgressStreak,
+      circuit: run.continuityCircuitState,
+    }))).toEqual([
+      { status: "succeeded", streak: 0, circuit: "closed" },
+      { status: "succeeded", streak: 1, circuit: "closed" },
+      { status: "succeeded", streak: 2, circuit: "closed" },
+    ]);
+
+    const intents = await readIntents(fixture.companyId);
+    expect(intents).toHaveLength(3);
+    expect(intents.filter((intent) => intent.status === "materialized")).toHaveLength(2);
+    expect(intents.filter((intent) => intent.status === "denied")).toEqual([
+      expect.objectContaining({
+        issueId: fixture.issueId,
+        agentId: fixture.agentId,
+        denialReason: "logical_execution_provider_attempt_limit_exhausted",
+      }),
+    ]);
+    expect(terminalFault.executeCalls).toBe(3);
+    const [heldIssue] = await db.select().from(issues)
+      .where(eq(issues.id, fixture.issueId));
+    expect(heldIssue).toMatchObject({
+      status: "in_progress",
+      autonomousExecutionPaused: true,
+    });
   }, 30_000);
 
   it("replays a committed terminal intent through the stranded sweep exactly once", async () => {

@@ -4,10 +4,15 @@ import {
   ISSUE_REWAKE_BASE_COOLDOWN_MS,
   ISSUE_REWAKE_MAX_COOLDOWN_MS,
   ISSUE_REWAKE_NO_PROGRESS_THRESHOLD,
+  ISSUE_PROGRESS_ACTIVITY_ACTIONS,
   computeIssueRewakeCooldownMs,
   evaluateIssueRewakeThrottle,
   isThrottleCandidateIssueRewake,
 } from "../services/issue-rewake-throttle.ts";
+
+it("does not treat issue comments as material progress", () => {
+  expect(ISSUE_PROGRESS_ACTIVITY_ACTIONS).not.toContain("issue.comment_added");
+});
 
 const NOW = new Date("2026-07-12T18:14:00.000Z");
 

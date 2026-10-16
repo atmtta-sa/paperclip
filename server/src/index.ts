@@ -1501,6 +1501,9 @@ async function startServerWithDatabaseTeardown(
           }
         }
 
+        const successorPromotion = typeof heartbeat.promoteDueAutomaticSuccessorIntents === "function"
+          ? await heartbeat.promoteDueAutomaticSuccessorIntents()
+          : { promoted: 0, held: 0, denied: 0, intentIds: [] };
         const promotion = await heartbeat.promoteDueScheduledRetries();
         await heartbeat.resumeQueuedRuns();
         const recoveredGoalActions = await heartbeat.recoverPendingSessionGoalActions();
@@ -1522,6 +1525,8 @@ async function startServerWithDatabaseTeardown(
         }
         const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
         if (
+          successorPromotion.promoted > 0 ||
+          successorPromotion.denied > 0 ||
           promotion.promoted > 0 ||
           reconciled.assignmentDispatched > 0 ||
           reconciled.dispatchRequeued > 0 ||
@@ -1530,7 +1535,14 @@ async function startServerWithDatabaseTeardown(
           reconciled.escalated > 0
         ) {
           logger.warn(
-            { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
+            {
+              promotedAutomaticSuccessors: successorPromotion.promoted,
+              deniedAutomaticSuccessors: successorPromotion.denied,
+              automaticSuccessorIntentIds: successorPromotion.intentIds,
+              promotedScheduledRetries: promotion.promoted,
+              promotedScheduledRetryRunIds: promotion.runIds,
+              ...reconciled,
+            },
             "startup heartbeat recovery changed assigned issue state",
           );
         }
@@ -1757,11 +1769,18 @@ async function startServerWithDatabaseTeardown(
           // persisted queued work is still being driven forward.
           trackHeartbeatSchedulerWork(heartbeat
             .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-            .then(() => heartbeat.promoteDueScheduledRetries())
-            .then(async (promotion) => {
+            .then(async () => ({
+              successorPromotion: typeof heartbeat.promoteDueAutomaticSuccessorIntents === "function"
+                ? await heartbeat.promoteDueAutomaticSuccessorIntents()
+                : { promoted: 0, held: 0, denied: 0, intentIds: [] },
+              promotion: await heartbeat.promoteDueScheduledRetries(),
+            }))
+            .then(async ({ successorPromotion, promotion }) => {
               await heartbeat.resumeQueuedRuns();
               const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
               if (
+                successorPromotion.promoted > 0 ||
+                successorPromotion.denied > 0 ||
                 promotion.promoted > 0 ||
                 reconciled.assignmentDispatched > 0 ||
                 reconciled.dispatchRequeued > 0 ||
@@ -1770,7 +1789,14 @@ async function startServerWithDatabaseTeardown(
                 reconciled.escalated > 0
               ) {
                 logger.warn(
-                  { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
+                  {
+                    promotedAutomaticSuccessors: successorPromotion.promoted,
+                    deniedAutomaticSuccessors: successorPromotion.denied,
+                    automaticSuccessorIntentIds: successorPromotion.intentIds,
+                    promotedScheduledRetries: promotion.promoted,
+                    promotedScheduledRetryRunIds: promotion.runIds,
+                    ...reconciled,
+                  },
                   "periodic heartbeat recovery changed assigned issue state",
                 );
               }
@@ -1813,15 +1839,25 @@ async function startServerWithDatabaseTeardown(
     // requests can create these runs independently of timer-based heartbeats.
     const runDisabledSchedulerExecutionRecovery = async () => {
       if ((await environmentLeaseCleanupHeartbeat.resolveSchedulingSuppression()).suppressed) return;
+      const successorPromotion = typeof environmentLeaseCleanupHeartbeat.promoteDueAutomaticSuccessorIntents === "function"
+        ? await environmentLeaseCleanupHeartbeat.promoteDueAutomaticSuccessorIntents()
+        : { promoted: 0, held: 0, denied: 0, intentIds: [] };
       const promotion = await environmentLeaseCleanupHeartbeat.promoteDueScheduledRetries();
       await environmentLeaseCleanupHeartbeat.resumeQueuedRuns();
-      if (promotion.promoted > 0) {
+      if (
+        successorPromotion.promoted > 0 ||
+        successorPromotion.denied > 0 ||
+        promotion.promoted > 0
+      ) {
         logger.warn(
           {
+            promotedAutomaticSuccessors: successorPromotion.promoted,
+            deniedAutomaticSuccessors: successorPromotion.denied,
+            automaticSuccessorIntentIds: successorPromotion.intentIds,
             promotedScheduledRetries: promotion.promoted,
             promotedScheduledRetryRunIds: promotion.runIds,
           },
-          "disabled heartbeat scheduler promoted authorized execution retries",
+          "disabled heartbeat scheduler promoted authorized execution recovery",
         );
       }
     };

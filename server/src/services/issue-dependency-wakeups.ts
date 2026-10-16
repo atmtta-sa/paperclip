@@ -155,11 +155,19 @@ export function buildIssueBlockersResolvedWakeStateKeyWithoutCycle(input: {
  */
 export function buildIssueBlockersResolvedWakeStateKey(input: IssueBlockersResolvedReadyStateInput) {
   const sortedBlockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
+  const blockerFingerprint = buildIssueBlockerStateFingerprint(
+    blockerStatesForReadyState(sortedBlockerIssueIds, input.blockerStates),
+  );
+  const blockedCycle = formatIssueBlockersResolvedWakeCycle(input.blockedTransitionAt);
+  const readyStateFingerprint = blockedCycle === "none"
+    ? blockerFingerprint
+    : createHash("sha256")
+      .update(`${blockerFingerprint}\u001f${blockedCycle}`)
+      .digest("hex")
+      .slice(0, 32);
   return buildStateKey(
     input.dependentIssueId,
-    buildIssueBlockerStateFingerprint(
-      blockerStatesForReadyState(sortedBlockerIssueIds, input.blockerStates),
-    ),
+    readyStateFingerprint,
     sortedBlockerIssueIds.length,
   );
 }

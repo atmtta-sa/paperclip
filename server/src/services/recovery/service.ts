@@ -5590,6 +5590,7 @@ export function recoveryService(
               issueId: candidate.id,
               resolvedBlockerIssueId,
               blockerIssueIds: readiness.blockerIssueIds,
+              ...(opts?.runId ? { causalCompletionRunId: opts.runId } : {}),
               backstop: payloadBackstop,
             },
             idempotencyKey,
@@ -5603,6 +5604,7 @@ export function recoveryService(
               source,
               resolvedBlockerIssueId,
               blockerIssueIds: readiness.blockerIssueIds,
+              ...(opts?.runId ? { causalCompletionRunId: opts.runId } : {}),
             },
           });
           if (!wake) {

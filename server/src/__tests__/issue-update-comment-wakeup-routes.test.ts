@@ -26,6 +26,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
   getRun: vi.fn(async () => null),
+  getLatestNeedsHumanRunForIssue: vi.fn(async () => null),
   getActiveRunForAgent: vi.fn(async () => null),
   cancelRun: vi.fn(async () => null),
 }));
@@ -598,6 +599,49 @@ describe("issue update comment wakeups", () => {
           wakeCommentId: "comment-3",
           wakeReason: "issue_commented",
           source: "issue.comment",
+        }),
+      }),
+    );
+  });
+
+  it("binds an explicit board resume to the latest matching needs-human run", async () => {
+    const existing = makeIssue({
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-board-resume",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "The workspace is intentional; continue.",
+    });
+    mockHeartbeatService.getLatestNeedsHumanRunForIssue.mockResolvedValue({
+      id: SOURCE_RUN_ID,
+    });
+
+    const res = await request(await createApp())
+      .post(`/api/issues/${existing.id}/comments`)
+      .send({
+        body: "The workspace is intentional; continue.",
+        resume: true,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockHeartbeatService.getLatestNeedsHumanRunForIssue).toHaveBeenCalledWith({
+      companyId: existing.companyId,
+      issueId: existing.id,
+      agentId: ASSIGNEE_AGENT_ID,
+    });
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          resumeIntent: true,
+          resumeFromRunId: SOURCE_RUN_ID,
         }),
       }),
     );

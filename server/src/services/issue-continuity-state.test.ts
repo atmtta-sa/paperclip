@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildIssueTaskStateFingerprint,
+  evaluateIssueActivationRunAdmission,
   transitionIssueContinuityState,
 } from "./issue-continuity-state.js";
 
@@ -61,7 +62,7 @@ describe("issue continuity state", () => {
     }).workOutcome).toBe("no_progress");
   });
 
-  it("opens the circuit on the second same-fingerprint no-progress outcome", () => {
+  it("keeps the circuit closed for the second same-fingerprint no-progress outcome", () => {
     expect(
       transitionIssueContinuityState({
         terminalStatus: "succeeded",
@@ -72,6 +73,22 @@ describe("issue continuity state", () => {
     ).toEqual({
       workOutcome: "no_progress",
       noProgressStreak: 2,
+      circuitState: "closed",
+      openedNow: false,
+    });
+  });
+
+  it("opens the circuit on the deferred third same-fingerprint no-progress outcome", () => {
+    expect(
+      transitionIssueContinuityState({
+        terminalStatus: "succeeded",
+        fingerprintBefore: "same",
+        fingerprintAfter: "same",
+        previousNoProgressStreak: 2,
+      }),
+    ).toEqual({
+      workOutcome: "no_progress",
+      noProgressStreak: 3,
       circuitState: "open",
       openedNow: true,
     });
@@ -128,6 +145,30 @@ describe("issue continuity state", () => {
       circuitState: "closed",
       openedNow: false,
     });
+  });
+
+  it("resets the streak after a trusted workspace delta with unchanged issue state", () => {
+    expect(
+      transitionIssueContinuityState({
+        terminalStatus: "succeeded",
+        fingerprintBefore: "same",
+        fingerprintAfter: "same",
+        previousNoProgressStreak: 2,
+        verifiedWorkspaceProgress: true,
+      }),
+    ).toEqual({
+      workOutcome: "productive",
+      noProgressStreak: 0,
+      circuitState: "closed",
+      openedNow: false,
+    });
+  });
+
+  it("does not admit a run after the issue activation run ceiling", () => {
+    expect(evaluateIssueActivationRunAdmission({ attemptedRuns: 12, maxRuns: 12 }))
+      .toEqual({ allowed: false, reason: "issue_activation_logical_run_budget_exhausted" });
+    expect(evaluateIssueActivationRunAdmission({ attemptedRuns: 11, maxRuns: 12 }))
+      .toEqual({ allowed: true, reason: null });
   });
 
   it("does not call changed issue state productive without a verified provider response", () => {

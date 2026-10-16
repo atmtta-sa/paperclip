@@ -3989,6 +3989,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(issues);
     await db.delete(workspaceOperations);
     await db.delete(executionWorkspaces);
+    await db.delete(heartbeatRuns);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
     await db.delete(agents);
@@ -4666,6 +4667,97 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
       isDependencyReady: true,
       pendingFinalizeBlockerIssueIds: [],
+    });
+  });
+
+  it("does not let a pre-provider paused successor supersede a verified successful finalize", async () => {
+    const {
+      companyId,
+      assigneeAgentId,
+      executionWorkspaceId,
+      blockerId,
+      dependentId,
+    } = await seedSharedWorkspaceDependency();
+    const successfulRunId = randomUUID();
+    const pausedRunId = randomUUID();
+    const verifiedDigest = "verified-workspace-digest";
+
+    await db.insert(heartbeatRuns).values([
+      {
+        id: successfulRunId,
+        companyId,
+        agentId: assigneeAgentId,
+        status: "succeeded",
+        resultJson: {
+          workspaceMaterialProgress: {
+            version: 1,
+            source: "paperclip_server",
+            workspaceId: executionWorkspaceId,
+            status: "verified",
+            reason: "workspace_material_state_unchanged",
+            changed: false,
+            beforeDigest: verifiedDigest,
+            afterDigest: verifiedDigest,
+          },
+        },
+      },
+      {
+        id: pausedRunId,
+        companyId,
+        agentId: assigneeAgentId,
+        status: "failed",
+        error: "autonomous_execution_paused",
+        errorCode: "autonomous_execution_paused",
+        resultJson: {
+          executionRecovery: {
+            kind: "bootstrap",
+            providerWorkStarted: false,
+          },
+        },
+        contextSnapshot: {
+          workspaceMaterialProgressBaseline: {
+            version: 1,
+            source: "paperclip_server",
+            workspaceId: executionWorkspaceId,
+            snapshot: {
+              status: "verified",
+              digest: verifiedDigest,
+              fileCount: 9,
+              bytes: 468_392,
+            },
+          },
+        },
+      },
+    ]);
+    await db.insert(workspaceOperations).values([
+      {
+        companyId,
+        executionWorkspaceId,
+        heartbeatRunId: successfulRunId,
+        issueId: blockerId,
+        phase: "workspace_finalize",
+        status: "succeeded",
+        startedAt: new Date("2026-05-23T22:00:00.000Z"),
+      },
+      {
+        companyId,
+        executionWorkspaceId,
+        heartbeatRunId: pausedRunId,
+        issueId: blockerId,
+        phase: "workspace_finalize",
+        status: "failed",
+        metadata: { errorMessage: "autonomous_execution_paused" },
+        startedAt: new Date("2026-05-23T22:05:00.000Z"),
+      },
+    ]);
+
+    await expect(svc.listWakeableBlockedDependents(blockerId)).resolves.toEqual([
+      expect.objectContaining({ id: dependentId }),
+    ]);
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: true,
+      pendingFinalizeBlockerIssueIds: [],
+      unresolvedBlockerIssueIds: [],
     });
   });
 

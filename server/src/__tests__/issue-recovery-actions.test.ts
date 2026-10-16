@@ -121,7 +121,7 @@ describe("issueRecoveryActionService", () => {
     expect(fakeDb.insert).toHaveBeenCalledTimes(1);
   });
 
-  it("retries postgres-js constraint_name conflicts by reading the committed winner", async () => {
+  it("retries drizzle-wrapped postgres-js constraint_name conflicts by reading the committed winner", async () => {
     const winner = makeRecoveryActionRow({ id: "winner-action" });
     const selectResults = [[], [winner]];
     const fakeDb = {
@@ -142,9 +142,15 @@ describe("issueRecoveryActionService", () => {
       insert: vi.fn(() => ({
         values: vi.fn(() => ({
           returning: vi.fn(async () => {
-            throw Object.assign(new Error("duplicate key value violates unique constraint"), {
-              code: "23505",
-              constraint_name: "issue_recovery_actions_active_source_uq",
+            const conflict = Object.assign(
+              new Error("duplicate key value violates unique constraint"),
+              {
+                code: "23505",
+                constraint_name: "issue_recovery_actions_active_source_uq",
+              },
+            );
+            throw Object.assign(new Error("Failed query: insert into issue_recovery_actions"), {
+              cause: conflict,
             });
           }),
         })),

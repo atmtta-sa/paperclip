@@ -1,0 +1,2 @@
+ALTER TABLE "automatic_successor_intents" ADD COLUMN "not_before_at" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX "automatic_successor_intents_due_idx" ON "automatic_successor_intents" USING btree ("status","not_before_at");

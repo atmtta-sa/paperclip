@@ -173,6 +173,23 @@ function recordedMetric(
   }
 }
 
+export function projectRootChainRequestCapacity(
+  rows: Array<typeof autonomousBudgetReservations.$inferSelect>,
+  requestedRequestCount: number,
+  maxRootChainProviderRequests: number,
+) {
+  const committedRootChainRequests = rows.reduce(
+    (total, row) => total + recordedMetric(row, "request_count"),
+    0,
+  );
+  return {
+    committedRootChainRequests,
+    eligible:
+      committedRootChainRequests + requestedRequestCount <=
+      maxRootChainProviderRequests,
+  };
+}
+
 
 function windowStart(windowKind: BudgetWindowKind, now: Date): Date | null {
   if (windowKind === "calendar_day_utc") {
@@ -219,6 +236,49 @@ function deriveRunEnvelope(
     value === null && !(key === "costMicrousd" && billingMode === "subscription_included"))?.[0];
   if (missing) throw new Error(`autonomous_run_budget_policy_missing:${missing}`);
   return normalizeBudgetRequest(envelope as AutonomousBudgetRequest, billingMode);
+}
+
+export async function lockAutonomousBudgetCandidateEnvelope(
+  db: Db,
+  input: Pick<
+    AutonomousBudgetReservationInput,
+    "companyId" | "agentId" | "issueId" | "requested" | "billingPolicy"
+  >,
+) {
+  const policies = await db
+    .select()
+    .from(budgetPolicies)
+    .where(
+      and(
+        eq(budgetPolicies.companyId, input.companyId),
+        eq(budgetPolicies.isActive, true),
+        eq(budgetPolicies.hardStopEnabled, true),
+        or(
+          and(
+            eq(budgetPolicies.scopeType, "company"),
+            or(isNull(budgetPolicies.scopeId), eq(budgetPolicies.scopeId, input.companyId)),
+          ),
+          and(eq(budgetPolicies.scopeType, "agent"), eq(budgetPolicies.scopeId, input.agentId)),
+          and(eq(budgetPolicies.scopeType, "task"), eq(budgetPolicies.scopeId, input.issueId)),
+        ),
+      ),
+    )
+    .orderBy(
+      budgetPolicies.scopeType,
+      budgetPolicies.scopeId,
+      budgetPolicies.metric,
+      budgetPolicies.windowKind,
+      budgetPolicies.id,
+    )
+    .for("update");
+  if (policies.length === 0) throw new Error("autonomous_budget_policy_missing");
+  const billingMode = input.billingPolicy?.billingMode ?? "metered_currency";
+  return {
+    policies,
+    requested: input.requested
+      ? normalizeBudgetRequest(input.requested, billingMode)
+      : deriveRunEnvelope(policies, billingMode),
+  };
 }
 
 function validateBillingPolicy(input: AutonomousBudgetReservationInput): void {
@@ -316,32 +376,10 @@ export async function reserveAutonomousBudget(
         });
       return circuitPermit.admitted ? null : circuitPermit;
     };
-    const policies = await tx
-      .select()
-      .from(budgetPolicies)
-      .where(
-        and(
-          eq(budgetPolicies.companyId, input.companyId),
-          eq(budgetPolicies.isActive, true),
-          eq(budgetPolicies.hardStopEnabled, true),
-          or(
-            and(
-              eq(budgetPolicies.scopeType, "company"),
-              or(isNull(budgetPolicies.scopeId), eq(budgetPolicies.scopeId, input.companyId)),
-            ),
-            and(eq(budgetPolicies.scopeType, "agent"), eq(budgetPolicies.scopeId, input.agentId)),
-            and(eq(budgetPolicies.scopeType, "task"), eq(budgetPolicies.scopeId, input.issueId)),
-          ),
-        ),
-      )
-      .orderBy(
-        budgetPolicies.scopeType,
-        budgetPolicies.scopeId,
-        budgetPolicies.metric,
-        budgetPolicies.windowKind,
-        budgetPolicies.id,
-      )
-      .for("update");
+    const { policies, requested } = await lockAutonomousBudgetCandidateEnvelope(
+      tx as unknown as Db,
+      input,
+    );
 
     const existing = await tx
       .select({
@@ -406,7 +444,6 @@ export async function reserveAutonomousBudget(
         },
       };
     }
-    if (policies.length === 0) throw new Error("autonomous_budget_policy_missing");
     const billingMode = input.billingPolicy?.billingMode ?? "metered_currency";
     let chainRootRunId = input.runId;
     if (input.previousRunId) {
@@ -461,14 +498,14 @@ export async function reserveAutonomousBudget(
           ]),
         ),
       );
-    const requested = input.requested
-      ? normalizeBudgetRequest(input.requested, billingMode)
-      : deriveRunEnvelope(policies, billingMode);
-    const committedChainRequests = chainRows.reduce(
-      (total, row) => total + recordedMetric(row, "request_count"), 0,
-    );
-    if (input.billingPolicy && committedChainRequests + requested.requestCount >
-        input.billingPolicy.maxRootChainProviderRequests) {
+    const rootChainCapacity = input.billingPolicy
+      ? projectRootChainRequestCapacity(
+          chainRows,
+          requested.requestCount,
+          input.billingPolicy.maxRootChainProviderRequests,
+        )
+      : null;
+    if (rootChainCapacity && !rootChainCapacity.eligible) {
       throw new Error("autonomous_budget_root_chain_request_limit_exceeded");
     }
 

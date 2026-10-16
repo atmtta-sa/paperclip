@@ -2349,6 +2349,75 @@ export async function listUnfinalizedExecutionWorkspaceIds(
   return unfinalized;
 }
 
+type DependencyWorkspaceOperation = {
+  issueId: string | null;
+  executionWorkspaceId: string | null;
+  heartbeatRunId: string | null;
+  phase: string;
+  status: string;
+  metadata: Record<string, unknown> | null;
+  startedAt: Date;
+  runErrorCode: string | null;
+  runResultJson: Record<string, unknown> | null;
+  runContextSnapshot: Record<string, unknown> | null;
+};
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function verifiedWorkspaceTerminalDigest(
+  row: DependencyWorkspaceOperation,
+): string | null {
+  if (row.phase !== "workspace_finalize" || row.status !== "succeeded")
+    return null;
+  const receipt = objectValue(row.runResultJson?.workspaceMaterialProgress);
+  if (
+    receipt?.version !== 1 ||
+    receipt.source !== "paperclip_server" ||
+    receipt.workspaceId !== row.executionWorkspaceId
+  )
+    return null;
+  return typeof receipt.afterDigest === "string" && receipt.afterDigest.length > 0
+    ? receipt.afterDigest
+    : null;
+}
+
+function isNonSupersedingPausedFinalize(
+  row: DependencyWorkspaceOperation,
+  priorSuccessfulFinalize: { startedAt: Date; digest: string } | undefined,
+): boolean {
+  if (
+    !priorSuccessfulFinalize ||
+    priorSuccessfulFinalize.startedAt >= row.startedAt ||
+    row.phase !== "workspace_finalize" ||
+    row.status !== "failed" ||
+    row.metadata?.errorMessage !== "autonomous_execution_paused" ||
+    row.runErrorCode !== "autonomous_execution_paused"
+  )
+    return false;
+
+  const executionRecovery = objectValue(
+    row.runResultJson?.executionRecovery,
+  );
+  if (executionRecovery?.providerWorkStarted !== false) return false;
+
+  const baseline = objectValue(
+    row.runContextSnapshot?.workspaceMaterialProgressBaseline,
+  );
+  const snapshot = objectValue(baseline?.snapshot);
+  return (
+    baseline?.version === 1 &&
+    baseline.source === "paperclip_server" &&
+    baseline.workspaceId === row.executionWorkspaceId &&
+    snapshot?.status === "verified" &&
+    typeof snapshot.digest === "string" &&
+    snapshot.digest === priorSuccessfulFinalize.digest
+  );
+}
+
 async function listPendingFinalizeBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
@@ -2376,11 +2445,20 @@ async function listPendingFinalizeBlockerIssueIds(
     .select({
       issueId: workspaceOperations.issueId,
       executionWorkspaceId: workspaceOperations.executionWorkspaceId,
+      heartbeatRunId: workspaceOperations.heartbeatRunId,
       phase: workspaceOperations.phase,
       status: workspaceOperations.status,
+      metadata: workspaceOperations.metadata,
       startedAt: workspaceOperations.startedAt,
+      runErrorCode: heartbeatRuns.errorCode,
+      runResultJson: heartbeatRuns.resultJson,
+      runContextSnapshot: heartbeatRuns.contextSnapshot,
     })
     .from(workspaceOperations)
+    .leftJoin(
+      heartbeatRuns,
+      eq(workspaceOperations.heartbeatRunId, heartbeatRuns.id),
+    )
     .where(
       and(
         eq(workspaceOperations.companyId, companyId),
@@ -2393,13 +2471,17 @@ async function listPendingFinalizeBlockerIssueIds(
 
   const latestAttributedByBlockerWorkspace = new Map<
     string,
-    { phase: string; status: string; startedAt: Date }
+    DependencyWorkspaceOperation
   >();
   const latestUnattributedByWorkspace = new Map<
     string,
-    { phase: string; status: string; startedAt: Date }
+    DependencyWorkspaceOperation
   >();
   const latestSuccessfulFinalizeByWorkspace = new Map<string, Date>();
+  const latestVerifiedSuccessfulFinalizeByWorkspace = new Map<
+    string,
+    { startedAt: Date; digest: string }
+  >();
   for (const row of rows) {
     if (!row.executionWorkspaceId) continue;
     if (row.phase === "workspace_finalize" && row.status === "succeeded") {
@@ -2412,28 +2494,34 @@ async function listPendingFinalizeBlockerIssueIds(
           row.startedAt,
         );
       }
+      const digest = verifiedWorkspaceTerminalDigest(row);
+      const verifiedCurrent =
+        latestVerifiedSuccessfulFinalizeByWorkspace.get(
+          row.executionWorkspaceId,
+        );
+      if (
+        digest &&
+        (!verifiedCurrent || row.startedAt > verifiedCurrent.startedAt)
+      ) {
+        latestVerifiedSuccessfulFinalizeByWorkspace.set(
+          row.executionWorkspaceId,
+          { startedAt: row.startedAt, digest },
+        );
+      }
     }
     if (row.issueId) {
       const key = `${row.issueId}:${row.executionWorkspaceId}`;
       if (!blockerWorkspaceKeys.has(key)) continue;
       const current = latestAttributedByBlockerWorkspace.get(key);
       if (!current || row.startedAt > current.startedAt) {
-        latestAttributedByBlockerWorkspace.set(key, {
-          phase: row.phase,
-          status: row.status,
-          startedAt: row.startedAt,
-        });
+        latestAttributedByBlockerWorkspace.set(key, row);
       }
       continue;
     }
 
     const current = latestUnattributedByWorkspace.get(row.executionWorkspaceId);
     if (!current || row.startedAt > current.startedAt) {
-      latestUnattributedByWorkspace.set(row.executionWorkspaceId, {
-        phase: row.phase,
-        status: row.status,
-        startedAt: row.startedAt,
-      });
+      latestUnattributedByWorkspace.set(row.executionWorkspaceId, row);
     }
   }
 
@@ -2449,6 +2537,15 @@ async function listPendingFinalizeBlockerIssueIds(
       pair.executionWorkspaceId,
     );
     if (laterSuccessfulFinalize && laterSuccessfulFinalize > latest.startedAt)
+      continue;
+    if (
+      isNonSupersedingPausedFinalize(
+        latest,
+        latestVerifiedSuccessfulFinalizeByWorkspace.get(
+          pair.executionWorkspaceId,
+        ),
+      )
+    )
       continue;
     pending.add(pair.blockerIssueId);
   }

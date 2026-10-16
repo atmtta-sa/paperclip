@@ -1,10 +1,52 @@
-export const LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT = 2;
+export const LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT = 3;
+export const TRANSIENT_PROVIDER_FAILURE_ATTEMPT_LIMIT = 2;
+
+export type AutomaticSuccessorAdmissionReason =
+  | "logical_execution_provider_attempt_limit_exhausted"
+  | "logical_execution_root_chain_request_budget_exhausted";
+
+/** Root-chain capacity wins when both bounded generation controls are exhausted. */
+export function evaluateAutomaticSuccessorAdmission(input: {
+  nextProviderAttempt: number;
+  committedRootChainRequests: number;
+  requestedRequestCount: number;
+  maxRootChainProviderRequests: number | null;
+}): { eligible: true } | { eligible: false; reason: AutomaticSuccessorAdmissionReason } {
+  if (
+    input.maxRootChainProviderRequests !== null &&
+    input.committedRootChainRequests + input.requestedRequestCount >
+      input.maxRootChainProviderRequests
+  ) {
+    return {
+      eligible: false,
+      reason: "logical_execution_root_chain_request_budget_exhausted",
+    };
+  }
+  if (input.nextProviderAttempt > LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT) {
+    return {
+      eligible: false,
+      reason: "logical_execution_provider_attempt_limit_exhausted",
+    };
+  }
+  return { eligible: true };
+}
 
 export type LogicalExecutionIdentity = {
   key: string;
   rootRunId: string;
   providerAttempt: number;
 };
+
+export function startLogicalExecutionIdentity(
+  runId: string,
+  issueId: string | null,
+): LogicalExecutionIdentity {
+  return {
+    key: `issue:${issueId ?? "no-issue"}:generation:${runId}`,
+    rootRunId: runId,
+    providerAttempt: 1,
+  };
+}
 
 type RetrySourceRun = {
   id: string;
@@ -69,9 +111,8 @@ export function nextLogicalExecutionIdentity(
 
   const providerWorkStarted =
     record(record(run.resultJson).executionRecovery).providerWorkStarted;
-  return {
-    key: `issue:${issueId ?? "no-issue"}:generation:${run.id}`,
-    rootRunId: run.id,
-    providerAttempt: providerWorkStarted === false ? 1 : 2,
-  };
+  const identity = startLogicalExecutionIdentity(run.id, issueId);
+  return providerWorkStarted === false
+    ? identity
+    : { ...identity, providerAttempt: 2 };
 }

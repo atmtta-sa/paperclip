@@ -53,7 +53,7 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
     expect(first).toContain(dependentIssueId);
   });
 
-  it("does not change when only blockedTransitionAt changes", () => {
+  it("changes when blockedTransitionAt identifies a new blocked cycle", () => {
     const first = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId,
       blockerIssueIds: [blockerIssueId],
@@ -64,10 +64,10 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
       blockerIssueIds: [blockerIssueId],
       blockedTransitionAt: secondCycle,
     });
-    expect(first).toBe(second);
+    expect(first).not.toBe(second);
   });
 
-  it("ignores a null, omitted, or dated blocked cycle", () => {
+  it("keeps null and omitted cycles on the legacy key while dating a real cycle", () => {
     const noneKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId,
       blockerIssueIds: [blockerIssueId],
@@ -83,7 +83,7 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
       blockedTransitionAt: firstCycle,
     });
     expect(noneKey).toBe(omittedKey);
-    expect(noneKey).toBe(datedKey);
+    expect(noneKey).not.toBe(datedKey);
     expect(noneKey).toBe(
       buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
         dependentIssueId,
@@ -142,7 +142,7 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
     expect(existing?.id).toBe("wake-cycle");
   });
 
-  it("suppresses a completed wake when only the blocked cycle changed", async () => {
+  it("does not suppress a new blocked cycle with a completed legacy-key wake", async () => {
     const oldKey = buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
       dependentIssueId,
       blockerIssueIds: [blockerIssueId],
@@ -158,7 +158,7 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
       ]),
       readyState,
     );
-    expect(existing?.id).toBe("wake-old-previous-cycle");
+    expect(existing).toBeNull();
   });
 
   it("suppresses a completed old-key wake requested at or after blockedTransitionAt", async () => {

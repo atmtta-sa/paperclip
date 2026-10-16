@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { reserveAutonomousBudget } from "../services/autonomous-budget-reservations.js";
 import { reconcileAutonomousBudget } from "../services/autonomous-budget-reconciliation.js";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
@@ -25,6 +26,8 @@ import {
   issueComments,
   issueRecoveryActions,
   issues,
+  projects,
+  projectWorkspaces,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -40,6 +43,7 @@ import { loadIssueTaskStateFingerprint } from "../services/issue-continuity-stat
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { runningProcesses } from "../adapters/index.ts";
 import { recordAutonomousProviderCircuitOutcome } from "../services/autonomous-provider-circuit.js";
+import { buildAutomaticSuccessorWakeIdempotencyKey } from "../services/productive-continuation.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -144,6 +148,8 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         await db.delete(agents);
         await db.delete(environments);
         await db.delete(executionWorkspaces);
+        await db.delete(projectWorkspaces);
+        await db.delete(projects);
         await db.delete(companySkills);
         await db.delete(companies);
         break;
@@ -306,6 +312,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     noProgressStreak?: number;
     continuityCircuitState?: "closed" | "open";
     continuityCircuitOpenedAt?: Date;
+    runDispositionKind?: "needs_human" | "continue_same_issue";
   }) {
     const runId = randomUUID();
     const finishedAt = new Date(Date.now() - input.finishedSecondsAgo * 1000);
@@ -330,6 +337,9 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       continuityCircuitState: input.continuityCircuitState,
       continuityCircuitOpenedAt: input.continuityCircuitOpenedAt,
       contextSnapshot: { issueId: input.issueId, wakeReason: "issue_assigned" },
+      resultJson: input.runDispositionKind
+        ? { runDisposition: { kind: input.runDispositionKind } }
+        : undefined,
     });
     return runId;
   }
@@ -359,6 +369,47 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       .limit(1)
       .then((rows) => rows[0] ?? null);
   }
+
+  it("selects a needs-human predecessor only for the same issue, agent, and fingerprint", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const fingerprint = await loadIssueTaskStateFingerprint({ db, companyId, issueId });
+    const runId = await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 10,
+      stateFingerprintAfter: fingerprint,
+      runDispositionKind: "needs_human",
+    });
+
+    await expect(
+      heartbeat.getLatestNeedsHumanRunForIssue({ companyId, issueId, agentId }),
+    ).resolves.toEqual({ id: runId });
+    await expect(
+      heartbeat.getLatestNeedsHumanRunForIssue({
+        companyId,
+        issueId,
+        agentId: randomUUID(),
+      }),
+    ).resolves.toBeNull();
+
+    await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 5,
+      stateFingerprintAfter: fingerprint,
+      runDispositionKind: "continue_same_issue",
+    });
+    await expect(
+      heartbeat.getLatestNeedsHumanRunForIssue({ companyId, issueId, agentId }),
+    ).resolves.toBeNull();
+
+    await db.update(issues).set({ title: "Changed after human boundary" }).where(eq(issues.id, issueId));
+    await expect(
+      heartbeat.getLatestNeedsHumanRunForIssue({ companyId, issueId, agentId }),
+    ).resolves.toBeNull();
+  });
 
   it.each(["valid", "wrong_run", "confirmed_usage"])(
     "settles preflight evidence only when it is run-attributed and noncontradictory (%s)", async (variant) => {
@@ -458,6 +509,106 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     const [reservation] = await db.select().from(autonomousBudgetReservations)
       .where(eq(autonomousBudgetReservations.runId, runs[0]!.id));
     expect(reservation).toMatchObject({ actualRequestCount: 1 });
+  });
+
+  it("denies an exhausted logical generation before materializing a successor", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId, companyId, name: "Bounded continuation", status: "active",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: workspaceId, companyId, projectId, name: "Primary",
+      cwd: resolve(process.cwd(), ".."), isPrimary: true,
+    });
+    await db.update(issues).set({ projectId }).where(eq(issues.id, issueId));
+    const billingRoutePolicy = {
+      policyId: "root-chain-limit-test", policyVersion: 1, policyDigest: "d".repeat(64),
+      provider: "openai-codex", route: "https://chatgpt.com/backend-api/codex",
+      credentialPrincipalId: "managed-account:codex-uat", modelScope: ["gpt-5.6-codex"],
+      billingMode: "subscription_included", status: "active",
+      validFrom: "2020-01-01T00:00:00.000Z", validUntil: "2100-01-01T00:00:00.000Z",
+      maxRootChainProviderRequests: 12,
+    };
+    await db.update(agents).set({ adapterType: "hermes_local", adapterConfig: {
+      provider: "openai-codex", model: "gpt-5.6-codex", billingRoutePolicy,
+    } }).where(eq(agents.id, agentId));
+    await db.update(budgetPolicies).set({ amount: 4 }).where(and(
+      eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, "task"),
+      eq(budgetPolicies.scopeId, issueId), eq(budgetPolicies.metric, "request_count"),
+      eq(budgetPolicies.windowKind, "per_run"),
+    ));
+    mockAdapterExecute.mockImplementation((async (ctx: { runId: string }) => {
+      const providerRequestIds = Array.from({ length: 4 }, () => randomUUID());
+      await db.update(issues).set({
+        description: `Verified progress from ${ctx.runId}`,
+        updatedAt: new Date(),
+      }).where(eq(issues.id, issueId));
+      return {
+        exitCode: 0, signal: null, timedOut: false,
+        summary: "Verified productive work; implementation remains.",
+        provider: "openai-codex", model: "gpt-5.6-codex", usageBasis: "per_run",
+        usage: { inputTokens: 40, outputTokens: 20 },
+        budgetTelemetry: { providerRequestId: providerRequestIds[0], requestCount: 4,
+          inputTokens: 40, outputTokens: 20, runtimeMs: null, costMicrousd: null,
+          rateCardVersion: "hermes-provider-evidence-v3" },
+        resultJson: { successfulProviderResponses: 4, usageTelemetryComplete: true,
+          providerRequestIds, costStatus: "actual", cost_usd: 0,
+          durableCallEvidence: {
+            status: "complete", source: "hermes_sqlite_transport_owner", contractVersion: 3,
+            runId: ctx.runId, complete: true, executionComplete: true,
+            iterationAttempts: 4, providerDispatches: 4, confirmedResponses: 4,
+            pretransportDenials: 0, rejectedAfterDispatch: 0, unknownOutcomes: 0,
+            requestCount: 4, inputTokens: 40, outputTokens: 20, providerRequestIds,
+            providerRuntimeMs: null, runtimeBasis: null,
+            runtimeApplicability: "unavailable_by_route", costMicrousd: null,
+            costBasis: "subscription_included", costAuthority: "subscription_route_policy",
+            costAuthorityRef: `${billingRoutePolicy.policyId}:${billingRoutePolicy.policyVersion}`,
+            estimatedCostUsd: null, terminalDiscrepancies: [],
+            billingMode: "subscription_included", billingAggregation: "single_mode",
+            chargeApplicability: "not_applicable_per_request",
+            monetaryAmountMicrousd: null, monetaryCurrency: null,
+            tokenAccountingBasis: "provider_reported_tokens_v1",
+            routePolicyId: billingRoutePolicy.policyId,
+            routePolicyVersion: billingRoutePolicy.policyVersion,
+            routePolicyDigest: billingRoutePolicy.policyDigest,
+            credentialPrincipalId: billingRoutePolicy.credentialPrincipalId,
+            rootChainRequestLimit: billingRoutePolicy.maxRootChainProviderRequests,
+          },
+          runDisposition: { version: 2, kind: "continue_same_issue", companyId,
+            issueId, agentId, runId: ctx.runId, workspaceId,
+            nextAction: "Continue the bounded implementation.",
+            checkpoint: { kind: "run_workspace", runId: ctx.runId, workspaceId } },
+        },
+      };
+    }) as any);
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    const reservations = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId));
+    const intents = await db.select().from(automaticSuccessorIntents)
+      .where(eq(automaticSuccessorIntents.companyId, companyId));
+    const wakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(3);
+    expect(runs).toHaveLength(3);
+    expect(reservations).toHaveLength(3);
+    expect(intents.filter((intent) => intent.status === "materialized")).toHaveLength(2);
+    const deniedIntents = intents.filter((intent) => intent.status === "denied");
+    expect(deniedIntents).toEqual([
+      expect.objectContaining({
+        denialReason: "logical_execution_root_chain_request_budget_exhausted",
+      }),
+    ]);
+    expect(wakes.some((wake) =>
+      wake.idempotencyKey === buildAutomaticSuccessorWakeIdempotencyKey(deniedIntents[0]!.id),
+    )).toBe(false);
+    expect(issue).toMatchObject({ status: "in_progress", autonomousExecutionPaused: true });
   });
 
   it("does not erase a different-agent predecessor to bypass uncertain accounting", async () => {
@@ -1620,7 +1771,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(reservations).toEqual([]);
   });
 
-  it("persists no-progress outcomes and opens the circuit after the second unchanged run", async () => {
+  it("keeps the circuit closed at the two-run cooldown threshold", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     mockAdapterExecute.mockImplementation((ctx: { runId: string }) =>
       successfulAdapterResult(ctx, true));
@@ -1631,8 +1782,6 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     const runs = await db
       .select({
         workOutcome: heartbeatRuns.workOutcome,
-        stateFingerprintBefore: heartbeatRuns.stateFingerprintBefore,
-        stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter,
         noProgressStreak: heartbeatRuns.noProgressStreak,
         continuityCircuitState: heartbeatRuns.continuityCircuitState,
         continuityCircuitOpenedAt: heartbeatRuns.continuityCircuitOpenedAt,
@@ -1651,14 +1800,11 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(runs[1]).toMatchObject({
       workOutcome: "no_progress",
       noProgressStreak: 2,
-      continuityCircuitState: "open",
+      continuityCircuitState: "closed",
+      continuityCircuitOpenedAt: null,
+      continuityCircuitAlertedAt: null,
     });
-    expect(runs[0]?.stateFingerprintBefore).toMatch(/^[a-f0-9]{32}$/);
-    expect(runs[0]?.stateFingerprintAfter).toBe(runs[0]?.stateFingerprintBefore);
-    expect(runs[1]?.stateFingerprintBefore).toBe(runs[0]?.stateFingerprintAfter);
-    expect(runs[1]?.stateFingerprintAfter).toBe(runs[1]?.stateFingerprintBefore);
-    expect(runs[1]?.continuityCircuitOpenedAt).toBeInstanceOf(Date);
-    expect(runs[1]?.continuityCircuitAlertedAt).toBeInstanceOf(Date);
+
     const alertCount = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(activityLog)
@@ -1670,10 +1816,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         ),
       )
       .then((rows) => rows[0]?.count ?? 0);
-    expect(alertCount).toBe(1);
-
-    expect(await assignmentWake(agentId, issueId)).toBeNull();
-    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_circuit_open");
+    expect(alertCount).toBe(0);
   });
 
   it("records budget exhaustion and opens the circuit without adapter execution", async () => {
@@ -1880,6 +2023,47 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(admittedWake).not.toBeNull();
   });
 
+  it("admits an automatic wake after verified same-run workspace progress", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const fingerprint = await loadIssueTaskStateFingerprint({ db, companyId, issueId });
+
+    await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 40,
+      workOutcome: "no_progress",
+      stateFingerprintAfter: fingerprint!,
+    });
+    const progressRunId = await seedTerminalRun({
+      companyId,
+      agentId,
+      issueId,
+      finishedSecondsAgo: 10,
+      workOutcome: "productive",
+      stateFingerprintAfter: fingerprint!,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        resultJson: {
+          workspaceMaterialProgress: {
+            version: 1,
+            source: "paperclip_server",
+            workspaceId: randomUUID(),
+            status: "verified",
+            reason: "workspace_material_state_changed",
+            changed: true,
+            beforeDigest: "before-digest",
+            afterDigest: "after-digest",
+          },
+        },
+      })
+      .where(eq(heartbeatRuns.id, progressRunId));
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+  });
+
   it("keeps an open unchanged-fingerprint circuit blocked after cooldown expiry", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
     const fingerprint = await loadIssueTaskStateFingerprint({ db, companyId, issueId });
@@ -2049,12 +2233,12 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     const [skipped] = await db.select({ count: sql<number>`count(*)::int` })
       .from(agentWakeupRequests)
       .where(and(eq(agentWakeupRequests.agentId, agentId),
-        eq(agentWakeupRequests.reason, "issue_rewake_circuit_open")));
+        eq(agentWakeupRequests.reason, "issue_rewake_throttled")));
     expect(skipped?.count).toBe(247);
     const runs = await db.select({ continuityCircuitState: heartbeatRuns.continuityCircuitState })
       .from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
     expect(runs).toHaveLength(2);
-    expect(runs.some((run) => run.continuityCircuitState === "open")).toBe(true);
+    expect(runs.every((run) => run.continuityCircuitState === "closed")).toBe(true);
     const calls = mockAdapterExecute.mock.calls;
     expect(calls.map(([context]) => context.autonomousBudgetEnvelope?.inputTokens))
       .toEqual([64_000, 64_000]);
@@ -2197,7 +2381,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       actorId: agentId,
       agentId,
       runId: progressRunId,
-      action: "issue.comment_added",
+      action: "issue.updated",
       entityType: "issue",
       entityId: issueId,
       createdAt: new Date(Date.now() - 11_000),

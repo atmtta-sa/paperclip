@@ -1234,6 +1234,29 @@ describe("resolveRuntimeSessionParamsForWorkspace", () => {
     expect(result.warning).toBeNull();
   });
 
+  it("moves a resumed provider session from a stale shared cwd into its isolated worktree", () => {
+    const result = resolveRuntimeSessionParamsForWorkspace({
+      agentId: "agent-123",
+      previousSessionParams: {
+        sessionId: "session-1",
+        cwd: "/tmp/shared-project-cwd",
+        workspaceId: "workspace-1",
+      },
+      resolvedWorkspace: buildResolvedWorkspace({
+        cwd: "/tmp/isolated-worktree",
+        workspaceId: "workspace-1",
+      }),
+      enforceResolvedWorkspaceCwd: true,
+    });
+
+    expect(result.sessionParams).toMatchObject({
+      sessionId: "session-1",
+      cwd: "/tmp/isolated-worktree",
+      workspaceId: "workspace-1",
+    });
+    expect(result.warning).toContain("isolated execution workspace");
+  });
+
   it("does not migrate when resolved workspace id differs from previous session workspace id", () => {
     const agentId = "agent-123";
     const fallbackCwd = resolveDefaultAgentWorkspaceDir(agentId);

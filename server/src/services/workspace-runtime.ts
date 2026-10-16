@@ -2658,6 +2658,32 @@ async function resolveGitOwnerRepoRoot(cwd: string): Promise<string> {
   return path.dirname(path.resolve(checkoutRoot, commonDir));
 }
 
+function normalizeGitRemoteIdentity(value: string, repoRoot: string) {
+  const trimmed = value.trim().replace(/\/+$/, "").replace(/\.git$/i, "");
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) || /^[^/]+@[^:]+:/.test(trimmed)) {
+    return trimmed;
+  }
+  return path.resolve(repoRoot, trimmed);
+}
+
+async function resolvePersistedWorktreeRepoRoot(baseRepoRoot: string, worktreePath: string) {
+  const ownerRepoRoot = await resolveGitOwnerRepoRoot(worktreePath);
+  if (ownerRepoRoot === baseRepoRoot) return baseRepoRoot;
+
+  const [baseOrigin, ownerOrigin] = await Promise.all([
+    runGit(["remote", "get-url", "origin"], baseRepoRoot).catch(() => null),
+    runGit(["remote", "get-url", "origin"], ownerRepoRoot).catch(() => null),
+  ]);
+  if (
+    baseOrigin &&
+    ownerOrigin &&
+    normalizeGitRemoteIdentity(baseOrigin, baseRepoRoot) === normalizeGitRemoteIdentity(ownerOrigin, ownerRepoRoot)
+  ) {
+    return ownerRepoRoot;
+  }
+  return baseRepoRoot;
+}
+
 async function findRegisteredGitWorktreeByBranch(repoRoot: string, branchName: string): Promise<string | null> {
   const raw = await runGit(["worktree", "list", "--porcelain"], repoRoot).catch(() => null);
   if (!raw) return null;
@@ -3708,7 +3734,10 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       "Cannot rebuild the git worktree: the base project checkout directory does not exist.",
     );
   }
-  const repoRoot = await runGit(["rev-parse", "--show-toplevel"], baseCwd);
+  const baseRepoRoot = await runGit(["rev-parse", "--show-toplevel"], baseCwd);
+  const repoRoot = await directoryExists(cwd) && await isGitCheckout(cwd)
+    ? await resolvePersistedWorktreeRepoRoot(baseRepoRoot, cwd)
+    : baseRepoRoot;
   const recordedBaseRefSha = readRecordedBaseRefSha(input.workspace.metadata);
   if (await directoryExists(cwd)) {
     const reuseBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;

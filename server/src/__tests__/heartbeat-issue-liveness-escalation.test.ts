@@ -1024,9 +1024,11 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     expect(result.issueIds).toEqual([blockedIssueId]);
     expect(result.existingWakeSkipped).toBe(0);
 
+    const readiness = await issueService(db).getDependencyReadiness(blockedIssueId);
     const cycleKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId: blockedIssueId,
-      blockerIssueIds: [blockerIssueId],
+      blockerIssueIds: readiness.blockerIssueIds,
+      blockerStates: readiness.blockerStates,
       blockedTransitionAt,
     });
     const healedWake = await db

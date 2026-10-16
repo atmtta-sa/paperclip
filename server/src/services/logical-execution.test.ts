@@ -1,10 +1,56 @@
 import { describe, expect, it } from "vitest";
 import {
   LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT,
+  evaluateAutomaticSuccessorAdmission,
   nextLogicalExecutionIdentity,
+  startLogicalExecutionIdentity,
 } from "./logical-execution.js";
 
 describe("logical execution identity", () => {
+  it("denies a requested envelope that exceeds remaining root-chain capacity", () => {
+    expect(evaluateAutomaticSuccessorAdmission({
+      nextProviderAttempt: 3,
+      committedRootChainRequests: 9,
+      requestedRequestCount: 4,
+      maxRootChainProviderRequests: 12,
+    })).toEqual({
+      eligible: false,
+      reason: "logical_execution_root_chain_request_budget_exhausted",
+    });
+  });
+
+  it("reports provider-attempt exhaustion when request capacity remains", () => {
+    expect(evaluateAutomaticSuccessorAdmission({
+      nextProviderAttempt: LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT + 1,
+      committedRootChainRequests: 2,
+      requestedRequestCount: 1,
+      maxRootChainProviderRequests: 12,
+    })).toEqual({
+      eligible: false,
+      reason: "logical_execution_provider_attempt_limit_exhausted",
+    });
+  });
+
+  it("gives root-chain exhaustion deterministic precedence", () => {
+    expect(evaluateAutomaticSuccessorAdmission({
+      nextProviderAttempt: LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT + 1,
+      committedRootChainRequests: 12,
+      requestedRequestCount: 4,
+      maxRootChainProviderRequests: 12,
+    })).toEqual({
+      eligible: false,
+      reason: "logical_execution_root_chain_request_budget_exhausted",
+    });
+  });
+
+  it("starts a fresh bounded generation for a session rollover successor", () => {
+    expect(startLogicalExecutionIdentity("rollover-run", "issue-1")).toEqual({
+      key: "issue:issue-1:generation:rollover-run",
+      rootRunId: "rollover-run",
+      providerAttempt: 1,
+    });
+  });
+
   it("ignores caller-supplied identity on a root run", () => {
     expect(nextLogicalExecutionIdentity({
       id: "root-run",

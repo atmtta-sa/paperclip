@@ -122,6 +122,18 @@ export type IssueContinuityWorkOutcome =
   | "budget_exhausted"
   | "cancelled";
 
+export const ISSUE_ACTIVATION_LOGICAL_RUN_LIMIT = 12;
+
+export function evaluateIssueActivationRunAdmission(input: {
+  attemptedRuns: number;
+  maxRuns?: number;
+}): { allowed: boolean; reason: string | null } {
+  const maxRuns = input.maxRuns ?? ISSUE_ACTIVATION_LOGICAL_RUN_LIMIT;
+  return input.attemptedRuns >= maxRuns
+    ? { allowed: false, reason: "issue_activation_logical_run_budget_exhausted" }
+    : { allowed: true, reason: null };
+}
+
 export function transitionIssueContinuityState(input: {
   terminalStatus: string;
   fingerprintBefore: string;
@@ -131,6 +143,8 @@ export function transitionIssueContinuityState(input: {
   successfulProviderResponses?: number;
   /** An explicit empty Hermes result cannot establish useful work. */
   hasVisibleResponse?: boolean;
+  /** Trusted server-side workspace measurement, never agent-reported output. */
+  verifiedWorkspaceProgress?: boolean;
   authorizedHumanResume?: boolean;
   forcedOutcome?: "telemetry_missing" | "budget_exhausted" | "blocked";
 }): {
@@ -163,7 +177,7 @@ export function transitionIssueContinuityState(input: {
       openedNow: false,
     };
   }
-  if (input.fingerprintBefore !== input.fingerprintAfter &&
+  if ((input.fingerprintBefore !== input.fingerprintAfter || input.verifiedWorkspaceProgress === true) &&
       input.successfulProviderResponses !== 0 && input.hasVisibleResponse !== false) {
     return {
       workOutcome: "productive",
@@ -177,11 +191,11 @@ export function transitionIssueContinuityState(input: {
     ? 0
     : input.previousNoProgressStreak;
   const noProgressStreak = previousNoProgressStreak + 1;
-  const circuitState = noProgressStreak >= 2 ? "open" : "closed";
+  const circuitState = noProgressStreak >= 3 ? "open" : "closed";
   return {
     workOutcome: "no_progress",
     noProgressStreak,
     circuitState,
-    openedNow: circuitState === "open" && previousNoProgressStreak < 2,
+    openedNow: circuitState === "open" && previousNoProgressStreak < 3,
   };
 }

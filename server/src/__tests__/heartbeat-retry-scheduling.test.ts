@@ -64,6 +64,8 @@ import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
 import {
   BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS,
   SESSION_ROLLOVER_RETRY_DELAYS_MS,
+  SESSION_ROLLOVER_RETRY_REASON,
+  SESSION_ROLLOVER_WAKE_REASON,
   computeBoundedTransientHeartbeatRetrySchedule,
   computeSessionRolloverRetrySchedule,
   INTERACTION_CONTINUATION_INFRA_RETRY_REASON,
@@ -353,29 +355,17 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId))).toHaveLength(0);
   });
 
-  it("caps one logical execution at two provider attempts", async () => {
-    const runId = randomUUID(), companyId = randomUUID(), agentId = randomUUID();
-    const issueId = randomUUID();
-    const now = new Date("2026-04-20T12:00:00.000Z");
-    await seedRetryFixture({
-      runId,
-      companyId,
-      agentId,
-      issueId,
-      now,
-      errorCode: "overloaded",
-      errorFamily: "transient_upstream",
-      resultJson: {
-        executionRecovery: { kind: "provider", providerWorkStarted: true },
-        conversationContinuation: "continue_conversation_v1",
-        errorFamily: "transient_upstream",
-      },
-    });
+  it("caps one logical execution at three provider attempts", async () => {
+    const { runId, issueId, now } = await seedMaxTurnFixture();
 
     await settleSyntheticRetryPredecessor(db, runId, { basis: "synthetic_completed_request" });
     const firstRetry = await heartbeat.scheduleBoundedRetry(runId, {
       now,
       random: () => 0,
+      retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+      wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
+      maxAttempts: 3,
+      delayMs: 0,
     });
     expect(firstRetry.outcome).toBe("scheduled");
     if (firstRetry.outcome !== "scheduled")
@@ -392,22 +382,65 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       .update(heartbeatRuns)
       .set({
         status: "failed",
+        finishedAt: now,
         errorCode: "overloaded",
         resultJson: {
           executionRecovery: { kind: "provider", providerWorkStarted: true },
+          conversationContinuation: "continue_conversation_v1",
           errorFamily: "transient_upstream",
         },
       })
       .where(eq(heartbeatRuns.id, firstRetry.run.id));
+    await settleSyntheticRetryPredecessor(db, firstRetry.run.id, {
+      basis: "synthetic_completed_request",
+    });
+
+    const secondRetry = await heartbeat.scheduleBoundedRetry(firstRetry.run.id, {
+      now,
+      random: () => 0,
+      retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+      wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
+      maxAttempts: 3,
+      delayMs: 0,
+    });
+    if (secondRetry.outcome !== "scheduled")
+      throw new Error(`Expected the third provider attempt: ${JSON.stringify(secondRetry)}`);
+    expect(secondRetry.run.contextSnapshot?.logicalExecution).toEqual({
+      key: `issue:${issueId}:generation:${runId}`,
+      rootRunId: runId,
+      providerAttempt: 3,
+    });
+
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "failed",
+        finishedAt: now,
+        errorCode: "overloaded",
+        resultJson: {
+          executionRecovery: { kind: "provider", providerWorkStarted: true },
+          conversationContinuation: "continue_conversation_v1",
+          errorFamily: "transient_upstream",
+        },
+      })
+      .where(eq(heartbeatRuns.id, secondRetry.run.id));
 
     const exhausted = await Promise.all([
-      heartbeat.scheduleBoundedRetry(firstRetry.run.id, {
+      heartbeat.scheduleBoundedRetry(secondRetry.run.id, {
         now,
         random: () => 0,
+        retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+        wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
+        maxAttempts: 3,
+        delayMs: 0,
       }),
-      heartbeat.scheduleBoundedRetry(firstRetry.run.id, {
+      heartbeat.scheduleBoundedRetry(secondRetry.run.id, {
         now,
         random: () => 0,
+        retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+        wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
+        maxAttempts: 3,
+        delayMs: 0,
       }),
     ]);
     expect(exhausted).toEqual([
@@ -424,7 +457,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       await db
         .select()
         .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.retryOfRunId, firstRetry.run.id)),
+        .where(eq(heartbeatRuns.retryOfRunId, secondRetry.run.id)),
     ).toHaveLength(0);
     await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toEqual([
       expect.objectContaining({ status: "blocked" }),
@@ -437,6 +470,99 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     ).resolves.toEqual([
       expect.objectContaining({ status: "active", ownerType: "board" }),
     ]);
+  });
+
+  it("starts a fresh logical generation after an exhausted session rolls over", async () => {
+    const runId = randomUUID();
+    const parentRunId = randomUUID();
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const now = new Date("2026-04-20T12:00:00.000Z");
+    await seedRetryFixture({
+      runId,
+      companyId,
+      agentId,
+      issueId,
+      now,
+      errorCode: SESSION_ROLLOVER_WAKE_REASON,
+      resultJson: {
+        executionRecovery: { kind: "provider", providerWorkStarted: true },
+        conversationContinuation: "continue_conversation_v1",
+        turn_exit_reason: SESSION_ROLLOVER_WAKE_REASON,
+        executionCheckpoint: {
+          version: 1,
+          workspace: {
+            cwd: "/tmp/rollover-workspace",
+            gitHead: "a".repeat(40),
+            branch: "test-rollover",
+            statusSha256: "b".repeat(64),
+          },
+          patch: {
+            kind: "git_diff",
+            sha256: "c".repeat(64),
+            bytes: 128,
+          },
+          tests: {
+            status: "passed",
+            commands: [{ command: "pnpm test", exitCode: 0 }],
+          },
+          blockers: {
+            status: "clear",
+            evidence: ["Focused rollover verification passed."],
+          },
+          nextAction: "Continue from the durable checkpoint in a fresh session.",
+        },
+      },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: parentRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "succeeded",
+      finishedAt: now,
+      contextSnapshot: { issueId },
+      updatedAt: now,
+      createdAt: new Date(now.getTime() - 1_000),
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        retryOfRunId: parentRunId,
+        contextSnapshot: {
+          issueId,
+          wakeReason: "issue_continuation_needed",
+          logicalExecution: {
+            key: `issue:${issueId}:generation:${parentRunId}`,
+            rootRunId: parentRunId,
+            providerAttempt: 3,
+          },
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    await settleSyntheticRetryPredecessor(db, runId, {
+      basis: "synthetic_completed_request",
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+      now,
+      random: () => 0,
+      retryReason: SESSION_ROLLOVER_RETRY_REASON,
+      wakeReason: SESSION_ROLLOVER_WAKE_REASON,
+      maxAttempts: 1,
+      delayMs: 0,
+    });
+
+    if (scheduled.outcome !== "scheduled")
+      throw new Error(`Expected fresh rollover generation: ${JSON.stringify(scheduled)}`);
+    expect(scheduled.outcome).toBe("scheduled");
+    expect(scheduled.run.contextSnapshot?.logicalExecution).toEqual({
+      key: `issue:${issueId}:generation:${scheduled.run.id}`,
+      rootRunId: scheduled.run.id,
+      providerAttempt: 1,
+    });
+    expect(scheduled.run.sessionIdBefore).toBeNull();
   });
 
   it("retains the failure budget after many pre-provider workspace waits", async () => {
@@ -610,6 +736,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       scheduledRetryAttempt: input?.scheduledRetryAttempt ?? 0,
       scheduledRetryReason: input?.scheduledRetryAttempt ? MAX_TURN_CONTINUATION_RETRY_REASON : null,
       resultJson: { executionRecovery: { kind: "provider", providerWorkStarted: true },
+        conversationContinuation: "continue_conversation_v1",
         stopReason: "max_turns_exhausted",
       },
       contextSnapshot: {
@@ -858,8 +985,8 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       delayMs: 1_000,
     });
 
-    expect(scheduled.outcome).toBe("scheduled");
-    if (scheduled.outcome !== "scheduled") return;
+    if (scheduled.outcome !== "scheduled")
+      throw new Error(`Expected max-turn continuation: ${JSON.stringify(scheduled)}`);
     expect(scheduled.attempt).toBe(1);
     expect(scheduled.dueAt.toISOString()).toBe(new Date(now.getTime() + 1_000).toISOString());
 

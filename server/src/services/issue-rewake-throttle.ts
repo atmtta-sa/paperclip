@@ -62,13 +62,13 @@ export const THROTTLED_ISSUE_REWAKE_REASONS: ReadonlySet<string> = new Set([
 /**
  * Activity actions that count as issue-visible progress when attributed to a
  * run. Deliberately narrower than run-liveness "concrete action evidence":
- * tool calls inside the workspace do not move the issue, so they do not reset
- * the streak — a run must leave a comment, mutation, document, work product,
- * interaction, or scheduled continuation behind.
+ * tool calls alone do not reset the streak. Their run counts only when the
+ * heartbeat service supplies a trusted, run-bound material-workspace receipt;
+ * otherwise a run must leave an attributed issue mutation, document, work
+ * product, interaction, or scheduled continuation behind.
  */
 export const ISSUE_PROGRESS_ACTIVITY_ACTIONS: string[] = [
   "issue.updated",
-  "issue.comment_added",
   "issue.created",
   "issue.child_created",
   "issue.assigned",
@@ -98,6 +98,7 @@ export const ISSUE_PROGRESS_ACTIVITY_ACTIONS: string[] = [
  */
 export const ISSUE_NEW_INPUT_ACTIVITY_ACTIONS: string[] = [
   ...ISSUE_PROGRESS_ACTIVITY_ACTIONS,
+  "issue.comment_added",
   "issue.thread_interaction_accepted",
   "issue.thread_interaction_answered",
   "issue.thread_interaction_item_verdicts_submitted",

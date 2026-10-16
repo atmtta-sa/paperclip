@@ -2976,6 +2976,55 @@ describe("realizeExecutionWorkspace", () => {
     });
   }, 15_000);
 
+  it("reuses a persisted worktree owned by another clone of the same origin", async () => {
+    const ownerRepoRoot = await createTempRepo();
+    await runGit(ownerRepoRoot, ["remote", "add", "origin", ownerRepoRoot]);
+    const baseRepoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-base-clone-"));
+    await execFileAsync("git", ["clone", ownerRepoRoot, baseRepoRoot]);
+
+    const branchName = "PAP-455-cross-clone-reuse";
+    const worktreePath = path.join(ownerRepoRoot, ".paperclip", "worktrees", branchName);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(ownerRepoRoot, ["worktree", "add", "-b", branchName, worktreePath, "HEAD"]);
+    await fs.writeFile(path.join(worktreePath, "preserved.txt"), "preserved\n", "utf8");
+
+    const restored = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: baseRepoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: ownerRepoRoot,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-cross-clone",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: ownerRepoRoot,
+        baseRef: "HEAD",
+        branchName,
+      },
+      issue: {
+        id: "issue-cross-clone",
+        identifier: "PAP-455",
+        title: "Reuse persisted cross-clone worktree",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+
+    expect(restored?.cwd).toBe(worktreePath);
+    await expect(fs.readFile(path.join(worktreePath, "preserved.txt"), "utf8")).resolves.toBe("preserved\n");
+  }, 15_000);
+
   it("adopts an existing persisted git worktree when the checked-out branch is forward of the recorded branch", async () => {
     const repoRoot = await createTempRepo();
 

@@ -244,6 +244,7 @@ type AutomaticSuccessorIntentInput = {
   authorizationBinding: Record<string, unknown>;
   policyVersion: number;
   budgetSnapshot?: Record<string, unknown> | null;
+  notBeforeAt?: Date | null;
   reason: string;
   denialReason?: string | null;
 };

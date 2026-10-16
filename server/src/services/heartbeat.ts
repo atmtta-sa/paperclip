@@ -26,8 +26,15 @@ import {
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import {
   LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT,
+  TRANSIENT_PROVIDER_FAILURE_ATTEMPT_LIMIT,
+  evaluateAutomaticSuccessorAdmission,
   nextLogicalExecutionIdentity,
+  startLogicalExecutionIdentity,
 } from "./logical-execution.js";
+import {
+  lockAutonomousBudgetCandidateEnvelope,
+  projectRootChainRequestCapacity,
+} from "./autonomous-budget-reservations.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import {
   AutonomousExecutionPausedError,
@@ -55,9 +62,14 @@ import { buildExecutionContinuation } from "./execution-continuation.js";
 import { parseExecutionCheckpoint } from "./execution-checkpoint.js";
 import { installHeartbeatHermesContext } from "./paperclip-hermes-context.js";
 import {
+  evaluateIssueActivationRunAdmission,
   loadIssueTaskStateFingerprint,
   transitionIssueContinuityState,
 } from "./issue-continuity-state.js";
+import {
+  captureWorkspaceMaterialSnapshot,
+  isVerifiedWorkspaceMaterialProgressReceipt,
+} from "./workspace-material-progress.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { initializeRunIdentity, explicitOperatorRunIdentity } from "./run-identity.js";
 import {
@@ -370,6 +382,7 @@ import {
 import {
   ISSUE_NEW_INPUT_ACTIVITY_ACTIONS,
   ISSUE_PROGRESS_ACTIVITY_ACTIONS,
+  ISSUE_REWAKE_BASE_COOLDOWN_MS,
   ISSUE_REWAKE_LOOKBACK_MS,
   ISSUE_REWAKE_RUN_SAMPLE_LIMIT,
   evaluateIssueRewakeThrottle,
@@ -427,6 +440,7 @@ import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockerStateFingerprint,
 } from "./issue-dependency-wakeups.js";
+import { allowsPreCutoffDependencyTransition } from "./worktree-cutoff-authority.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -3649,6 +3663,8 @@ interface WakeupOptions {
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
+  /** Internal clock already used to prove a durable automatic-successor intent is due. */
+  issueRewakeThrottleNow?: Date;
 }
 
 type UsageTotals = {
@@ -5441,8 +5457,14 @@ export function resolveRuntimeSessionParamsForWorkspace(input: {
   agentId: string;
   previousSessionParams: Record<string, unknown> | null;
   resolvedWorkspace: ResolvedWorkspaceForRun;
+  enforceResolvedWorkspaceCwd?: boolean;
 }) {
-  const { agentId, previousSessionParams, resolvedWorkspace } = input;
+  const {
+    agentId,
+    previousSessionParams,
+    resolvedWorkspace,
+    enforceResolvedWorkspaceCwd = false,
+  } = input;
   const previousSessionId = readNonEmptyString(
     previousSessionParams?.sessionId,
   );
@@ -5466,14 +5488,33 @@ export function resolveRuntimeSessionParamsForWorkspace(input: {
       warning: null as string | null,
     };
   }
-  const fallbackAgentHomeCwd = resolveDefaultAgentWorkspaceDir(agentId);
-  if (path.resolve(previousCwd) !== path.resolve(fallbackAgentHomeCwd)) {
+  if (path.resolve(projectCwd) === path.resolve(previousCwd)) {
     return {
       sessionParams: previousSessionParams,
       warning: null as string | null,
     };
   }
-  if (path.resolve(projectCwd) === path.resolve(previousCwd)) {
+  if (enforceResolvedWorkspaceCwd) {
+    const migratedSessionParams: Record<string, unknown> = {
+      ...(previousSessionParams ?? {}),
+      cwd: projectCwd,
+    };
+    if (resolvedWorkspace.workspaceId)
+      migratedSessionParams.workspaceId = resolvedWorkspace.workspaceId;
+    if (resolvedWorkspace.repoUrl)
+      migratedSessionParams.repoUrl = resolvedWorkspace.repoUrl;
+    if (resolvedWorkspace.repoRef)
+      migratedSessionParams.repoRef = resolvedWorkspace.repoRef;
+
+    return {
+      sessionParams: migratedSessionParams,
+      warning:
+        `Moving resumed session "${previousSessionId}" from workspace "${previousCwd}" ` +
+        `to isolated execution workspace "${projectCwd}".`,
+    };
+  }
+  const fallbackAgentHomeCwd = resolveDefaultAgentWorkspaceDir(agentId);
+  if (path.resolve(previousCwd) !== path.resolve(fallbackAgentHomeCwd)) {
     return {
       sessionParams: previousSessionParams,
       warning: null as string | null,
@@ -9409,6 +9450,48 @@ export function heartbeatService(
     const override = await resolveWorktreeRunExecutionOverride();
     return override.allowed ? override.cutoff : null;
   };
+  const allowsPreCutoffProductiveContinuation = async (params: {
+    cutoff: Date;
+    companyId: string;
+    agentId: string;
+    issueId: string;
+    contextSnapshot: Record<string, unknown>;
+  }) => {
+    if (
+      params.contextSnapshot.productiveContinuation !== true ||
+      !readNonEmptyString(params.contextSnapshot.automaticSuccessorIntentId)
+    ) {
+      return false;
+    }
+    const predecessorRunId = readNonEmptyString(
+      params.contextSnapshot.retryOfRunId,
+    );
+    if (!predecessorRunId) return false;
+    const predecessor = await db
+      .select({
+        nativeIssueId: heartbeatRuns.nativeIssueId,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.id, predecessorRunId),
+          eq(heartbeatRuns.companyId, params.companyId),
+          eq(heartbeatRuns.agentId, params.agentId),
+          eq(heartbeatRuns.status, "succeeded"),
+          gte(heartbeatRuns.createdAt, params.cutoff),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    if (!predecessor) return false;
+    const predecessorContext = parseObject(predecessor.contextSnapshot);
+    return (
+      predecessor.nativeIssueId === params.issueId ||
+      readNonEmptyString(predecessorContext.issueId) === params.issueId ||
+      readNonEmptyString(predecessorContext.taskId) === params.issueId
+    );
+  };
+
 
   const runLogStore = getRunLogStore();
   const traceStore = providerTraceStore(db);
@@ -12667,6 +12750,7 @@ export function heartbeatService(
     forcedOutcome?: "telemetry_missing" | "budget_exhausted" | "blocked",
     successfulProviderResponses?: number,
     hasVisibleResponse?: boolean,
+    verifiedWorkspaceProgress?: boolean,
   ): Promise<Partial<typeof heartbeatRuns.$inferInsert>> {
     if (!isHeartbeatRunTerminalStatus(status)) return {};
     const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
@@ -12712,6 +12796,7 @@ export function heartbeatService(
       previousNoProgressStreak,
       successfulProviderResponses,
       hasVisibleResponse,
+      verifiedWorkspaceProgress,
       authorizedHumanResume:
         parseObject(run.contextSnapshot).authorizedHumanResume === true,
       forcedOutcome,
@@ -12831,8 +12916,15 @@ export function heartbeatService(
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    terminalEvidence?: { verifiedWorkspaceProgress?: boolean },
   ) {
-    return setRunStatusFromLive(runId, status, ["running"], patch);
+    return setRunStatusFromLive(
+      runId,
+      status,
+      ["running"],
+      patch,
+      terminalEvidence,
+    );
   }
 
   // Move a run to a new status only when its current status is one of
@@ -12845,6 +12937,7 @@ export function heartbeatService(
     status: string,
     fromStatuses: string[],
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    terminalEvidence?: { verifiedWorkspaceProgress?: boolean },
   ) {
     // fromStatuses can name a terminal status as its own source (for example,
     // an idempotent "still failed" patch), so the write below is not always a
@@ -12872,6 +12965,7 @@ export function heartbeatService(
             : undefined,
           parseObject(patch?.resultJson).successfulProviderResponses === 0 ? 0 : undefined,
           hermesVisibleResponseEvidence(patch?.resultJson),
+          terminalEvidence?.verifiedWorkspaceProgress,
         )),
       };
     }
@@ -13441,10 +13535,33 @@ export function heartbeatService(
         return { decision, issue, intent: terminal.intent, created: terminal.created, terminal };
       }
 
+      const existingIntent = await tx
+        .select()
+        .from(automaticSuccessorIntents)
+        .where(
+          and(
+            eq(automaticSuccessorIntents.companyId, current.companyId),
+            eq(automaticSuccessorIntents.predecessorRunId, current.id),
+          ),
+        )
+        .for("update")
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (existingIntent) {
+        return {
+          decision,
+          issue,
+          intent: existingIntent,
+          created: false,
+          terminal: null,
+        };
+      }
+
       let status: "pending" | "denied" | "cancelled" = "pending";
       let denialReason: string | null = null;
       let reason = "explicit_productive_disposition";
       let checkpointRef: string | null = null;
+      let notBeforeAt: Date | null = null;
 
       if (decision.kind === "denied") {
         status = "denied";
@@ -13467,7 +13584,40 @@ export function heartbeatService(
         reason = `run_disposition_${decision.dispositionKind}`;
       } else {
         checkpointRef = `run-workspace:${current.id}:${decision.disposition.workspaceId}`;
-        if (
+        const [activationUsage] = await tx
+          .select({ attemptedRuns: sql<number>`count(*)::int` })
+          .from(heartbeatRuns)
+          .where(
+            and(
+              eq(heartbeatRuns.companyId, current.companyId),
+              eq(heartbeatRuns.agentId, current.agentId),
+              sql`(
+                ${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}
+                or ${heartbeatRuns.contextSnapshot} ->> 'taskId' = ${issueId}
+              )`,
+            ),
+          );
+        const activationAdmission = evaluateIssueActivationRunAdmission({
+          attemptedRuns: activationUsage?.attemptedRuns ?? 0,
+        });
+        if (!activationAdmission.allowed) {
+          status = "denied";
+          denialReason = activationAdmission.reason;
+          reason = "issue_activation_budget_exhausted";
+          await tx
+            .update(issues)
+            .set({ autonomousExecutionPaused: true, updatedAt: new Date() })
+            .where(
+              and(eq(issues.id, issueId), eq(issues.companyId, current.companyId)),
+            );
+        } else if (
+          current.workOutcome === "no_progress" &&
+          (current.noProgressStreak ?? 0) >= 3
+        ) {
+          status = "denied";
+          denialReason = "needs_human_no_material_progress";
+          reason = "no_material_progress_exhausted";
+        } else if (
           issue.status !== "in_progress" ||
           issue.assigneeAgentId !== current.agentId ||
           issue.autonomousExecutionPaused ||
@@ -13479,6 +13629,103 @@ export function heartbeatService(
         ) {
           status = "denied";
           denialReason = "productive_authority_or_settlement_denied";
+        } else {
+          const [currentAgent] = await tx
+            .select({ adapterType: agents.adapterType, adapterConfig: agents.adapterConfig })
+            .from(agents)
+            .where(
+              and(eq(agents.id, current.agentId), eq(agents.companyId, current.companyId)),
+            )
+            .limit(1);
+          if (!currentAgent) {
+            throw new Error("automatic_successor_agent_missing");
+          }
+          const runtimeConfig = parseObject(currentAgent.adapterConfig);
+          const reservationProvider =
+            readNonEmptyString(runtimeConfig.provider) ?? currentAgent.adapterType;
+          const reservationModel = readNonEmptyString(runtimeConfig.model) ?? null;
+          const reservationBillingPolicy = resolveReservationBillingPolicy(
+            runtimeConfig,
+            reservationProvider,
+            reservationModel,
+          );
+          const routeBindingMatches =
+            reservation.billingMode ===
+              (reservationBillingPolicy?.billingMode ?? "metered_currency") &&
+            reservation.routePolicyId === (reservationBillingPolicy?.policyId ?? null) &&
+            reservation.routePolicyVersion ===
+              (reservationBillingPolicy?.policyVersion ?? null) &&
+            reservation.routePolicyDigest ===
+              (reservationBillingPolicy?.policyDigest ?? null) &&
+            reservation.credentialPrincipalId ===
+              (reservationBillingPolicy?.credentialPrincipalId ?? null) &&
+            reservation.rootChainRequestLimit ===
+              (reservationBillingPolicy?.maxRootChainProviderRequests ?? null) &&
+            reservation.provider === reservationProvider &&
+            reservation.model === reservationModel;
+          if (!routeBindingMatches) {
+            status = "denied";
+            denialReason = "productive_authority_or_settlement_denied";
+            reason = "current_route_policy_binding_mismatch";
+          } else {
+            const { requested } = await lockAutonomousBudgetCandidateEnvelope(
+              tx as unknown as Db,
+              {
+                companyId: current.companyId,
+                agentId: current.agentId,
+                issueId,
+                billingPolicy: reservationBillingPolicy,
+              },
+            );
+          const chainRows = await tx
+            .select()
+            .from(autonomousBudgetReservations)
+            .where(
+              and(
+                eq(autonomousBudgetReservations.companyId, current.companyId),
+                eq(autonomousBudgetReservations.chainRootRunId, chainRootRunId),
+                inArray(autonomousBudgetReservations.status, [
+                  "reserved",
+                  "reconciled",
+                  "retained_missing_telemetry",
+                ]),
+              ),
+            );
+          const requestedRequestCount = requested.requestCount;
+          const rootCapacity = reservation.rootChainRequestLimit === null
+            ? { committedRootChainRequests: 0 }
+            : projectRootChainRequestCapacity(
+                chainRows,
+                requestedRequestCount,
+                reservation.rootChainRequestLimit,
+              );
+          const logicalAdmission = evaluateAutomaticSuccessorAdmission({
+            nextProviderAttempt: nextLogicalExecutionIdentity(current, issueId).providerAttempt,
+            committedRootChainRequests: rootCapacity.committedRootChainRequests,
+            requestedRequestCount,
+            maxRootChainProviderRequests: reservation.rootChainRequestLimit,
+          });
+          if (!logicalAdmission.eligible) {
+            status = "denied";
+            denialReason = logicalAdmission.reason;
+            reason = "logical_execution_admission_exhausted";
+            await tx
+              .update(issues)
+              .set({ autonomousExecutionPaused: true, updatedAt: new Date() })
+              .where(
+                and(eq(issues.id, issueId), eq(issues.companyId, current.companyId)),
+              );
+          } else if (
+            current.workOutcome === "no_progress" &&
+            current.noProgressStreak === 2 &&
+            current.finishedAt
+          ) {
+            notBeforeAt = new Date(
+              current.finishedAt.getTime() + ISSUE_REWAKE_BASE_COOLDOWN_MS,
+            );
+            reason = "no_material_progress_cooldown";
+          }
+          }
         }
       }
 
@@ -13506,6 +13753,7 @@ export function heartbeatService(
               actualRequestCount: reservation.actualRequestCount,
             }
           : null,
+        notBeforeAt,
       });
       return { decision, issue, ...claimed, terminal: null };
     });
@@ -13524,6 +13772,12 @@ export function heartbeatService(
       prepared.decision.kind !== "continue_same_issue" ||
       prepared.intent.kind !== "productive" ||
       prepared.intent.status !== "pending"
+    ) {
+      return true;
+    }
+    if (
+      prepared.intent.notBeforeAt &&
+      prepared.intent.notBeforeAt.getTime() > Date.now()
     ) {
       return true;
     }
@@ -13559,6 +13813,7 @@ export function heartbeatService(
           parentRunId: run.id,
           automaticSuccessorIntentId: prepared.intent.id,
           productiveContinuation: true,
+          logicalExecution: nextLogicalExecutionIdentity(run, issueId),
           checkpointRef: prepared.intent.checkpointRef,
           nextAction: prepared.decision.disposition.nextAction,
         },
@@ -15688,6 +15943,42 @@ export function heartbeatService(
       };
     }
 
+    const scheduledRunId = randomUUID();
+    const logicalExecution =
+      retryReason === SESSION_ROLLOVER_RETRY_REASON
+        ? startLogicalExecutionIdentity(scheduledRunId, issueId)
+        : nextLogicalExecutionIdentity(run, issueId);
+    const providerAttemptLimit =
+      retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
+        ? TRANSIENT_PROVIDER_FAILURE_ATTEMPT_LIMIT
+        : LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT;
+    if (
+      logicalExecution.providerAttempt >
+      providerAttemptLimit
+    ) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message:
+          "Logical execution exhausted its provider-attempt budget; no further automatic retry will be queued",
+        payload: {
+          logicalExecutionKey: logicalExecution.key,
+          rootRunId: logicalExecution.rootRunId,
+          providerAttempt: logicalExecution.providerAttempt,
+          providerAttemptLimit,
+          retryReason,
+        },
+      });
+      await recovery.escalateLogicalExecutionExhaustion(run.id);
+      return {
+        outcome: "retry_exhausted" as const,
+        attempt: nextAttempt,
+        maxAttempts,
+        reason: "logical_execution_provider_attempt_budget_exhausted" as const,
+      };
+    }
+
     if (!baseSchedule) {
       await appendRunEvent(run, {
         eventType: "lifecycle",
@@ -15720,34 +16011,6 @@ export function heartbeatService(
         outcome: "retry_exhausted" as const,
         attempt: nextAttempt,
         maxAttempts,
-      };
-    }
-
-    const logicalExecution = nextLogicalExecutionIdentity(run, issueId);
-    if (
-      logicalExecution.providerAttempt >
-      LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT
-    ) {
-      await appendRunEvent(run, {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "warn",
-        message:
-          "Logical execution exhausted its provider-attempt budget; no further automatic retry will be queued",
-        payload: {
-          logicalExecutionKey: logicalExecution.key,
-          rootRunId: logicalExecution.rootRunId,
-          providerAttempt: logicalExecution.providerAttempt,
-          providerAttemptLimit: LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT,
-          retryReason,
-        },
-      });
-      await recovery.escalateLogicalExecutionExhaustion(run.id);
-      return {
-        outcome: "retry_exhausted" as const,
-        attempt: nextAttempt,
-        maxAttempts,
-        reason: "logical_execution_provider_attempt_budget_exhausted" as const,
       };
     }
 
@@ -16352,6 +16615,7 @@ export function heartbeatService(
         const scheduledRun = await tx
           .insert(heartbeatRuns)
           .values({
+            id: scheduledRunId,
             companyId: run.companyId,
             agentId: run.agentId,
             invocationSource: "automation",
@@ -16362,7 +16626,10 @@ export function heartbeatService(
             ...(hasConversationContinuationPolicy(run.resultJson)
               ? { resultJson: { conversationContinuation: CONVERSATION_CONTINUATION_POLICY } } : {}),
             responsibleUserId,
-            sessionIdBefore: sessionBefore,
+            sessionIdBefore:
+              retryReason === SESSION_ROLLOVER_RETRY_REASON
+                ? null
+                : sessionBefore,
             retryOfRunId: run.id,
             scheduledRetryAt: schedule.dueAt,
             scheduledRetryAttempt: schedule.attempt,
@@ -16851,6 +17118,178 @@ export function heartbeatService(
       wakeReason: INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
       maxAttempts: INTERACTION_CONTINUATION_INFRA_MAX_ATTEMPTS,
     });
+  }
+
+  async function promoteDueAutomaticSuccessorIntents(now = new Date()) {
+    if ((await getSchedulingSuppression()).suppressed) {
+      return { promoted: 0, held: 0, denied: 0, intentIds: [] as string[] };
+    }
+
+    const dueIntents = await db
+      .select()
+      .from(automaticSuccessorIntents)
+      .where(
+        and(
+          eq(automaticSuccessorIntents.kind, "productive"),
+          eq(automaticSuccessorIntents.status, "pending"),
+          isNotNull(automaticSuccessorIntents.notBeforeAt),
+          lte(automaticSuccessorIntents.notBeforeAt, now),
+        ),
+      )
+      .orderBy(asc(automaticSuccessorIntents.notBeforeAt))
+      .limit(50);
+
+    let promoted = 0;
+    let held = 0;
+    let denied = 0;
+    const intentIds: string[] = [];
+
+    for (const intent of dueIntents) {
+      const [company, agent, issue, predecessor] = await Promise.all([
+        db.select({ status: companies.status }).from(companies)
+          .where(eq(companies.id, intent.companyId)).limit(1)
+          .then((rows) => rows[0] ?? null),
+        getAgent(intent.agentId),
+        db.select({
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+          autonomousExecutionPaused: issues.autonomousExecutionPaused,
+        }).from(issues)
+          .where(and(eq(issues.id, intent.issueId), eq(issues.companyId, intent.companyId)))
+          .limit(1).then((rows) => rows[0] ?? null),
+        getRun(intent.predecessorRunId, { unsafeFullResultJson: true }),
+      ]);
+
+      if (
+        company?.status !== "active" ||
+        agent?.status === "paused" ||
+        agent?.status === "terminated" ||
+        issue?.autonomousExecutionPaused
+      ) {
+        held += 1;
+        continue;
+      }
+
+      let denialReason: string | null = null;
+      if (!agent || agent.companyId !== intent.companyId || !issue || !predecessor) {
+        denialReason = "productive_authority_missing";
+      } else if (
+        issue.status !== "in_progress" ||
+        issue.assigneeAgentId !== intent.agentId
+      ) {
+        denialReason = "productive_authority_revoked";
+      } else if (
+        predecessor.status !== "succeeded" ||
+        predecessor.companyId !== intent.companyId ||
+        predecessor.agentId !== intent.agentId ||
+        readNonEmptyString(parseObject(predecessor.contextSnapshot).issueId) !== intent.issueId ||
+        predecessor.workOutcome !== "no_progress" ||
+        predecessor.noProgressStreak !== 2 ||
+        predecessor.continuityCircuitState !== "closed"
+      ) {
+        denialReason = "cooldown_predecessor_invalid";
+      }
+
+      if (denialReason) {
+        await settleAutomaticSuccessorIntent(db, {
+          intentId: intent.id,
+          outcome: "denied",
+          denialReason,
+        });
+        denied += 1;
+        intentIds.push(intent.id);
+        continue;
+      }
+
+      const idempotencyKey = buildAutomaticSuccessorWakeIdempotencyKey(intent.id);
+      const existingWake = await db
+        .select({
+          id: agentWakeupRequests.id,
+          runId: agentWakeupRequests.runId,
+          reason: agentWakeupRequests.reason,
+          status: agentWakeupRequests.status,
+        })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, intent.companyId),
+            eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      let successor = existingWake?.runId
+        ? await getRun(existingWake.runId)
+        : null;
+
+      if (!existingWake) {
+        successor = await enqueueWakeup(intent.agentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_continuation_needed",
+          payload: {
+            issueId: intent.issueId,
+            intent: "continue_same_issue",
+            nextAction: intent.nextAction,
+          },
+          contextSnapshot: {
+            issueId: intent.issueId,
+            taskId: intent.issueId,
+            retryOfRunId: intent.predecessorRunId,
+            parentRunId: intent.predecessorRunId,
+            automaticSuccessorIntentId: intent.id,
+            productiveContinuation: true,
+            logicalExecution: nextLogicalExecutionIdentity(
+              predecessor,
+              intent.issueId,
+            ),
+            checkpointRef: intent.checkpointRef,
+            nextAction: intent.nextAction,
+          },
+          idempotencyKey,
+          requestedByActorType: "system",
+          requestedByActorId: "automatic_successor_due_promoter",
+          issueRewakeThrottleNow: now,
+        });
+      }
+
+      if (successor) {
+        await settleAutomaticSuccessorIntent(db, {
+          intentId: intent.id,
+          outcome: "materialized",
+          wakeupRequestId: successor.wakeupRequestId,
+          successorRunId: successor.id,
+        });
+        promoted += 1;
+        intentIds.push(intent.id);
+        continue;
+      }
+
+      const deniedWake = existingWake ?? await db
+        .select({ reason: agentWakeupRequests.reason })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, intent.companyId),
+            eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!deniedWake) {
+        held += 1;
+        continue;
+      }
+      await settleAutomaticSuccessorIntent(db, {
+        intentId: intent.id,
+        outcome: "denied",
+        denialReason: deniedWake.reason ?? "materialization_denied",
+      });
+      denied += 1;
+      intentIds.push(intent.id);
+    }
+
+    return { promoted, held, denied, intentIds };
   }
 
   async function promoteDueScheduledRetries(now = new Date()) {
@@ -22703,6 +23142,9 @@ export function heartbeatService(
           ...resolvedWorkspace,
           cwd: executionWorkspace.cwd,
         },
+        enforceResolvedWorkspaceCwd:
+          effectiveExecutionWorkspaceMode === "isolated_workspace" ||
+          effectiveExecutionWorkspaceMode === "operator_branch",
       });
       const runtimeSessionParams = runtimeSessionResolution.sessionParams;
       const runtimeWorkspaceWarnings = [
@@ -24226,6 +24668,23 @@ export function heartbeatService(
           adapterFinalizeOutcome = status;
         };
 
+        const workspaceMaterialBaseline =
+          await captureWorkspaceMaterialSnapshot({
+            cwd: executionWorkspace.cwd,
+            providerType:
+              persistedExecutionWorkspace?.providerType ?? "unknown",
+          });
+        context.workspaceMaterialProgressBaseline = {
+          version: 1,
+          source: "paperclip_server",
+          workspaceId: persistedExecutionWorkspace?.id ?? null,
+          snapshot: workspaceMaterialBaseline,
+        };
+        await db
+          .update(heartbeatRuns)
+          .set({ contextSnapshot: context, updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, run.id));
+
         let adapterResult: AdapterExecutionResult;
         const runGoalControlRequestId = readNonEmptyString(
           context.goalControlRequestId,
@@ -25128,6 +25587,73 @@ export function heartbeatService(
           }
         }
 
+        const workspaceMaterialTerminal =
+          await captureWorkspaceMaterialSnapshot({
+            cwd: executionWorkspace.cwd,
+            providerType:
+              persistedExecutionWorkspace?.providerType ?? "unknown",
+          });
+        let workspaceMaterialDigestReplayed = false;
+        if (issueId && workspaceMaterialTerminal.status === "verified") {
+          workspaceMaterialDigestReplayed = Boolean(
+            await db
+              .select({ id: heartbeatRuns.id })
+              .from(heartbeatRuns)
+              .where(
+                and(
+                  eq(heartbeatRuns.companyId, run.companyId),
+                  eq(heartbeatRuns.agentId, run.agentId),
+                  ne(heartbeatRuns.id, run.id),
+                  sql`(
+                    ${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}
+                    or ${heartbeatRuns.contextSnapshot} ->> 'taskId' = ${issueId}
+                  )`,
+                  sql`${heartbeatRuns.resultJson} -> 'workspaceMaterialProgress' ->> 'afterDigest' = ${workspaceMaterialTerminal.digest}`,
+                ),
+              )
+              .limit(1)
+              .then((rows) => rows[0] ?? null),
+          );
+        }
+        const verifiedWorkspaceProgress =
+          workspaceMaterialBaseline.status === "verified" &&
+          workspaceMaterialTerminal.status === "verified" &&
+          workspaceMaterialBaseline.digest !== workspaceMaterialTerminal.digest &&
+          !workspaceMaterialDigestReplayed;
+        const workspaceMaterialProgress = {
+          version: 1,
+          source: "paperclip_server",
+          workspaceId: persistedExecutionWorkspace?.id ?? null,
+          status:
+            workspaceMaterialBaseline.status !== "verified" ||
+            workspaceMaterialTerminal.status !== "verified"
+              ? "unknown"
+              : workspaceMaterialBaseline.digest === workspaceMaterialTerminal.digest
+                ? "no_change"
+                : workspaceMaterialDigestReplayed
+                  ? "replayed"
+                  : "verified",
+          reason:
+            workspaceMaterialBaseline.status === "unknown"
+              ? workspaceMaterialBaseline.reason
+              : workspaceMaterialTerminal.status === "unknown"
+                ? workspaceMaterialTerminal.reason
+                : workspaceMaterialBaseline.digest === workspaceMaterialTerminal.digest
+                  ? "workspace_material_state_unchanged"
+                  : workspaceMaterialDigestReplayed
+                    ? "workspace_material_state_replayed"
+                    : "workspace_material_state_changed",
+          beforeDigest:
+            workspaceMaterialBaseline.status === "verified"
+              ? workspaceMaterialBaseline.digest
+              : null,
+          afterDigest:
+            workspaceMaterialTerminal.status === "verified"
+              ? workspaceMaterialTerminal.digest
+              : null,
+          changed: verifiedWorkspaceProgress,
+        };
+
         const status =
           outcome === "succeeded"
             ? "succeeded"
@@ -25215,6 +25741,7 @@ export function heartbeatService(
                   ? { executionRecovery: adapterResult.executionRecovery }
                   : {}),
                 configFreshness: configFreshnessResultMetadata,
+                workspaceMaterialProgress,
                 rootChainCommittedRequests:
                   budgetReconciliation.rootChainCommittedRequests,
                 ...(telemetryMissing ? { budgetSettlement: {
@@ -25256,6 +25783,7 @@ export function heartbeatService(
           run.id,
           status,
           finalRunPatch,
+          { verifiedWorkspaceProgress },
         );
         let persistedRun: typeof heartbeatRuns.$inferSelect | null =
           persistedRunWrite.run;
@@ -26874,6 +27402,7 @@ export function heartbeatService(
     );
 
     let projectId = readNonEmptyString(enrichedContextSnapshot.projectId);
+    let worktreeCutoffContinuationAuthorized = false;
     if (!projectId && issueId) {
       // Look up by either UUID or identifier (e.g. "ENV-13"), but always scope
       // by companyId so a row from another tenant can never be returned even
@@ -26898,9 +27427,31 @@ export function heartbeatService(
         .where(and(eq(issues.companyId, agent.companyId), idMatch))
         .then((rows) => rows[0] ?? null);
       if (resolvedIssue) {
+        worktreeCutoffContinuationAuthorized = Boolean(
+          worktreeExecutionCutoff &&
+            resolvedIssue.createdAt < worktreeExecutionCutoff &&
+            ((await allowsPreCutoffProductiveContinuation({
+              cutoff: worktreeExecutionCutoff,
+              companyId: agent.companyId,
+              agentId,
+              issueId: resolvedIssue.id,
+              contextSnapshot: enrichedContextSnapshot,
+            })) ||
+              (await allowsPreCutoffDependencyTransition(db, {
+                cutoff: worktreeExecutionCutoff,
+                companyId: agent.companyId,
+                agentId,
+                issueId: resolvedIssue.id,
+                source,
+                triggerDetail,
+                reason,
+                contextSnapshot: enrichedContextSnapshot,
+              }))),
+        );
         if (
           worktreeExecutionCutoff &&
-          resolvedIssue.createdAt < worktreeExecutionCutoff
+          resolvedIssue.createdAt < worktreeExecutionCutoff &&
+          !worktreeCutoffContinuationAuthorized
         ) {
           await writeSkippedHeartbeatRequest(
             "heartbeat.worktree_execution_cutoff",
@@ -27161,6 +27712,7 @@ export function heartbeatService(
           }
           let automaticParentRunId: string | null = null;
           let automaticParentAgentId = agentId;
+          let productiveSuccessorIntentAlreadyDue = false;
           if (
             source === "automation" &&
             opts.requestedByActorType === "system"
@@ -27171,7 +27723,9 @@ export function heartbeatService(
               opts.requestedByActorId ?? null,
             );
             const genericParent =
-              !opts.requestedByActorId && reason === "issue_continuation_needed"
+              (!opts.requestedByActorId ||
+                opts.requestedByActorId === "automatic_successor_due_promoter") &&
+              reason === "issue_continuation_needed"
                 ? readNonEmptyString(enrichedContextSnapshot.retryOfRunId)
                 : null;
             automaticParentRunId =
@@ -27212,6 +27766,38 @@ export function heartbeatService(
                 !automaticAuthorityAllows ||
                 !await lockEligibleAutomaticSuccessorSettlement(tx as unknown as Db, parent)) {
                 return { kind: "skipped" as const };
+              }
+              const automaticSuccessorIntentId = productiveBinding
+                ? readNonEmptyString(
+                    enrichedContextSnapshot.automaticSuccessorIntentId,
+                  )
+                : null;
+              if (automaticSuccessorIntentId) {
+                const intent = await tx
+                  .select({ notBeforeAt: automaticSuccessorIntents.notBeforeAt })
+                  .from(automaticSuccessorIntents)
+                  .where(
+                    and(
+                      eq(automaticSuccessorIntents.id, automaticSuccessorIntentId),
+                      eq(automaticSuccessorIntents.companyId, agent.companyId),
+                      eq(automaticSuccessorIntents.issueId, issueId),
+                      eq(automaticSuccessorIntents.agentId, agentId),
+                      eq(
+                        automaticSuccessorIntents.predecessorRunId,
+                        parent.id,
+                      ),
+                      eq(automaticSuccessorIntents.kind, "productive"),
+                      eq(automaticSuccessorIntents.status, "pending"),
+                    ),
+                  )
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null);
+                const intentNow = opts.issueRewakeThrottleNow ?? new Date();
+                productiveSuccessorIntentAlreadyDue = Boolean(
+                  intent &&
+                    (!intent.notBeforeAt ||
+                      intent.notBeforeAt.getTime() <= intentNow.getTime()),
+                );
               }
               const managedHermesPredecessorSettlement = await managedHermesSuccessorBinding(
                 tx as unknown as Db, parent,
@@ -27599,7 +28185,8 @@ export function heartbeatService(
 
           if (
             worktreeExecutionCutoff &&
-            issue.createdAt < worktreeExecutionCutoff
+            issue.createdAt < worktreeExecutionCutoff &&
+            !worktreeCutoffContinuationAuthorized
           ) {
             await tx.insert(agentWakeupRequests).values({
               ...durableReceiptFields,
@@ -28235,6 +28822,7 @@ export function heartbeatService(
               opts.blockerStateFingerprint;
 
           if (
+            !productiveSuccessorIntentAlreadyDue &&
             !hasRevisedBlockerEvidence &&
             isThrottleCandidateIssueRewake({
               reason,
@@ -28245,7 +28833,7 @@ export function heartbeatService(
               hasExplicitResume: authorizedHumanResume,
             })
           ) {
-            const throttleNow = new Date();
+            const throttleNow = opts.issueRewakeThrottleNow ?? new Date();
             const recentTerminalRuns = await tx
               .select({
                 id: heartbeatRuns.id,
@@ -28253,6 +28841,7 @@ export function heartbeatService(
                 finishedAt: heartbeatRuns.finishedAt,
                 continuityCircuitState: heartbeatRuns.continuityCircuitState,
                 stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter,
+                resultJson: heartbeatRuns.resultJson,
               })
               .from(heartbeatRuns)
               .where(
@@ -28329,9 +28918,18 @@ export function heartbeatService(
                 now: throttleNow,
                 recentTerminalRuns,
                 runIdsWithIssueProgress: new Set(
-                  progressRows
-                    .map((row) => row.runId)
-                    .filter((runId): runId is string => Boolean(runId)),
+                  [
+                    ...progressRows
+                      .map((row) => row.runId)
+                      .filter((runId): runId is string => Boolean(runId)),
+                    ...recentTerminalRuns
+                      .filter((sampleRun) =>
+                        isVerifiedWorkspaceMaterialProgressReceipt(
+                          parseObject(sampleRun.resultJson).workspaceMaterialProgress,
+                        ),
+                      )
+                      .map((sampleRun) => sampleRun.id),
+                  ],
                 ),
                 // For an agent comment wake, the query excludes agent-authored
                 // activity while preserving genuinely new user/system input.
@@ -30042,6 +30640,7 @@ export function heartbeatService(
     computeTaskDrain,
     applyTaskDrain,
 
+    promoteDueAutomaticSuccessorIntents,
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
 
@@ -30196,6 +30795,45 @@ export function heartbeatService(
         .where(eq(heartbeatRuns.id, runId))
         .limit(1);
       return run ?? null;
+    },
+
+    getLatestNeedsHumanRunForIssue: async (input: {
+      companyId: string;
+      issueId: string;
+      agentId: string;
+    }) => {
+      const candidate = await db
+        .select({
+          id: heartbeatRuns.id,
+          stateFingerprintAfter: heartbeatRuns.stateFingerprintAfter,
+          runDispositionKind: sql<string | null>`${heartbeatRuns.resultJson} -> 'runDisposition' ->> 'kind'`,
+        })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, input.companyId),
+            eq(heartbeatRuns.agentId, input.agentId),
+            eq(heartbeatRuns.status, "succeeded"),
+            sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.issueId}`,
+          ),
+        )
+        .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (
+        candidate?.runDispositionKind !== "needs_human" ||
+        !candidate.stateFingerprintAfter
+      )
+        return null;
+
+      const currentFingerprint = await loadIssueTaskStateFingerprint({
+        db,
+        companyId: input.companyId,
+        issueId: input.issueId,
+      });
+      return currentFingerprint === candidate.stateFingerprintAfter
+        ? { id: candidate.id }
+        : null;
     },
 
     getActiveRunForAgent: async (agentId: string) => {
