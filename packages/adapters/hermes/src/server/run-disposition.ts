@@ -20,6 +20,8 @@ export const PAPERCLIP_RUN_DISPOSITION_INSTRUCTION = [
   `${OPEN}{"version":1,"kind":"complete"}${CLOSE}`,
   "Allowed kinds: complete, continue_same_issue, blocked, needs_human, in_review, cancelled.",
   `Use continue_same_issue only for authorized unfinished work that made durable progress. Include a bounded nextAction and completionCheckpoint: ${OPEN}{"version":1,"kind":"continue_same_issue","nextAction":"one concrete next action","completionCheckpoint":{"version":1,"completedItems":["bounded completed item"],"remainingAcceptanceItems":["bounded remaining item"],"verificationSummary":"bounded verified result"}}${CLOSE}`,
+  "Do not list Paperclip status, comment, or read-back bookkeeping as remaining acceptance work; the control plane owns that finalization transition.",
+  "When implementation and acceptance verification are complete, remainingAcceptanceItems must be empty so the next bounded run is finalization-only.",
   "Do not add identity fields; the runtime binds the proposal to the current run and workspace.",
 ].join("\n");
 

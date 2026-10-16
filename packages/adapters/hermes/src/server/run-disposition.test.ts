@@ -18,6 +18,15 @@ function envelope(value: unknown): string {
 }
 
 describe("Hermes productive disposition transport", () => {
+  it("excludes final control-plane bookkeeping from remaining acceptance work", () => {
+    expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).toContain(
+      "Do not list Paperclip status, comment, or read-back bookkeeping as remaining acceptance work",
+    );
+    expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).toContain(
+      "remainingAcceptanceItems must be empty",
+    );
+  });
+
   it("binds a continuation proposal to authoritative run identity", () => {
     expect(
       extractPaperclipRunDisposition(
