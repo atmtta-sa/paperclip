@@ -66,6 +66,22 @@ const mockAdapterExecute = vi.hoisted(() =>
   })),
 );
 
+const mockCaptureWorkspaceMaterialSnapshot = vi.hoisted(() =>
+  vi.fn(async () => ({
+    status: "verified" as const,
+    digest: "stable-workspace-digest",
+    fileCount: 1,
+    bytes: 1,
+  })),
+);
+
+vi.mock("../services/workspace-material-progress.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/workspace-material-progress.js")>(
+    "../services/workspace-material-progress.js",
+  );
+  return { ...actual, captureWorkspaceMaterialSnapshot: mockCaptureWorkspaceMaterialSnapshot };
+});
+
 vi.mock("../adapters/index.ts", async () => {
   const actual = await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts");
   return {
@@ -125,6 +141,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     mockAdapterExecute.mockReset();
     mockAdapterExecute.mockImplementation(successfulAdapterResult);
+    mockCaptureWorkspaceMaterialSnapshot.mockReset();
+    mockCaptureWorkspaceMaterialSnapshot.mockResolvedValue({
+      status: "verified", digest: "stable-workspace-digest", fileCount: 1, bytes: 1,
+    });
     // Post-run bookkeeping (run-event records, follow-up wake scheduling) can
     // still write for a moment after a run reaches a terminal status, so a
     // single delete sweep can hit a foreign-key violation when a late insert
@@ -609,6 +629,108 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       wake.idempotencyKey === buildAutomaticSuccessorWakeIdempotencyKey(deniedIntents[0]!.id),
     )).toBe(false);
     expect(issue).toMatchObject({ status: "in_progress", autonomousExecutionPaused: true });
+  });
+
+  it("holds unknown workspace progress without changing the streak or materializing a successor", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId, companyId, name: "Unknown progress hold", status: "active",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: workspaceId, companyId, projectId, name: "Primary",
+      cwd: resolve(process.cwd(), ".."), isPrimary: true,
+    });
+    await db.update(issues).set({ projectId }).where(eq(issues.id, issueId));
+    const fingerprint = await loadIssueTaskStateFingerprint({ db, companyId, issueId });
+    await seedTerminalRun({
+      companyId, agentId, issueId, finishedSecondsAgo: 10,
+      workOutcome: "no_progress", stateFingerprintAfter: fingerprint!,
+      noProgressStreak: 2, continuityCircuitState: "closed",
+    });
+    mockCaptureWorkspaceMaterialSnapshot.mockResolvedValue({
+      status: "unknown",
+      reason: "workspace_snapshot_resource_limit",
+      diagnostics: {
+        phase: "untracked_list", maxFiles: 2_000, maxBytes: 20 * 1024 * 1024,
+        filesObserved: 2_001, bytesObserved: 10,
+      },
+    });
+    mockAdapterExecute.mockImplementation(async (ctx: { runId: string }) => {
+      const result = await successfulAdapterResult(ctx);
+      return {
+        ...result,
+        resultJson: {
+          ...result.resultJson,
+          goalRolloverRequired: true,
+        },
+      };
+    });
+
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId)).orderBy(desc(heartbeatRuns.createdAt));
+    const intents = await db.select().from(automaticSuccessorIntents)
+      .where(eq(automaticSuccessorIntents.companyId, companyId));
+    const wakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    const reservations = await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const measuredRun = runs.find((candidate) =>
+      (candidate.resultJson as Record<string, any> | null)?.workspaceMaterialProgress?.reason ===
+        "workspace_snapshot_resource_limit");
+    expect(measuredRun).toMatchObject({
+      status: "succeeded", workOutcome: "progress_unknown", noProgressStreak: 2,
+      continuityCircuitState: "open",
+    });
+    expect(measuredRun?.resultJson).toMatchObject({
+      workspaceMaterialProgress: {
+        status: "unknown", reason: "workspace_snapshot_resource_limit", changed: false,
+      },
+    });
+    expect(intents).toEqual([expect.objectContaining({
+      status: "denied", denialReason: "workspace_progress_measurement_unknown",
+      successorRunId: null,
+    })]);
+    expect(issue).toMatchObject({ status: "in_progress", autonomousExecutionPaused: true });
+    expect(wakes).toEqual([
+      expect.objectContaining({ reason: "issue_assigned" }),
+    ]);
+    expect(reservations).toHaveLength(1);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    const restarted = heartbeatService(createDb(tempDb!.connectionString), { runtimeEnv: {} });
+    expect(await restarted.wakeup(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_continuation_needed",
+      payload: { issueId }, contextSnapshot: { issueId, taskId: issueId },
+      requestedByActorType: "system",
+    })).toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, restarted);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)))
+      .toHaveLength(2);
+    expect(await db.select().from(automaticSuccessorIntents)
+      .where(eq(automaticSuccessorIntents.companyId, companyId))).toHaveLength(1);
+    const restartWakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(restartWakes).toHaveLength(2);
+    expect(restartWakes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: "issue_assigned" }),
+      expect.objectContaining({
+        reason: "issue_rewake_circuit_open", status: "skipped", runId: null,
+        payload: expect.objectContaining({
+          heartbeatSkip: expect.objectContaining({
+            requestedReason: "issue_continuation_needed",
+          }),
+        }),
+      }),
+    ]));
+    expect(await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, companyId))).toHaveLength(1);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
   });
 
   it("does not erase a different-agent predecessor to bypass uncertain accounting", async () => {

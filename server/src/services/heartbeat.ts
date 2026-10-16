@@ -65,6 +65,7 @@ import {
   evaluateIssueActivationRunAdmission,
   loadIssueTaskStateFingerprint,
   transitionIssueContinuityState,
+  type WorkspaceProgressAssessment,
 } from "./issue-continuity-state.js";
 import {
   captureWorkspaceMaterialSnapshot,
@@ -12751,6 +12752,7 @@ export function heartbeatService(
     successfulProviderResponses?: number,
     hasVisibleResponse?: boolean,
     verifiedWorkspaceProgress?: boolean,
+    workspaceProgressAssessment?: WorkspaceProgressAssessment,
   ): Promise<Partial<typeof heartbeatRuns.$inferInsert>> {
     if (!isHeartbeatRunTerminalStatus(status)) return {};
     const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
@@ -12785,7 +12787,8 @@ export function heartbeatService(
       .limit(1)
       .then((rows) => rows[0] ?? null);
     const previousNoProgressStreak =
-      previousRun?.workOutcome === "no_progress" &&
+      (previousRun?.workOutcome === "no_progress" ||
+        previousRun?.workOutcome === "progress_unknown") &&
       previousRun.stateFingerprintAfter === fingerprintBefore
         ? previousRun.noProgressStreak
         : 0;
@@ -12797,6 +12800,7 @@ export function heartbeatService(
       successfulProviderResponses,
       hasVisibleResponse,
       verifiedWorkspaceProgress,
+      workspaceProgressAssessment,
       authorizedHumanResume:
         parseObject(run.contextSnapshot).authorizedHumanResume === true,
       forcedOutcome,
@@ -12916,7 +12920,10 @@ export function heartbeatService(
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
-    terminalEvidence?: { verifiedWorkspaceProgress?: boolean },
+    terminalEvidence?: {
+      verifiedWorkspaceProgress?: boolean;
+      workspaceProgressAssessment?: WorkspaceProgressAssessment;
+    },
   ) {
     return setRunStatusFromLive(
       runId,
@@ -12937,7 +12944,10 @@ export function heartbeatService(
     status: string,
     fromStatuses: string[],
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
-    terminalEvidence?: { verifiedWorkspaceProgress?: boolean },
+    terminalEvidence?: {
+      verifiedWorkspaceProgress?: boolean;
+      workspaceProgressAssessment?: WorkspaceProgressAssessment;
+    },
   ) {
     // fromStatuses can name a terminal status as its own source (for example,
     // an idempotent "still failed" patch), so the write below is not always a
@@ -12966,6 +12976,7 @@ export function heartbeatService(
           parseObject(patch?.resultJson).successfulProviderResponses === 0 ? 0 : undefined,
           hermesVisibleResponseEvidence(patch?.resultJson),
           terminalEvidence?.verifiedWorkspaceProgress,
+          terminalEvidence?.workspaceProgressAssessment,
         )),
       };
     }
@@ -13236,6 +13247,7 @@ export function heartbeatService(
   async function handleRunLivenessContinuation(
     run: typeof heartbeatRuns.$inferSelect,
   ) {
+    if (run.workOutcome === "progress_unknown") return;
     const context = parseObject(run.contextSnapshot);
     if (
       readNonEmptyString(context.goalControlRequestId) ||
@@ -13600,7 +13612,17 @@ export function heartbeatService(
         const activationAdmission = evaluateIssueActivationRunAdmission({
           attemptedRuns: activationUsage?.attemptedRuns ?? 0,
         });
-        if (!activationAdmission.allowed) {
+        if (current.workOutcome === "progress_unknown") {
+          status = "denied";
+          denialReason = "workspace_progress_measurement_unknown";
+          reason = "workspace_progress_evidence_repair_required";
+          await tx
+            .update(issues)
+            .set({ autonomousExecutionPaused: true, updatedAt: new Date() })
+            .where(
+              and(eq(issues.id, issueId), eq(issues.companyId, current.companyId)),
+            );
+        } else if (!activationAdmission.allowed) {
           status = "denied";
           denialReason = activationAdmission.reason;
           reason = "issue_activation_budget_exhausted";
@@ -13837,6 +13859,121 @@ export function heartbeatService(
             denialReason: "materialization_denied",
           },
     );
+    return true;
+  }
+
+  async function holdUnknownWorkspaceProgress(
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<boolean> {
+    if (run.status !== "succeeded" || run.workOutcome !== "progress_unknown") {
+      return false;
+    }
+    const context = parseObject(run.contextSnapshot);
+    const issueId =
+      readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
+    if (!issueId) return false;
+    const workspaceId = readNonEmptyString(
+      parseObject(context.paperclipWorkspace).workspaceId,
+    );
+
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select id from companies where id = ${run.companyId} for update`);
+      const [issue] = await tx
+        .select({
+          id: issues.id,
+          autonomousExecutionPaused: issues.autonomousExecutionPaused,
+        })
+        .from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+        .for("update");
+      const [current] = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.id, run.id),
+            eq(heartbeatRuns.companyId, run.companyId),
+            eq(heartbeatRuns.agentId, run.agentId),
+          ),
+        )
+        .for("update");
+      if (!issue || !current || current.workOutcome !== "progress_unknown") {
+        throw new Error("workspace_progress_unknown_hold_state_changed");
+      }
+
+      const existingIntent = await tx
+        .select()
+        .from(automaticSuccessorIntents)
+        .where(
+          and(
+            eq(automaticSuccessorIntents.companyId, current.companyId),
+            eq(automaticSuccessorIntents.predecessorRunId, current.id),
+          ),
+        )
+        .for("update")
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (existingIntent) {
+        if (
+          existingIntent.status !== "denied" ||
+          existingIntent.denialReason !== "workspace_progress_measurement_unknown" ||
+          !issue.autonomousExecutionPaused
+        ) {
+          throw new Error("workspace_progress_unknown_hold_conflict");
+        }
+        return;
+      }
+
+      const [reservation] = await tx
+        .select()
+        .from(autonomousBudgetReservations)
+        .where(
+          and(
+            eq(autonomousBudgetReservations.runId, current.id),
+            eq(autonomousBudgetReservations.companyId, current.companyId),
+            eq(autonomousBudgetReservations.agentId, current.agentId),
+          ),
+        )
+        .limit(1);
+      await tx
+        .update(issues)
+        .set({ autonomousExecutionPaused: true, updatedAt: new Date() })
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, current.companyId)));
+      const claimed = await claimAutomaticSuccessorIntent(tx as unknown as Db, {
+        companyId: current.companyId,
+        issueId,
+        agentId: current.agentId,
+        predecessorRunId: current.id,
+        chainRootRunId: reservation?.chainRootRunId ?? current.id,
+        kind: "productive",
+        status: "denied",
+        reason: "workspace_progress_evidence_repair_required",
+        denialReason: "workspace_progress_measurement_unknown",
+        checkpointRef: null,
+        nextAction: null,
+        authorizationBinding: {
+          issueId,
+          agentId: current.agentId,
+          workspaceId: workspaceId ?? null,
+          provider: reservation?.provider ?? null,
+          model: reservation?.model ?? null,
+          routePolicyId: reservation?.routePolicyId ?? null,
+          routePolicyVersion: reservation?.routePolicyVersion ?? null,
+          routePolicyDigest: reservation?.routePolicyDigest ?? null,
+        },
+        policyVersion: reservation?.routePolicyVersion ?? 1,
+        budgetSnapshot: reservation
+          ? {
+              chainRootRunId: reservation.chainRootRunId,
+              reservedRequestCount: reservation.reservedRequestCount,
+              actualRequestCount: reservation.actualRequestCount,
+            }
+          : null,
+      });
+      if (!claimed.created) {
+        throw new Error("workspace_progress_unknown_hold_conflict");
+      }
+    });
     return true;
   }
 
@@ -14784,6 +14921,19 @@ export function heartbeatService(
     }
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) {
+      if (run.issueCommentStatus !== "not_applicable") {
+        await patchRunIssueCommentStatus(run.id, {
+          issueCommentStatus: "not_applicable",
+          issueCommentSatisfiedByCommentId: null,
+          issueCommentRetryQueuedAt: null,
+        });
+      }
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
+    // Unknown workspace evidence requires repair or human review. A prose-only
+    // provider retry cannot repair that evidence and must not gain a free run.
+    if (run.workOutcome === "progress_unknown") {
       if (run.issueCommentStatus !== "not_applicable") {
         await patchRunIssueCommentStatus(run.id, {
           issueCommentStatus: "not_applicable",
@@ -25620,6 +25770,13 @@ export function heartbeatService(
           workspaceMaterialTerminal.status === "verified" &&
           workspaceMaterialBaseline.digest !== workspaceMaterialTerminal.digest &&
           !workspaceMaterialDigestReplayed;
+        const workspaceProgressAssessment: WorkspaceProgressAssessment =
+          workspaceMaterialBaseline.status === "unknown" ||
+          workspaceMaterialTerminal.status === "unknown"
+            ? "unknown"
+            : verifiedWorkspaceProgress
+              ? "confirmed_changed"
+              : "confirmed_unchanged";
         const workspaceMaterialProgress = {
           version: 1,
           source: "paperclip_server",
@@ -25652,6 +25809,12 @@ export function heartbeatService(
               ? workspaceMaterialTerminal.digest
               : null,
           changed: verifiedWorkspaceProgress,
+          diagnostics:
+            workspaceMaterialBaseline.status === "unknown"
+              ? workspaceMaterialBaseline.diagnostics ?? null
+              : workspaceMaterialTerminal.status === "unknown"
+                ? workspaceMaterialTerminal.diagnostics ?? null
+                : null,
         };
 
         const status =
@@ -25783,7 +25946,7 @@ export function heartbeatService(
           run.id,
           status,
           finalRunPatch,
-          { verifiedWorkspaceProgress },
+          { verifiedWorkspaceProgress, workspaceProgressAssessment },
         );
         let persistedRun: typeof heartbeatRuns.$inferSelect | null =
           persistedRunWrite.run;
@@ -26101,8 +26264,11 @@ export function heartbeatService(
             resolvedPresentationDecision,
           );
           const conversationSettled = await settleConversationTurn(db, livenessRun);
+          const unknownWorkspaceProgressHeld =
+            await holdUnknownWorkspaceProgress(livenessRun);
           await releaseIssueExecutionAndPromote(livenessRun, {
             suppressImmediateRecovery: conversationSettled ||
+              unknownWorkspaceProgressHeld ||
               adapterResult.retryHint === "operator_action_required" ||
               adapterResult.retryHint === "non_retryable" ||
               adapterResult.retryHint === "policy_blocked" ||
@@ -26112,7 +26278,7 @@ export function heartbeatService(
               parseObject(livenessRun.contextSnapshot)
                 .resumeSessionGoalHeartbeat === true,
           });
-          if (!conversationSettled) {
+          if (!conversationSettled && !unknownWorkspaceProgressHeld) {
           await handleRunLivenessContinuation(livenessRun);
           await handleIssueReviewPathDisposition(livenessRun);
           const structuredDispositionHandled =
@@ -26132,6 +26298,7 @@ export function heartbeatService(
           }
           if (
             outcome === "succeeded" &&
+            livenessRun.workOutcome !== "progress_unknown" &&
             issueId &&
             parseObject(adapterResult.resultJson).goalRolloverRequired === true
           ) {

@@ -43,4 +43,56 @@ describe("workspace material progress", () => {
     });
     expect(snapshot).toEqual({ status: "unknown", reason: "workspace_ownership_unenforceable" });
   });
+
+  it("excludes untracked dependency trees before applying the file limit", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "paperclip-progress-"));
+    await git(cwd, "init");
+    await git(cwd, "config", "user.email", "test@example.invalid");
+    await git(cwd, "config", "user.name", "Paperclip Test");
+    await writeFile(join(cwd, "tracked.ts"), "export const value = 1;\n");
+    await git(cwd, "add", "tracked.ts");
+    await git(cwd, "commit", "-m", "baseline");
+    await mkdir(join(cwd, "node_modules", "dependency"), { recursive: true });
+    await writeFile(join(cwd, "node_modules", "dependency", "index.js"), "generated\n");
+    await mkdir(join(cwd, "src"));
+    await writeFile(join(cwd, "src", "new.ts"), "export const added = true;\n");
+
+    const snapshot = await captureWorkspaceMaterialSnapshot({
+      cwd,
+      providerType: "git_worktree",
+      maxFiles: 1,
+    });
+
+    expect(snapshot.status).toBe("verified");
+  });
+
+  it("reports bounded diagnostics when relevant files exceed the limit", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "paperclip-progress-"));
+    await git(cwd, "init");
+    await git(cwd, "config", "user.email", "test@example.invalid");
+    await git(cwd, "config", "user.name", "Paperclip Test");
+    await writeFile(join(cwd, "tracked.ts"), "export const value = 1;\n");
+    await git(cwd, "add", "tracked.ts");
+    await git(cwd, "commit", "-m", "baseline");
+    await writeFile(join(cwd, "one.ts"), "one\n");
+    await writeFile(join(cwd, "two.ts"), "two\n");
+
+    const snapshot = await captureWorkspaceMaterialSnapshot({
+      cwd,
+      providerType: "git_worktree",
+      maxFiles: 1,
+    });
+
+    expect(snapshot).toEqual({
+      status: "unknown",
+      reason: "workspace_snapshot_resource_limit",
+      diagnostics: {
+        phase: "untracked_list",
+        maxFiles: 1,
+        maxBytes: 20 * 1024 * 1024,
+        filesObserved: 2,
+        bytesObserved: 0,
+      },
+    });
+  });
 });

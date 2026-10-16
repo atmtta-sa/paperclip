@@ -7,10 +7,30 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const DEFAULT_MAX_FILES = 2_000;
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
+const UNTRACKED_GENERATED_PATHS = [
+  "node_modules/**", "**/node_modules/**",
+  ".venv/**", "**/.venv/**",
+  "venv/**", "**/venv/**",
+  "dist/**", "**/dist/**",
+  "build/**", "**/build/**",
+  ".cache/**", "**/.cache/**",
+  "__pycache__/**", "**/__pycache__/**",
+  ".pytest_cache/**", "**/.pytest_cache/**",
+  ".mypy_cache/**", "**/.mypy_cache/**",
+  ".ruff_cache/**", "**/.ruff_cache/**",
+] as const;
+
+export type WorkspaceSnapshotDiagnostics = {
+  phase: "git_diff" | "untracked_list" | "untracked_content";
+  maxFiles: number;
+  maxBytes: number;
+  filesObserved: number;
+  bytesObserved: number;
+};
 
 export type WorkspaceMaterialSnapshot =
   | { status: "verified"; digest: string; fileCount: number; bytes: number }
-  | { status: "unknown"; reason: string };
+  | { status: "unknown"; reason: string; diagnostics?: WorkspaceSnapshotDiagnostics };
 
 export function isVerifiedWorkspaceMaterialProgressReceipt(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -62,7 +82,10 @@ export async function captureWorkspaceMaterialSnapshot(input: {
         encoding: "buffer",
         maxBuffer: maxBytes + 1,
       }),
-      execFileAsync("git", ["ls-files", "--others", "--exclude-standard", "-z"], {
+      execFileAsync("git", [
+        "ls-files", "--others", "--exclude-standard", "-z", "--", ".",
+        ...UNTRACKED_GENERATED_PATHS.map((path) => `:(exclude)${path}`),
+      ], {
         cwd: input.cwd,
         encoding: "buffer",
         maxBuffer: maxBytes + 1,
@@ -70,7 +93,14 @@ export async function captureWorkspaceMaterialSnapshot(input: {
     ]);
     const diffBuffer = Buffer.from(diff);
     if (diffBuffer.byteLength > maxBytes) {
-      return { status: "unknown", reason: "workspace_snapshot_resource_limit" };
+      return {
+        status: "unknown",
+        reason: "workspace_snapshot_resource_limit",
+        diagnostics: {
+          phase: "git_diff", maxFiles, maxBytes,
+          filesObserved: 0, bytesObserved: diffBuffer.byteLength,
+        },
+      };
     }
     const paths = Buffer.from(untrackedOutput)
       .toString("utf8")
@@ -78,7 +108,14 @@ export async function captureWorkspaceMaterialSnapshot(input: {
       .filter(Boolean)
       .sort();
     if (paths.length > maxFiles) {
-      return { status: "unknown", reason: "workspace_snapshot_resource_limit" };
+      return {
+        status: "unknown",
+        reason: "workspace_snapshot_resource_limit",
+        diagnostics: {
+          phase: "untracked_list", maxFiles, maxBytes,
+          filesObserved: paths.length, bytesObserved: diffBuffer.byteLength,
+        },
+      };
     }
     let bytes = diffBuffer.byteLength;
     const entries: string[] = [];
@@ -99,7 +136,14 @@ export async function captureWorkspaceMaterialSnapshot(input: {
       }
       bytes += content.byteLength;
       if (bytes > maxBytes) {
-        return { status: "unknown", reason: "workspace_snapshot_resource_limit" };
+        return {
+          status: "unknown",
+          reason: "workspace_snapshot_resource_limit",
+          diagnostics: {
+            phase: "untracked_content", maxFiles, maxBytes,
+            filesObserved: entries.length + 1, bytesObserved: bytes,
+          },
+        };
       }
       entries.push(JSON.stringify([relativePath, type, stat.mode, content.byteLength, sha256(content)]));
     }

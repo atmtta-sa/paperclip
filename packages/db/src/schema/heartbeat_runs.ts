@@ -94,6 +94,7 @@ export const heartbeatRuns = pgTable(
       | "productive"
       | "blocked"
       | "no_progress"
+      | "progress_unknown"
       | "provider_error"
       | "telemetry_missing"
       | "budget_exhausted"

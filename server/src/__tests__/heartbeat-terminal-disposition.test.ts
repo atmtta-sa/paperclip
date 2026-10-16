@@ -46,6 +46,21 @@ const terminalFault = vi.hoisted(() => ({
   executeCalls: 0,
 }));
 
+vi.mock("../services/workspace-material-progress.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/workspace-material-progress.js")>(
+    "../services/workspace-material-progress.js",
+  );
+  return {
+    ...actual,
+    captureWorkspaceMaterialSnapshot: vi.fn(async () => ({
+      status: "verified" as const,
+      digest: "terminal-disposition-stable-workspace",
+      fileCount: 1,
+      bytes: 1,
+    })),
+  };
+});
+
 vi.mock("../telemetry.js", () => ({
   getTelemetryClient: () => ({ track: vi.fn() }),
 }));

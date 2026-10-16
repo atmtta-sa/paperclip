@@ -164,6 +164,26 @@ describe("issue continuity state", () => {
     });
   });
 
+  it.each([0, 1, 2])(
+    "holds unknown workspace progress without changing streak %s",
+    (previousNoProgressStreak) => {
+      expect(
+        transitionIssueContinuityState({
+          terminalStatus: "succeeded",
+          fingerprintBefore: "same",
+          fingerprintAfter: "changed-but-untrusted-without-workspace-measurement",
+          previousNoProgressStreak,
+          workspaceProgressAssessment: "unknown",
+        }),
+      ).toEqual({
+        workOutcome: "progress_unknown",
+        noProgressStreak: previousNoProgressStreak,
+        circuitState: "open",
+        openedNow: true,
+      });
+    },
+  );
+
   it("does not admit a run after the issue activation run ceiling", () => {
     expect(evaluateIssueActivationRunAdmission({ attemptedRuns: 12, maxRuns: 12 }))
       .toEqual({ allowed: false, reason: "issue_activation_logical_run_budget_exhausted" });

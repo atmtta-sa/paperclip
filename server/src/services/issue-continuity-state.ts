@@ -117,12 +117,18 @@ export type IssueContinuityWorkOutcome =
   | "productive"
   | "blocked"
   | "no_progress"
+  | "progress_unknown"
   | "provider_error"
   | "telemetry_missing"
   | "budget_exhausted"
   | "cancelled";
 
 export const ISSUE_ACTIVATION_LOGICAL_RUN_LIMIT = 12;
+
+export type WorkspaceProgressAssessment =
+  | "confirmed_changed"
+  | "confirmed_unchanged"
+  | "unknown";
 
 export function evaluateIssueActivationRunAdmission(input: {
   attemptedRuns: number;
@@ -145,6 +151,8 @@ export function transitionIssueContinuityState(input: {
   hasVisibleResponse?: boolean;
   /** Trusted server-side workspace measurement, never agent-reported output. */
   verifiedWorkspaceProgress?: boolean;
+  /** Tri-state server-owned workspace evidence. */
+  workspaceProgressAssessment?: WorkspaceProgressAssessment;
   authorizedHumanResume?: boolean;
   forcedOutcome?: "telemetry_missing" | "budget_exhausted" | "blocked";
 }): {
@@ -177,7 +185,18 @@ export function transitionIssueContinuityState(input: {
       openedNow: false,
     };
   }
-  if ((input.fingerprintBefore !== input.fingerprintAfter || input.verifiedWorkspaceProgress === true) &&
+  if (input.workspaceProgressAssessment === "unknown") {
+    return {
+      workOutcome: "progress_unknown",
+      noProgressStreak: input.previousNoProgressStreak,
+      circuitState: "open",
+      openedNow: input.previousNoProgressStreak < 3,
+    };
+  }
+
+  if ((input.fingerprintBefore !== input.fingerprintAfter ||
+      input.workspaceProgressAssessment === "confirmed_changed" ||
+      input.verifiedWorkspaceProgress === true) &&
       input.successfulProviderResponses !== 0 && input.hasVisibleResponse !== false) {
     return {
       workOutcome: "productive",
