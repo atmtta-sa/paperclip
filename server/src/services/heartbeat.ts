@@ -13462,7 +13462,7 @@ export function heartbeatService(
     const workspaceId = readNonEmptyString(
       parseObject(context.paperclipWorkspace).workspaceId,
     );
-    if (!issueId || run.resultJson?.runDisposition == null) return false;
+    if (!issueId) return false;
 
     const prepared = await db.transaction(async (tx) => {
       await tx.execute(sql`select id from companies where id = ${run.companyId} for update`);
@@ -13497,8 +13497,17 @@ export function heartbeatService(
         runId: current.id,
         workspaceId,
       };
+      const persistedCompletionCheckpoint = parseObject(context.completionCheckpoint);
+      const finalizationOnlyContinuation =
+        context.finalizationOnly === true &&
+        context.productiveContinuation === true &&
+        readNonEmptyString(context.automaticSuccessorIntentId) !== null &&
+        Array.isArray(persistedCompletionCheckpoint.completedItems) &&
+        persistedCompletionCheckpoint.completedItems.length > 0 &&
+        Array.isArray(persistedCompletionCheckpoint.remainingAcceptanceItems) &&
+        persistedCompletionCheckpoint.remainingAcceptanceItems.length === 0;
       const decision = parseProductiveRunDisposition(current.resultJson, binding);
-      if (decision.kind === "legacy_missing") return null;
+      if (decision.kind === "legacy_missing" && !finalizationOnlyContinuation) return null;
 
       const [reservation] = await tx
         .select()
@@ -13575,7 +13584,24 @@ export function heartbeatService(
       let checkpointRef: string | null = null;
       let notBeforeAt: Date | null = null;
 
-      if (decision.kind === "denied") {
+      if (
+        finalizationOnlyContinuation &&
+        (decision.kind === "legacy_missing" ||
+          decision.kind === "denied" ||
+          decision.kind === "continue_same_issue")
+      ) {
+        status = "denied";
+        denialReason = "finalization_required";
+        reason = "finalization_only_disposition_rejected";
+        await tx
+          .update(issues)
+          .set({ autonomousExecutionPaused: true, updatedAt: new Date() })
+          .where(
+            and(eq(issues.id, issueId), eq(issues.companyId, current.companyId)),
+          );
+      } else if (decision.kind === "legacy_missing") {
+        return null;
+      } else if (decision.kind === "denied") {
         status = "denied";
         denialReason = decision.reason;
         reason = "invalid_run_disposition";
@@ -13803,6 +13829,11 @@ export function heartbeatService(
     ) {
       return true;
     }
+    const completionCheckpoint = prepared.decision.disposition.completionCheckpoint;
+    const finalizationOnly =
+      completionCheckpoint !== undefined &&
+      completionCheckpoint.completedItems.length > 0 &&
+      completionCheckpoint.remainingAcceptanceItems.length === 0;
 
     const idempotencyKey = buildAutomaticSuccessorWakeIdempotencyKey(
       prepared.intent.id,
@@ -13827,6 +13858,8 @@ export function heartbeatService(
           issueId,
           intent: "continue_same_issue",
           nextAction: prepared.decision.disposition.nextAction,
+          ...(completionCheckpoint ? { completionCheckpoint } : {}),
+          ...(finalizationOnly ? { finalizationOnly: true } : {}),
         },
         contextSnapshot: {
           issueId,
@@ -13838,6 +13871,8 @@ export function heartbeatService(
           logicalExecution: nextLogicalExecutionIdentity(run, issueId),
           checkpointRef: prepared.intent.checkpointRef,
           nextAction: prepared.decision.disposition.nextAction,
+          ...(completionCheckpoint ? { completionCheckpoint } : {}),
+          ...(finalizationOnly ? { finalizationOnly: true } : {}),
         },
         idempotencyKey,
         requestedByActorType: "system",

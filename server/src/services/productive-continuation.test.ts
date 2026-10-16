@@ -59,6 +59,47 @@ describe("productive same-issue continuation contract", () => {
     });
   });
 
+  it("preserves a bounded completion checkpoint", () => {
+    const completionCheckpoint = {
+      version: 1,
+      completedItems: ["Implementation complete", "Focused tests passed"],
+      remainingAcceptanceItems: [],
+      verificationSummary: "Required tests passed.",
+    };
+    expect(
+      parseProductiveRunDisposition(
+        { runDisposition: disposition({ completionCheckpoint }) },
+        binding,
+      ),
+    ).toMatchObject({
+      kind: "continue_same_issue",
+      disposition: { completionCheckpoint },
+    });
+  });
+
+  it.each([
+    ["wrong version", { version: 2, completedItems: [], remainingAcceptanceItems: [] }],
+    ["invalid completed items", { version: 1, completedItems: [""], remainingAcceptanceItems: [] }],
+    ["invalid remaining items", { version: 1, completedItems: [], remainingAcceptanceItems: "none" }],
+    ["oversized serialized content", {
+      version: 1,
+      completedItems: Array.from({ length: 16 }, (_, index) => `${index}-${"x".repeat(300)}`),
+      remainingAcceptanceItems: [],
+    }],
+    ["oversized multibyte content", {
+      version: 1,
+      completedItems: Array.from({ length: 16 }, () => "🙂".repeat(100)),
+      remainingAcceptanceItems: [],
+    }],
+  ])("denies a completion checkpoint with %s", (_label, completionCheckpoint) => {
+    expect(
+      parseProductiveRunDisposition(
+        { runDisposition: disposition({ completionCheckpoint }) },
+        binding,
+      ),
+    ).toEqual({ kind: "denied", reason: "completion_checkpoint_invalid" });
+  });
+
   it("does not treat an advanced liveness label as continuation authority", () => {
     expect(parseProductiveRunDisposition({ livenessState: "advanced" }, binding)).toEqual({
       kind: "legacy_missing",

@@ -2,6 +2,10 @@ const OPEN = "<paperclip-run-disposition>";
 const CLOSE = "</paperclip-run-disposition>";
 const MAX_ENVELOPE_LENGTH = 4_000;
 const MAX_NEXT_ACTION_LENGTH = 2_000;
+const MAX_CHECKPOINT_ITEMS = 16;
+const MAX_CHECKPOINT_ITEM_LENGTH = 500;
+const MAX_VERIFICATION_SUMMARY_LENGTH = 2_000;
+const MAX_CHECKPOINT_JSON_LENGTH = 4_000;
 const TERMINAL_KINDS = new Set([
   "complete",
   "blocked",
@@ -15,7 +19,7 @@ export const PAPERCLIP_RUN_DISPOSITION_INSTRUCTION = [
   "At the very end of your final response, emit exactly one disposition envelope after all human-readable text:",
   `${OPEN}{"version":1,"kind":"complete"}${CLOSE}`,
   "Allowed kinds: complete, continue_same_issue, blocked, needs_human, in_review, cancelled.",
-  `Use continue_same_issue only for authorized unfinished work that made durable progress, and include a bounded nextAction: ${OPEN}{"version":1,"kind":"continue_same_issue","nextAction":"one concrete next action"}${CLOSE}`,
+  `Use continue_same_issue only for authorized unfinished work that made durable progress. Include a bounded nextAction and completionCheckpoint: ${OPEN}{"version":1,"kind":"continue_same_issue","nextAction":"one concrete next action","completionCheckpoint":{"version":1,"completedItems":["bounded completed item"],"remainingAcceptanceItems":["bounded remaining item"],"verificationSummary":"bounded verified result"}}${CLOSE}`,
   "Do not add identity fields; the runtime binds the proposal to the current run and workspace.",
 ].join("\n");
 
@@ -47,6 +51,13 @@ export function paperclipRunDispositionBinding(ctx: {
   };
 }
 
+export type CompletionCheckpoint = {
+  version: 1;
+  completedItems: string[];
+  remainingAcceptanceItems: string[];
+  verificationSummary?: string;
+};
+
 // The model's wire envelope stays version 1. The adapter normalizes every
 // accepted disposition to version 2: the trusted runtime binding (company,
 // issue, agent, run, workspace) is injected here, from execution context, and
@@ -71,6 +82,7 @@ type RunDisposition =
       runId: string;
       workspaceId: string;
       nextAction: string;
+      completionCheckpoint?: CompletionCheckpoint;
       checkpoint: {
         kind: "run_workspace";
         runId: string;
@@ -88,6 +100,33 @@ function boundedText(value: unknown, maxLength: number): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return normalized.length > 0 && normalized.length <= maxLength ? normalized : null;
+}
+
+function boundedTextArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_CHECKPOINT_ITEMS) return null;
+  const items = value.map((item) => boundedText(item, MAX_CHECKPOINT_ITEM_LENGTH));
+  return items.every((item): item is string => item !== null) ? items : null;
+}
+
+export function parseCompletionCheckpoint(value: unknown): CompletionCheckpoint | null {
+  const raw = record(value);
+  if (!raw || raw.version !== 1) return null;
+  const completedItems = boundedTextArray(raw.completedItems);
+  const remainingAcceptanceItems = boundedTextArray(raw.remainingAcceptanceItems);
+  if (!completedItems || !remainingAcceptanceItems) return null;
+  const verificationSummary = raw.verificationSummary === undefined
+    ? undefined
+    : boundedText(raw.verificationSummary, MAX_VERIFICATION_SUMMARY_LENGTH);
+  if (raw.verificationSummary !== undefined && !verificationSummary) return null;
+  const checkpoint: CompletionCheckpoint = {
+    version: 1,
+    completedItems,
+    remainingAcceptanceItems,
+    ...(verificationSummary ? { verificationSummary } : {}),
+  };
+  return Buffer.byteLength(JSON.stringify(checkpoint), "utf8") <= MAX_CHECKPOINT_JSON_LENGTH
+    ? checkpoint
+    : null;
 }
 
 export function extractPaperclipRunDisposition(
@@ -125,9 +164,17 @@ export function extractPaperclipRunDisposition(
   if (raw.kind !== "continue_same_issue") return null;
 
   const nextAction = boundedText(raw.nextAction, MAX_NEXT_ACTION_LENGTH);
+  const parsedCheckpoint = raw.completionCheckpoint === undefined
+    ? undefined
+    : parseCompletionCheckpoint(raw.completionCheckpoint);
   const issueId = boundedText(binding.issueId, 100);
   const workspaceId = boundedText(binding.workspaceId, 100);
-  if (!nextAction || !issueId || !workspaceId) return null;
+  if (
+    !nextAction ||
+    !issueId ||
+    !workspaceId ||
+    raw.completionCheckpoint !== undefined && !parsedCheckpoint
+  ) return null;
 
   return {
     version: 2,
@@ -138,6 +185,7 @@ export function extractPaperclipRunDisposition(
     runId: binding.runId,
     workspaceId,
     nextAction,
+    ...(parsedCheckpoint ? { completionCheckpoint: parsedCheckpoint } : {}),
     checkpoint: {
       kind: "run_workspace",
       runId: binding.runId,

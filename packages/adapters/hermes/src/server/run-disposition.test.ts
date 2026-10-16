@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PAPERCLIP_RUN_DISPOSITION_INSTRUCTION,
   extractPaperclipRunDisposition,
+  parseCompletionCheckpoint,
 } from "./run-disposition.js";
 
 const binding = {
@@ -38,6 +39,68 @@ describe("Hermes productive disposition transport", () => {
         workspaceId: "workspace-1",
       },
     });
+  });
+
+  it("preserves a bounded completion checkpoint on a continuation", () => {
+    expect(
+      extractPaperclipRunDisposition(
+        envelope({
+          version: 1,
+          kind: "continue_same_issue",
+          nextAction: "Finalize the issue from verified evidence.",
+          completionCheckpoint: {
+            version: 1,
+            completedItems: ["Implementation complete", "Focused tests passed"],
+            remainingAcceptanceItems: [],
+            verificationSummary: "5 frontend and 19 architecture tests passed.",
+          },
+        }),
+        binding,
+      ),
+    ).toMatchObject({
+      kind: "continue_same_issue",
+      completionCheckpoint: {
+        version: 1,
+        completedItems: ["Implementation complete", "Focused tests passed"],
+        remainingAcceptanceItems: [],
+        verificationSummary: "5 frontend and 19 architecture tests passed.",
+      },
+    });
+  });
+
+  it.each([
+    ["wrong checkpoint version", { version: 2, completedItems: [], remainingAcceptanceItems: [] }],
+    ["non-array completed items", { version: 1, completedItems: "done", remainingAcceptanceItems: [] }],
+    ["empty completed item", { version: 1, completedItems: [""], remainingAcceptanceItems: [] }],
+    ["too many remaining items", { version: 1, completedItems: [], remainingAcceptanceItems: Array.from({ length: 17 }, (_, index) => `item-${index}`) }],
+  ])("rejects %s", (_name, completionCheckpoint) => {
+    expect(
+      extractPaperclipRunDisposition(
+        envelope({
+          version: 1,
+          kind: "continue_same_issue",
+          nextAction: "Continue.",
+          completionCheckpoint,
+        }),
+        binding,
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects a checkpoint whose serialized form exceeds the renderer boundary", () => {
+    expect(parseCompletionCheckpoint({
+      version: 1,
+      completedItems: Array.from(
+        { length: 16 },
+        (_, index) => `${index}-${"x".repeat(300)}`,
+      ),
+      remainingAcceptanceItems: [],
+    })).toBeNull();
+    expect(parseCompletionCheckpoint({
+      version: 1,
+      completedItems: Array.from({ length: 16 }, () => "🙂".repeat(100)),
+      remainingAcceptanceItems: [],
+    })).toBeNull();
   });
 
   it("binds terminal dispositions to authoritative run identity", () => {
@@ -127,6 +190,7 @@ describe("Hermes productive disposition transport", () => {
     expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).toContain("<paperclip-run-disposition>");
     expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).toContain("continue_same_issue");
     expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).toContain("nextAction");
+    expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).toContain("remainingAcceptanceItems");
     expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).not.toContain("companyId");
     expect(PAPERCLIP_RUN_DISPOSITION_INSTRUCTION).not.toContain("workspaceId");
   });

@@ -18,11 +18,19 @@ type ProductiveRunDisposition = {
   runId: string;
   workspaceId: string;
   nextAction: string;
+  completionCheckpoint?: CompletionCheckpoint;
   checkpoint: {
     kind: "run_workspace";
     runId: string;
     workspaceId: string;
   };
+};
+
+export type CompletionCheckpoint = {
+  version: 1;
+  completedItems: string[];
+  remainingAcceptanceItems: string[];
+  verificationSummary?: string;
 };
 
 export const TERMINAL_RUN_DISPOSITION_KINDS = [
@@ -66,6 +74,7 @@ export type ProductiveRunDispositionDecision =
         | "disposition_invalid"
         | "authorization_binding_mismatch"
         | "checkpoint_invalid"
+        | "completion_checkpoint_invalid"
         | "next_action_invalid";
     };
 
@@ -80,6 +89,33 @@ function boundedText(value: unknown, maxLength: number): string | null {
   const normalized = value.trim();
   return normalized.length > 0 && normalized.length <= maxLength
     ? normalized
+    : null;
+}
+
+function boundedTextArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 16) return null;
+  const items = value.map((item) => boundedText(item, 500));
+  return items.every((item): item is string => item !== null) ? items : null;
+}
+
+function parseCompletionCheckpoint(value: unknown): CompletionCheckpoint | null {
+  const raw = record(value);
+  if (!raw || raw.version !== 1) return null;
+  const completedItems = boundedTextArray(raw.completedItems);
+  const remainingAcceptanceItems = boundedTextArray(raw.remainingAcceptanceItems);
+  if (!completedItems || !remainingAcceptanceItems) return null;
+  const verificationSummary = raw.verificationSummary === undefined
+    ? undefined
+    : boundedText(raw.verificationSummary, 2_000);
+  if (raw.verificationSummary !== undefined && !verificationSummary) return null;
+  const checkpoint: CompletionCheckpoint = {
+    version: 1,
+    completedItems,
+    remainingAcceptanceItems,
+    ...(verificationSummary ? { verificationSummary } : {}),
+  };
+  return Buffer.byteLength(JSON.stringify(checkpoint), "utf8") <= 4_000
+    ? checkpoint
     : null;
 }
 
@@ -161,6 +197,13 @@ export function parseProductiveRunDisposition(
   const nextAction = boundedText(raw.nextAction, 2_000);
   if (!nextAction) return { kind: "denied", reason: "next_action_invalid" };
 
+  const completionCheckpoint = raw.completionCheckpoint === undefined
+    ? undefined
+    : parseCompletionCheckpoint(raw.completionCheckpoint);
+  if (raw.completionCheckpoint !== undefined && !completionCheckpoint) {
+    return { kind: "denied", reason: "completion_checkpoint_invalid" };
+  }
+
   const checkpoint = record(raw.checkpoint);
   if (
     !checkpoint ||
@@ -182,6 +225,7 @@ export function parseProductiveRunDisposition(
       runId: binding.runId,
       workspaceId: binding.workspaceId,
       nextAction,
+      ...(completionCheckpoint ? { completionCheckpoint } : {}),
       checkpoint: {
         kind: "run_workspace",
         runId: binding.runId,

@@ -124,6 +124,7 @@ type Fixture = {
 let adapterBehavior: (ctx: {
   runId: string;
   workspaceId: string | null;
+  context: Record<string, unknown>;
 }) => Promise<AdapterExecutionResult>;
 
 async function waitForRunToFinish(
@@ -176,6 +177,7 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
             typeof paperclipWorkspace?.workspaceId === "string"
               ? paperclipWorkspace.workspaceId
               : null,
+          context: ctx.context,
         });
       },
       testEnvironment: async () => ({
@@ -411,6 +413,183 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
       .where(eq(heartbeatRuns.companyId, fixture.companyId));
     expect(companyRuns).toHaveLength(1);
   }, 30_000);
+
+  it("carries an empty-remaining checkpoint into one finalization-only successor", async () => {
+    await seedFixture({ withWorkspace: true });
+    const observedContexts: Record<string, unknown>[] = [];
+    adapterBehavior = async ({ runId, workspaceId, context }) => {
+      observedContexts.push(context);
+      const runDisposition = observedContexts.length === 1
+        ? {
+            version: 2,
+            kind: "continue_same_issue",
+            companyId: fixture.companyId,
+            issueId: fixture.issueId,
+            agentId: fixture.agentId,
+            runId,
+            workspaceId,
+            nextAction: "Finalize from verified evidence.",
+            completionCheckpoint: {
+              version: 1,
+              completedItems: ["Implementation complete", "Focused tests passed"],
+              remainingAcceptanceItems: [],
+              verificationSummary: "Required tests passed.",
+            },
+            checkpoint: { kind: "run_workspace", runId, workspaceId },
+          }
+        : {
+            version: 2,
+            kind: "complete",
+            companyId: fixture.companyId,
+            issueId: fixture.issueId,
+            agentId: fixture.agentId,
+            runId,
+            workspaceId,
+          };
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        summary: "Bounded finalization",
+        resultJson: { runDisposition },
+        budgetTelemetry: {
+          providerRequestId: `req_${runId}`,
+          requestCount: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+          runtimeMs: 2_000,
+          costMicrousd: 500,
+        },
+      };
+    };
+
+    const { run } = await invokeAndDrain();
+    expect(terminalFault.executeCalls).toBe(2);
+    expect((await readIssue(fixture.issueId))?.status).toBe("done");
+    const [successor] = await successorRuns(run.id);
+    expect(successor?.contextSnapshot).toMatchObject({
+      finalizationOnly: true,
+      completionCheckpoint: {
+        remainingAcceptanceItems: [],
+        verificationSummary: "Required tests passed.",
+      },
+    });
+    expect(observedContexts[1]).toMatchObject({ finalizationOnly: true });
+  }, 30_000);
+
+  it("denies another continuation after finalization-only without a third run", async () => {
+    await seedFixture({ withWorkspace: true });
+    adapterBehavior = async ({ runId, workspaceId }) => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      summary: "Incorrect repeated continuation",
+      resultJson: {
+        runDisposition: {
+          version: 2,
+          kind: "continue_same_issue",
+          companyId: fixture.companyId,
+          issueId: fixture.issueId,
+          agentId: fixture.agentId,
+          runId,
+          workspaceId,
+          nextAction: "Repeat verification.",
+          completionCheckpoint: {
+            version: 1,
+            completedItems: ["Implementation complete", "Focused tests passed"],
+            remainingAcceptanceItems: [],
+            verificationSummary: "Required tests passed.",
+          },
+          checkpoint: { kind: "run_workspace", runId, workspaceId },
+        },
+      },
+      budgetTelemetry: {
+        providerRequestId: `req_${runId}`,
+        requestCount: 1,
+        inputTokens: 100,
+        outputTokens: 50,
+        runtimeMs: 2_000,
+        costMicrousd: 500,
+      },
+    });
+
+    await invokeAndDrain();
+    expect(terminalFault.executeCalls).toBe(2);
+    const intents = await readIntents(fixture.companyId);
+    expect(intents).toHaveLength(2);
+    expect(intents.filter((intent) => intent.denialReason === "finalization_required")).toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, fixture.companyId))).toHaveLength(2);
+    expect(await db.select().from(autonomousBudgetReservations)
+      .where(eq(autonomousBudgetReservations.companyId, fixture.companyId))).toHaveLength(2);
+    expect(await readIssue(fixture.issueId)).toMatchObject({
+      status: "in_progress",
+      autonomousExecutionPaused: true,
+    });
+  }, 30_000);
+
+  it.each(["missing", "malformed"] as const)(
+    "atomically holds a finalization-only run with a %s disposition",
+    async (variant) => {
+      await seedFixture({ withWorkspace: true });
+      adapterBehavior = async ({ runId, workspaceId, context }) => {
+        const resultJson = context.finalizationOnly === true
+          ? variant === "missing"
+            ? {}
+            : { runDisposition: "invalid" }
+          : {
+              runDisposition: {
+                version: 2,
+                kind: "continue_same_issue",
+                companyId: fixture.companyId,
+                issueId: fixture.issueId,
+                agentId: fixture.agentId,
+                runId,
+                workspaceId,
+                nextAction: "Finalize the completed issue.",
+                completionCheckpoint: {
+                  version: 1,
+                  completedItems: ["Implementation complete", "Focused tests passed"],
+                  remainingAcceptanceItems: [],
+                  verificationSummary: "Required tests passed.",
+                },
+                checkpoint: { kind: "run_workspace", runId, workspaceId },
+              },
+            };
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          summary: `Finalization disposition ${variant}`,
+          resultJson,
+          budgetTelemetry: {
+            providerRequestId: `req_${runId}`,
+            requestCount: 1,
+            inputTokens: 100,
+            outputTokens: 50,
+            runtimeMs: 2_000,
+            costMicrousd: 500,
+          },
+        };
+      };
+
+      await invokeAndDrain();
+      expect(terminalFault.executeCalls).toBe(2);
+      expect(await continuationWakes(fixture.companyId)).toHaveLength(1);
+      expect(await db.select().from(heartbeatRuns)
+        .where(eq(heartbeatRuns.companyId, fixture.companyId))).toHaveLength(2);
+      expect(await db.select().from(autonomousBudgetReservations)
+        .where(eq(autonomousBudgetReservations.companyId, fixture.companyId))).toHaveLength(2);
+      const intents = await readIntents(fixture.companyId);
+      expect(intents).toHaveLength(2);
+      expect(intents.filter((intent) => intent.denialReason === "finalization_required")).toHaveLength(1);
+      expect(await readIssue(fixture.issueId)).toMatchObject({
+        status: "in_progress",
+        autonomousExecutionPaused: true,
+      });
+    },
+    30_000,
+  );
 
   it("denies a productive successor at the issue-assignee run ceiling", async () => {
     await seedFixture({ withWorkspace: true });
