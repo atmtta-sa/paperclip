@@ -1,4 +1,4 @@
-export const LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT = 3;
+export const LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT = 4;
 export const TRANSIENT_PROVIDER_FAILURE_ATTEMPT_LIMIT = 2;
 
 export type AutomaticSuccessorAdmissionReason =

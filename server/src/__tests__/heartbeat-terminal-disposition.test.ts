@@ -649,15 +649,16 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
     expect(await successorRuns(run.id)).toHaveLength(0);
   }, 30_000);
 
-  it("denies a fourth provider-backed successor before cooldown promotion", async () => {
+  it("denies a fifth provider-backed successor before materialization", async () => {
     await seedFixture({ withWorkspace: true });
     adapterBehavior = async ({ runId, workspaceId }) => {
-      if (terminalFault.executeCalls === 1) {
-        await db
-          .update(issues)
-          .set({ description: "Verified first-run progress", updatedAt: new Date() })
-          .where(eq(issues.id, fixture.issueId));
-      }
+      await db
+        .update(issues)
+        .set({
+          description: `Verified progress ${terminalFault.executeCalls}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(issues.id, fixture.issueId));
       return {
         exitCode: 0,
         signal: null,
@@ -691,20 +692,21 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
     let runs = await db.select().from(heartbeatRuns)
       .where(eq(heartbeatRuns.companyId, fixture.companyId))
       .orderBy(heartbeatRuns.createdAt);
-    expect(runs).toHaveLength(3);
+    expect(runs).toHaveLength(4);
     expect(runs.map((run) => ({
       status: run.status,
       streak: run.noProgressStreak,
       circuit: run.continuityCircuitState,
     }))).toEqual([
       { status: "succeeded", streak: 0, circuit: "closed" },
-      { status: "succeeded", streak: 1, circuit: "closed" },
-      { status: "succeeded", streak: 2, circuit: "closed" },
+      { status: "succeeded", streak: 0, circuit: "closed" },
+      { status: "succeeded", streak: 0, circuit: "closed" },
+      { status: "succeeded", streak: 0, circuit: "closed" },
     ]);
 
     const intents = await readIntents(fixture.companyId);
-    expect(intents).toHaveLength(3);
-    expect(intents.filter((intent) => intent.status === "materialized")).toHaveLength(2);
+    expect(intents).toHaveLength(4);
+    expect(intents.filter((intent) => intent.status === "materialized")).toHaveLength(3);
     expect(intents.filter((intent) => intent.status === "denied")).toEqual([
       expect.objectContaining({
         issueId: fixture.issueId,
@@ -712,7 +714,7 @@ describeEmbeddedPostgres("heartbeat terminal run disposition integration", () =>
         denialReason: "logical_execution_provider_attempt_limit_exhausted",
       }),
     ]);
-    expect(terminalFault.executeCalls).toBe(3);
+    expect(terminalFault.executeCalls).toBe(4);
     const [heldIssue] = await db.select().from(issues)
       .where(eq(issues.id, fixture.issueId));
     expect(heldIssue).toMatchObject({

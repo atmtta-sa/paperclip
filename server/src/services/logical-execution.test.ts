@@ -7,6 +7,25 @@ import {
 } from "./logical-execution.js";
 
 describe("logical execution identity", () => {
+  it("admits four bounded provider attempts and denies the fifth", () => {
+    expect(LOGICAL_EXECUTION_PROVIDER_ATTEMPT_LIMIT).toBe(4);
+    expect(evaluateAutomaticSuccessorAdmission({
+      nextProviderAttempt: 4,
+      committedRootChainRequests: 12,
+      requestedRequestCount: 4,
+      maxRootChainProviderRequests: 16,
+    })).toEqual({ eligible: true });
+    expect(evaluateAutomaticSuccessorAdmission({
+      nextProviderAttempt: 5,
+      committedRootChainRequests: 12,
+      requestedRequestCount: 4,
+      maxRootChainProviderRequests: 16,
+    })).toEqual({
+      eligible: false,
+      reason: "logical_execution_provider_attempt_limit_exhausted",
+    });
+  });
+
   it("denies a requested envelope that exceeds remaining root-chain capacity", () => {
     expect(evaluateAutomaticSuccessorAdmission({
       nextProviderAttempt: 3,
