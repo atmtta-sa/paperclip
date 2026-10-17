@@ -754,7 +754,11 @@ export async function execute(
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const configuredMaxTurns = cfgNumber(config.maxTurnsPerRun);
   const maxTurns = ctx.autonomousBudgetEnvelope
-    ? Math.min(configuredMaxTurns && configuredMaxTurns > 0 ? configuredMaxTurns : 8, 8)
+    ? Math.min(
+        configuredMaxTurns && configuredMaxTurns > 0 ? configuredMaxTurns : 8,
+        8,
+        ctx.autonomousBudgetEnvelope.requestCount,
+      )
     : configuredMaxTurns;
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);

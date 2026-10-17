@@ -510,6 +510,36 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect((call[3] as { timeoutSec: number }).timeoutSec).toBe(300);
   });
 
+  it.each([
+    ["admitted request count", 50, 4, 4],
+    ["admitted request count with omitted configuration", null, 4, 4],
+    ["lower configured turn limit", 3, 4, 3],
+    ["non-autonomous configured limit", 50, null, 50],
+  ])(
+    "uses the %s for Hermes max turns",
+    async (_case, maxTurnsPerRun, requestCount, expectedMaxTurns) => {
+      const { ctx } =
+        maxTurnsPerRun === null ? makeCtx() : makeCtx({ maxTurnsPerRun });
+      if (requestCount !== null) {
+        (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {
+          requestCount,
+          inputTokens: 64_000,
+          outputTokens: 8_000,
+          runtimeMs: 120_000,
+          costMicrousd: 250_000,
+        };
+      }
+
+      await execute(ctx as any);
+
+      const args = vi.mocked(serverUtils.runChildProcess).mock.lastCall![2] as string[];
+      expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--max-turns") + 2)).toEqual([
+        "--max-turns",
+        String(expectedMaxTurns),
+      ]);
+    },
+  );
+
   it("applies autonomous caps when config omits them, and rejects bypass args", async () => {
     const { ctx } = makeCtx();
     (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {
