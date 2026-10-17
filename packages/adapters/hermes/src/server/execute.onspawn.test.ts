@@ -497,7 +497,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(vi.mocked(serverUtils.runChildProcess)).not.toHaveBeenCalled();
   });
 
-  it("caps autonomous runs at eight turns and 300 seconds despite looser config", async () => {
+  it("caps autonomous turns and timeout to the admitted budget envelope", async () => {
     const { ctx } = makeCtx({ timeoutSec: 1800, maxTurnsPerRun: 50 });
     (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {
       requestCount: 12, inputTokens: 64_000, outputTokens: 8_000,
@@ -507,7 +507,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
     const args = call[2] as string[];
     expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "8"]);
-    expect((call[3] as { timeoutSec: number }).timeoutSec).toBe(300);
+    expect((call[3] as { timeoutSec: number }).timeoutSec).toBe(900);
   });
 
   it.each([

@@ -749,7 +749,7 @@ export async function execute(
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const configuredTimeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const timeoutSec = ctx.autonomousBudgetEnvelope
-    ? Math.min(configuredTimeoutSec, 300, ctx.autonomousBudgetEnvelope.runtimeMs / 1_000)
+    ? Math.min(configuredTimeoutSec, ctx.autonomousBudgetEnvelope.runtimeMs / 1_000)
     : configuredTimeoutSec;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const configuredMaxTurns = cfgNumber(config.maxTurnsPerRun);
