@@ -90,6 +90,7 @@ describe("paperclip-run-gates", () => {
     const result = await readResult(paths.resultPath);
 
     expect(run.exitCode).toBe(0);
+    expect(JSON.parse(run.stdout)).toEqual(result);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
     expect(result).toMatchObject({ status: "succeeded", complete: true });
     expect(result.gates).toHaveLength(1);
@@ -109,6 +110,7 @@ describe("paperclip-run-gates", () => {
     const result = await readResult(paths.resultPath);
 
     expect(run.exitCode).toBe(1);
+    expect(JSON.parse(run.stdout)).toEqual(result);
     expect(result).toMatchObject({ status: "failed", complete: true });
     expect(result.gates.map(({ name, status, exitCode }) => ({ name, status, exitCode }))).toEqual([
       { name: "ruff-format", status: "failed", exitCode: 7 },
@@ -156,6 +158,7 @@ describe("paperclip-run-gates", () => {
     const result = await readResult(paths.resultPath);
 
     expect(run.exitCode).toBe(124);
+    expect(JSON.parse(run.stdout)).toEqual(result);
     expect(result).toMatchObject({ status: "incomplete", complete: false });
     expect(result.gates[0]).toMatchObject({ status: "timed_out" });
     expect(result.cleanup).toMatchObject({ status: "succeeded" });
@@ -198,6 +201,7 @@ describe("paperclip-run-gates", () => {
     const result = await readResult(paths.resultPath);
 
     expect(run.exitCode).toBe(143);
+    expect(JSON.parse(run.stdout)).toEqual(result);
     expect(result).toMatchObject({ status: "incomplete", complete: false });
     expect(result.cleanup).toMatchObject({ status: "succeeded" });
     expect(await readFile(path.join(paths.root, "cleanup.marker"), "utf8")).toBe("cleaned");

@@ -293,6 +293,7 @@ def run(config: dict[str, Any], result_path: Path, log_dir: Path) -> int:
         cleanup=cleanup,
     )
     _atomic_write_json(result_path, result)
+    print(json.dumps(result, sort_keys=True), flush=True)
     return exit_code
 
 
