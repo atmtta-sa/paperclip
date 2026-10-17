@@ -28,6 +28,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   reportRunActivity: vi.fn(async () => undefined),
   getRun: vi.fn(async () => null),
   getActiveRunForAgent: vi.fn(async () => null),
+  getLatestNeedsHumanRunForIssue: vi.fn(async () => null),
   cancelRun: vi.fn(async () => null),
 }));
 
@@ -333,6 +334,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockHeartbeatService.reportRunActivity.mockReset();
     mockHeartbeatService.getRun.mockReset();
     mockHeartbeatService.getActiveRunForAgent.mockReset();
+    mockHeartbeatService.getLatestNeedsHumanRunForIssue.mockReset();
     mockHeartbeatService.cancelRun.mockReset();
     mockAgentService.getById.mockReset();
     mockAgentService.list.mockReset();
@@ -380,6 +382,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
     mockHeartbeatService.getRun.mockResolvedValue(null);
     mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
+    mockHeartbeatService.getLatestNeedsHumanRunForIssue.mockResolvedValue(null);
     mockHeartbeatService.cancelRun.mockResolvedValue(null);
     mockExternalObjectService.syncCommentSafely.mockResolvedValue(undefined);
     mockExternalObjectService.syncIssueSafely.mockResolvedValue(undefined);
@@ -2268,6 +2271,40 @@ describe.sequential("issue comment reopen routes", () => {
           reopenedFrom: "done",
           resumeIntent: true,
           followUpRequested: true,
+        }),
+      }),
+    );
+  });
+
+  it("binds a user PATCH resume to the latest needs-human predecessor", async () => {
+    const issue = makeIssue("in_progress");
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(
+      async (_id: string, patch: Record<string, unknown>) =>
+        makeIssueUpdateReceipt(issue, patch),
+    );
+    mockHeartbeatService.getLatestNeedsHumanRunForIssue.mockResolvedValue({
+      id: "33333333-3333-4333-8333-333333333333",
+    });
+
+    const res = await request(await installActor(createApp()))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ comment: "continue the bounded verification", resume: true });
+
+    expect(res.status).toBe(200);
+    expect(
+      mockHeartbeatService.getLatestNeedsHumanRunForIssue,
+    ).toHaveBeenCalledWith({
+      companyId: "company-1",
+      issueId: "11111111-1111-4111-8111-111111111111",
+      agentId: "22222222-2222-4222-8222-222222222222",
+    });
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          resumeIntent: true,
+          resumeFromRunId: "33333333-3333-4333-8333-333333333333",
         }),
       }),
     );

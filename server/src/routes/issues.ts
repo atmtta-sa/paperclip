@@ -14500,6 +14500,16 @@ export function issueRoutes(
             !goalCommentSteered &&
             shouldWakeAssigneeForComment
           ) {
+            const resumeFromRunId =
+              resumeRequested === true && actor.actorType === "user"
+                ? (
+                    await heartbeat.getLatestNeedsHumanRunForIssue({
+                      companyId: issue.companyId,
+                      issueId: issue.id,
+                      agentId: assigneeId,
+                    })
+                  )?.id ?? null
+                : null;
             addWakeup(assigneeId, {
               source: "automation",
               triggerDetail: "system",
@@ -14514,6 +14524,7 @@ export function issueRoutes(
                 ...(resumeRequested === true
                   ? { resumeIntent: true, followUpRequested: true }
                   : {}),
+                ...(resumeFromRunId ? { resumeFromRunId } : {}),
                 ...(interruptedRunId ? { interruptedRunId } : {}),
                 ...(lostReviewPathRef
                   ? {
