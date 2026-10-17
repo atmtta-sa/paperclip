@@ -78,7 +78,7 @@ def _load_config(path: Path) -> dict[str, Any]:
     if not isinstance(gates_raw, list) or not gates_raw:
         raise ValueError("config.gates must be a non-empty array")
     cleanup = _validate_command(raw.get("cleanup"), "config.cleanup")
-    deadline = raw.get("deadlineSeconds", 840)
+    deadline = raw.get("deadlineSeconds", 720)
     max_log_bytes = raw.get("maxLogBytes", 1_048_576)
     if not isinstance(deadline, (int, float)) or deadline <= 0:
         raise ValueError("config.deadlineSeconds must be positive")

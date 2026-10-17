@@ -15,7 +15,7 @@ The config is JSON:
 
 ```json
 {
-  "deadlineSeconds": 840,
+  "deadlineSeconds": 720,
   "maxLogBytes": 1048576,
   "gates": [
     {

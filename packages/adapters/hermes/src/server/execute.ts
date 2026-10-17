@@ -96,6 +96,20 @@ function cfgStringArray(v: unknown): string[] | undefined {
     : undefined;
 }
 
+const HERMES_DEFAULT_TERMINAL_MAX_SEC = 600;
+const HERMES_BATCH_HEADROOM_SEC = 60;
+const PAPERCLIP_OUTER_HEADROOM_SEC = 60;
+
+function applyAutonomousTimeoutHierarchy(env: Record<string, string>, timeoutSec: number) {
+  const terminalMaxSec = Math.floor(
+    timeoutSec - HERMES_BATCH_HEADROOM_SEC - PAPERCLIP_OUTER_HEADROOM_SEC,
+  );
+  if (terminalMaxSec <= HERMES_DEFAULT_TERMINAL_MAX_SEC) return;
+
+  env.TERMINAL_MAX_FOREGROUND_TIMEOUT = String(terminalMaxSec);
+  env.HERMES_CONCURRENT_TOOL_TIMEOUT_S = String(terminalMaxSec + HERMES_BATCH_HEADROOM_SEC);
+}
+
 function resolveToolResultBudget(config: Record<string, unknown>) {
   const perResultBytes = cfgNumber(config.toolResultPerCallBytes) ?? DEFAULT_TOOL_RESULT_PER_CALL_BYTES;
   const perTurnBytes = cfgNumber(config.toolResultPerTurnBytes) ?? DEFAULT_TOOL_RESULT_PER_TURN_BYTES;
@@ -953,6 +967,7 @@ export async function execute(
   env.HERMES_TOOL_RESULT_BUDGET_JSON = JSON.stringify(resolveToolResultBudget(config));
   if (ctx.autonomousBudgetEnvelope) {
     env.HERMES_AUTONOMOUS_BUDGET_JSON = JSON.stringify(ctx.autonomousBudgetEnvelope);
+    applyAutonomousTimeoutHierarchy(env, timeoutSec);
   }
   if (billingRoutePolicy) {
     env.HERMES_BILLING_ROUTE_POLICY_JSON = JSON.stringify(billingRoutePolicy);

@@ -498,7 +498,14 @@ describe("hermes-local adapter onSpawn forwarding", () => {
   });
 
   it("caps autonomous turns and timeout to the admitted budget envelope", async () => {
-    const { ctx } = makeCtx({ timeoutSec: 1800, maxTurnsPerRun: 50 });
+    const { ctx } = makeCtx({
+      timeoutSec: 1800,
+      maxTurnsPerRun: 50,
+      env: {
+        TERMINAL_MAX_FOREGROUND_TIMEOUT: "600",
+        HERMES_CONCURRENT_TOOL_TIMEOUT_S: "420",
+      },
+    });
     (ctx as Record<string, unknown>).autonomousBudgetEnvelope = {
       requestCount: 12, inputTokens: 64_000, outputTokens: 8_000,
       runtimeMs: 900_000, costMicrousd: 250_000,
@@ -508,6 +515,9 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     const args = call[2] as string[];
     expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "8"]);
     expect((call[3] as { timeoutSec: number }).timeoutSec).toBe(900);
+    const env = (call[3] as { env: Record<string, string> }).env;
+    expect(env.TERMINAL_MAX_FOREGROUND_TIMEOUT).toBe("780");
+    expect(env.HERMES_CONCURRENT_TOOL_TIMEOUT_S).toBe("840");
   });
 
   it.each([
