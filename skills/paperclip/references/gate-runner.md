@@ -39,6 +39,7 @@ The config is JSON:
 Rules:
 
 - Pass commands as argument arrays. Use `bash -o pipefail -c <command>` only when a real pipeline is required.
+- Size each `timeoutSeconds` from measured or known gate runtime plus explicit margin; never choose a timeout below the latest observed successful duration. The Whattsi PostgreSQL suite observed at about 410 seconds requires at least 600 seconds.
 - Set `deadlineSeconds` below the admitted agent runtime so cleanup and final disposition have time to finish.
 - The runner executes gates in order and preserves every failure even when later gates pass.
 - A timeout or cancellation produces `status: "incomplete"` and attempts cleanup.
