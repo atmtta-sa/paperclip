@@ -413,7 +413,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       }),
     ).resolves.toBeNull();
 
-    await seedTerminalRun({
+    const continuedRunId = await seedTerminalRun({
       companyId,
       agentId,
       issueId,
@@ -424,6 +424,54 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     await expect(
       heartbeat.getLatestNeedsHumanRunForIssue({ companyId, issueId, agentId }),
     ).resolves.toBeNull();
+
+    await db.insert(automaticSuccessorIntents).values({
+      companyId,
+      issueId,
+      agentId,
+      predecessorRunId: runId,
+      chainRootRunId: runId,
+      kind: "productive",
+      status: "denied",
+      reason: "no_material_progress_exhausted",
+      denialReason: "needs_human_no_material_progress",
+      authorizationBinding: {},
+      policyVersion: 1,
+    });
+    await expect(
+      heartbeat.getLatestNeedsHumanRunForIssue({ companyId, issueId, agentId }),
+    ).resolves.toBeNull();
+
+    const [{ id: continuedIntentId }] = await db
+      .insert(automaticSuccessorIntents)
+      .values({
+        companyId,
+        issueId,
+        agentId,
+        predecessorRunId: continuedRunId,
+        chainRootRunId: continuedRunId,
+        kind: "productive",
+        status: "denied",
+        reason: "root_chain_budget_exhausted",
+        denialReason: "root_chain_budget_exhausted",
+        authorizationBinding: {},
+        policyVersion: 1,
+      })
+      .returning({ id: automaticSuccessorIntents.id });
+    await expect(
+      heartbeat.getLatestNeedsHumanRunForIssue({ companyId, issueId, agentId }),
+    ).resolves.toBeNull();
+
+    await db
+      .update(automaticSuccessorIntents)
+      .set({
+        reason: "no_material_progress_exhausted",
+        denialReason: "needs_human_no_material_progress",
+      })
+      .where(eq(automaticSuccessorIntents.id, continuedIntentId));
+    await expect(
+      heartbeat.getLatestNeedsHumanRunForIssue({ companyId, issueId, agentId }),
+    ).resolves.toEqual({ id: continuedRunId });
 
     await db.update(issues).set({ title: "Changed after human boundary" }).where(eq(issues.id, issueId));
     await expect(

@@ -31022,11 +31022,30 @@ export function heartbeatService(
         .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt))
         .limit(1)
         .then((rows) => rows[0] ?? null);
-      if (
-        candidate?.runDispositionKind !== "needs_human" ||
-        !candidate.stateFingerprintAfter
-      )
-        return null;
+      if (!candidate?.stateFingerprintAfter) return null;
+
+      const hasDeniedNoProgressIntent =
+        candidate.runDispositionKind === "needs_human"
+          ? true
+          : await db
+              .select({ id: automaticSuccessorIntents.id })
+              .from(automaticSuccessorIntents)
+              .where(
+                and(
+                  eq(automaticSuccessorIntents.companyId, input.companyId),
+                  eq(automaticSuccessorIntents.issueId, input.issueId),
+                  eq(automaticSuccessorIntents.agentId, input.agentId),
+                  eq(automaticSuccessorIntents.predecessorRunId, candidate.id),
+                  eq(automaticSuccessorIntents.status, "denied"),
+                  eq(
+                    automaticSuccessorIntents.denialReason,
+                    "needs_human_no_material_progress",
+                  ),
+                ),
+              )
+              .limit(1)
+              .then((rows) => rows.length > 0);
+      if (!hasDeniedNoProgressIntent) return null;
 
       const currentFingerprint = await loadIssueTaskStateFingerprint({
         db,
