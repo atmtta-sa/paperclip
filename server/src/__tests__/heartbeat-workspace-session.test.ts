@@ -28,6 +28,7 @@ import {
   resolveNativeRecoveryExecutionWorkspaceBinding,
   resolveExecutionWorkspaceBranchOwnership,
   resolveExecutionWorkspaceConfigFreshness,
+  resolveFreshExecutionWorkspaceReplacementId,
   resolveExecutionWorkspaceReuseRequestForIssue,
   resolveExecutionWorkspaceReuseProvisioningPolicy,
   resolveNextSessionState,
@@ -1781,6 +1782,43 @@ describe("effective run execution workspace config freshness", () => {
       bindingId: "workspace-persisted",
       persistedWorkspaceFound: true,
     })).toBe("workspace-persisted");
+  });
+
+  it("replaces only the inherited workspace authorized for a fresh activation", () => {
+    expect(resolveFreshExecutionWorkspaceReplacementId({
+      issueExecutionWorkspaceId: "workspace-old",
+      freshExecutionWorkspaceReplacesId: "workspace-old",
+    })).toBe("workspace-old");
+    expect(resolveFreshExecutionWorkspaceReplacementId({
+      issueExecutionWorkspaceId: "workspace-new",
+      freshExecutionWorkspaceReplacesId: "workspace-old",
+    })).toBeUndefined();
+    expect(resolveFreshExecutionWorkspaceReplacementId({
+      issueExecutionWorkspaceId: null,
+      freshExecutionWorkspaceReplacesId: null,
+    })).toBeNull();
+
+    expect(resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: "workspace-old",
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceStatus: "active",
+      freshExecutionWorkspaceReplacesId: "workspace-old",
+    })).toEqual({
+      requestedExecutionWorkspaceId: null,
+      requestedShouldReuseExisting: false,
+      existingExecutionWorkspaceAvailable: false,
+    });
+
+    expect(resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: "workspace-new",
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceStatus: "active",
+      freshExecutionWorkspaceReplacesId: "workspace-old",
+    })).toEqual({
+      requestedExecutionWorkspaceId: "workspace-new",
+      requestedShouldReuseExisting: true,
+      existingExecutionWorkspaceAvailable: true,
+    });
   });
 
   it.each([

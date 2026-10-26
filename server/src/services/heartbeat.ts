@@ -5897,6 +5897,29 @@ export type ExecutionWorkspaceReuseRequestForIssue = {
   existingExecutionWorkspaceAvailable: boolean;
 };
 
+export function resolveFreshExecutionWorkspaceReplacementId(input: {
+  issueExecutionWorkspaceId?: string | null;
+  freshExecutionWorkspaceReplacesId?: string | null;
+}): string | null | undefined {
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      input,
+      "freshExecutionWorkspaceReplacesId",
+    )
+  ) {
+    return undefined;
+  }
+  const boundExecutionWorkspaceId = readNonEmptyString(
+    input.issueExecutionWorkspaceId,
+  );
+  const replacementId = readNonEmptyString(
+    input.freshExecutionWorkspaceReplacesId,
+  );
+  return boundExecutionWorkspaceId === replacementId
+    ? replacementId
+    : undefined;
+}
+
 /**
  * Projectless native runs bind their immutable envelope to the run id even
  * though no project-scoped execution-workspace row exists. Treat that value
@@ -5916,9 +5939,15 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   existingExecutionWorkspaceStatus?: string | null;
   requestedExistingBranch?: string | null;
   existingExecutionWorkspaceBranchName?: string | null;
+  freshExecutionWorkspaceReplacesId?: string | null;
 }): ExecutionWorkspaceReuseRequestForIssue {
-  const requestedExecutionWorkspaceId = readNonEmptyString(
+  const boundExecutionWorkspaceId = readNonEmptyString(
     input.issueExecutionWorkspaceId,
+  );
+  const freshReplacementAuthorized =
+    resolveFreshExecutionWorkspaceReplacementId(input) !== undefined;
+  const requestedExecutionWorkspaceId = readNonEmptyString(
+    freshReplacementAuthorized ? null : boundExecutionWorkspaceId,
   );
   // An explicitly pinned existing branch outranks an inherited reuse_existing
   // binding: a persisted workspace on any other branch (or with no recorded
@@ -21870,6 +21899,23 @@ export function heartbeatService(
       const requestedExecutionWorkspaceId =
         persistedNativeExecutionWorkspaceId ??
         readNonEmptyString(issueRef?.executionWorkspaceId);
+      const freshExecutionWorkspaceReplacementId =
+        persistedNativeExecutionInput === null
+          ? resolveFreshExecutionWorkspaceReplacementId({
+              issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
+              ...(Object.prototype.hasOwnProperty.call(
+                context,
+                "freshExecutionWorkspaceReplacesId",
+              )
+                ? {
+                    freshExecutionWorkspaceReplacesId:
+                      readNonEmptyString(
+                        context.freshExecutionWorkspaceReplacesId,
+                      ),
+                  }
+                : {}),
+            })
+          : undefined;
       const existingExecutionWorkspace = requestedExecutionWorkspaceId
         ? await executionWorkspacesSvc.getById(requestedExecutionWorkspaceId)
         : null;
@@ -21886,6 +21932,12 @@ export function heartbeatService(
             : (issueRef?.executionWorkspacePreference ?? null),
           existingExecutionWorkspaceStatus:
             existingExecutionWorkspace?.status ?? null,
+          ...(freshExecutionWorkspaceReplacementId !== undefined
+            ? {
+                freshExecutionWorkspaceReplacesId:
+                  freshExecutionWorkspaceReplacementId,
+              }
+            : {}),
         });
       const requestedShouldReuseExisting =
         workspaceReuseRequest.requestedShouldReuseExisting;
@@ -22965,15 +23017,19 @@ export function heartbeatService(
           workspaceReuseRequest.requestedExecutionWorkspaceId,
         activeWorkspaceId: persistedExecutionWorkspace?.id ?? null,
       });
+      const supersededExecutionWorkspace =
+        freshExecutionWorkspaceReplacementId !== undefined &&
+        existingExecutionWorkspace?.id === freshExecutionWorkspaceReplacementId
+          ? existingExecutionWorkspace
+          : reusableExistingExecutionWorkspace;
       if (
-        reusableExistingExecutionWorkspace &&
+        supersededExecutionWorkspace &&
         persistedExecutionWorkspace &&
-        reusableExistingExecutionWorkspace.id !==
-          persistedExecutionWorkspace.id &&
-        reusableExistingExecutionWorkspace.status === "active"
+        supersededExecutionWorkspace.id !== persistedExecutionWorkspace.id &&
+        supersededExecutionWorkspace.status === "active"
       ) {
         await executionWorkspacesSvc.update(
-          reusableExistingExecutionWorkspace.id,
+          supersededExecutionWorkspace.id,
           {
             status: "idle",
             cleanupReason: null,
@@ -27605,7 +27661,8 @@ export function heartbeatService(
 
     let projectId = readNonEmptyString(enrichedContextSnapshot.projectId);
     let worktreeCutoffContinuationAuthorized = false;
-    if (!projectId && issueId) {
+    delete enrichedContextSnapshot.freshExecutionWorkspaceReplacesId;
+    if (issueId) {
       // Look up by either UUID or identifier (e.g. "ENV-13"), but always scope
       // by companyId so a row from another tenant can never be returned even
       // when identifiers collide across companies. Guard the UUID arm because
@@ -27624,22 +27681,27 @@ export function heartbeatService(
           id: issues.id,
           projectId: issues.projectId,
           createdAt: issues.createdAt,
+          executionWorkspaceId: issues.executionWorkspaceId,
         })
         .from(issues)
         .where(and(eq(issues.companyId, agent.companyId), idMatch))
         .then((rows) => rows[0] ?? null);
       if (resolvedIssue) {
-        worktreeCutoffContinuationAuthorized = Boolean(
+        const productiveContinuationAuthorized = Boolean(
           worktreeExecutionCutoff &&
             resolvedIssue.createdAt < worktreeExecutionCutoff &&
-            ((await allowsPreCutoffProductiveContinuation({
+            (await allowsPreCutoffProductiveContinuation({
               cutoff: worktreeExecutionCutoff,
               companyId: agent.companyId,
               agentId,
               issueId: resolvedIssue.id,
               contextSnapshot: enrichedContextSnapshot,
-            })) ||
-              (await allowsPreCutoffDependencyTransition(db, {
+            })),
+        );
+        const dependencyTransitionAuthorized = Boolean(
+          worktreeExecutionCutoff &&
+            resolvedIssue.createdAt < worktreeExecutionCutoff &&
+            (await allowsPreCutoffDependencyTransition(db, {
                 cutoff: worktreeExecutionCutoff,
                 companyId: agent.companyId,
                 agentId,
@@ -27648,8 +27710,15 @@ export function heartbeatService(
                 triggerDetail,
                 reason,
                 contextSnapshot: enrichedContextSnapshot,
-              }))),
+              })),
         );
+        worktreeCutoffContinuationAuthorized =
+          productiveContinuationAuthorized || dependencyTransitionAuthorized;
+        if (dependencyTransitionAuthorized) {
+          enrichedContextSnapshot.forceFreshSession = true;
+          enrichedContextSnapshot.freshExecutionWorkspaceReplacesId =
+            resolvedIssue.executionWorkspaceId ?? null;
+        }
         if (
           worktreeExecutionCutoff &&
           resolvedIssue.createdAt < worktreeExecutionCutoff &&
@@ -27676,10 +27745,14 @@ export function heartbeatService(
         }
       }
     }
-    // Propagate projectId into context so resolveWorkspaceForRun can bind the
-    // project workspace even when context.projectId wasn't set by the caller.
-    if (projectId && !readNonEmptyString(enrichedContextSnapshot.projectId)) {
-      enrichedContextSnapshot.projectId = projectId;
+    // Use the issue's canonical project binding. Caller context must never skip
+    // the cutoff authority check or redirect execution to another project.
+    if (issueId) {
+      if (projectId) {
+        enrichedContextSnapshot.projectId = projectId;
+      } else {
+        delete enrichedContextSnapshot.projectId;
+      }
     }
     const isolatedWorkspacesEnabled = issueId
       ? (await instanceSettings.getExperimental()).enableIsolatedWorkspaces

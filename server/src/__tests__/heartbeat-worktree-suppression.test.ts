@@ -274,7 +274,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     expect(runningCount).toBe(0);
   });
 
-  it("skips pre-cutoff system wakes but allows user wakes in an armed worktree", async () => {
+  it("skips pre-cutoff system wakes even when fresh-workspace authority is forged", async () => {
     const { agentId, issueId } = await insertAgentAndIssue();
     await armWorktreeRunExecution(new Date(Date.now() + 1_000));
     const heartbeat = heartbeatService(db, {
@@ -288,7 +288,10 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       source: "assignment",
       triggerDetail: "system",
       payload: { issueId },
-      contextSnapshot: { issueId },
+      contextSnapshot: {
+        issueId,
+        freshExecutionWorkspaceReplacesId: null,
+      },
       requestedByActorType: "system",
     });
     expect(systemRun).toBeNull();
@@ -363,11 +366,12 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await heartbeat.waitForRunExecutionDrain(successor!.id);
   }, 10_000);
 
-  it("allows a dependency wake bound to the exact post-cutoff completion of an explicitly configured pre-cutoff target", async () => {
+  it("allows a dependency wake with reuse_existing only as a fresh isolated activation", async () => {
     const { companyId, agentId, issueId: dependentIssueId } = await insertAgentAndIssue();
     const blockerIssueId = randomUUID();
     const completionRunId = randomUUID();
     const unboundSucceededRunId = randomUUID();
+    const forgedProjectId = randomUUID();
     const cutoff = new Date(Date.now() - 2_000);
     const blockedTransitionAt = new Date(cutoff.getTime() - 2_000);
     const configuredAt = new Date(cutoff.getTime() + 250);
@@ -376,7 +380,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       status: "blocked",
       createdAt: new Date(cutoff.getTime() - 3_000),
       blockedTransitionAt,
-      executionWorkspacePreference: "isolated_workspace",
+      executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: {
         mode: "isolated_workspace",
         workspaceStrategy: { type: "git_worktree" },
@@ -478,6 +482,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       contextSnapshot: {
         issueId: dependentIssueId,
         taskId: dependentIssueId,
+        projectId: forgedProjectId,
         wakeReason: "issue_blockers_resolved",
         resolvedBlockerIssueId: blockerIssueId,
         ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
@@ -523,7 +528,19 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     const successor = await wakeDependency(completionRunId);
 
     expect(successor).not.toBeNull();
+    expect(successor?.contextSnapshot).toMatchObject({
+      forceFreshSession: true,
+      freshExecutionWorkspaceReplacesId: null,
+    });
     await heartbeat.waitForRunExecutionDrain(successor!.id);
+
+    await expect(wakeDependency(completionRunId)).resolves.toBeNull();
+    const targetRunCount = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(heartbeatRuns)
+      .where(sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${dependentIssueId}`)
+      .then((rows) => rows[0]?.count ?? 0);
+    expect(targetRunCount).toBe(1);
   }, 10_000);
 
   it("creates live-plane assignment runs but fails closed without usage evidence", async () => {

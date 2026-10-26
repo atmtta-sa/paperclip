@@ -121,7 +121,8 @@ export async function allowsPreCutoffDependencyTransition(
     target.assigneeAgentId === params.agentId &&
     blocker.status === "done" &&
     target.projectId === blocker.projectId &&
-    target.executionWorkspacePreference === "isolated_workspace" &&
+    (target.executionWorkspacePreference === "isolated_workspace" ||
+      target.executionWorkspacePreference === "reuse_existing") &&
     readNonEmptyString(targetWorkspaceSettings.mode) === "isolated_workspace" &&
     readNonEmptyString(targetWorkspaceStrategy.type) === "git_worktree" &&
     completionIssueMatches
