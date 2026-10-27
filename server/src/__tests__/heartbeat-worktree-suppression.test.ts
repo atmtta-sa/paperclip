@@ -14,6 +14,7 @@ import {
   createDb,
   documentRevisions,
   documents,
+  executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
   instanceSettings,
@@ -21,6 +22,8 @@ import {
   issueDocuments,
   issueRelations,
   issues,
+  projects,
+  projectWorkspaces,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -28,7 +31,11 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { seedSyntheticCompanyBudgets } from "./helpers/synthetic-autonomous-budgets.js";
-import { heartbeatService, resolveHeartbeatSchedulingSuppression } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  replaceFreshExecutionWorkspaceBindingAtomically,
+  resolveHeartbeatSchedulingSuppression,
+} from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import {
   buildIssueBlockerStateFingerprint,
@@ -92,6 +99,9 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await deleteHeartbeatRunsWithDependents();
     await db.delete(agentWakeupRequests);
     await db.delete(issues);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
     await db.delete(agentRuntimeState);
     await db.delete(autonomousBudgetReservations);
     await db.delete(budgetIncidents);
@@ -366,8 +376,9 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await heartbeat.waitForRunExecutionDrain(successor!.id);
   }, 10_000);
 
-  it("allows a dependency wake with reuse_existing only as a fresh isolated activation", async () => {
+  it("allows a causal dependency wake with reuse_existing only as a fresh isolated activation", async () => {
     const { companyId, agentId, issueId: dependentIssueId } = await insertAgentAndIssue();
+    const blockerAgentId = randomUUID();
     const blockerIssueId = randomUUID();
     const completionRunId = randomUUID();
     const unboundSucceededRunId = randomUUID();
@@ -376,6 +387,25 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     const blockedTransitionAt = new Date(cutoff.getTime() - 2_000);
     const configuredAt = new Date(cutoff.getTime() + 250);
     const completedAt = new Date(cutoff.getTime() + 500);
+    await db.insert(agents).values({
+      id: blockerAgentId,
+      companyId,
+      name: "Blocker Agent",
+      role: "engineer",
+      status: "idle",
+      adapterType: "process",
+      adapterConfig: {
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+      },
+      runtimeConfig: {
+        heartbeat: {
+          enabled: true,
+          intervalSec: 60,
+          wakeOnDemand: true,
+        },
+      },
+    });
     await db.update(issues).set({
       status: "blocked",
       createdAt: new Date(cutoff.getTime() - 3_000),
@@ -392,8 +422,9 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       companyId,
       title: "Completed blocker",
       status: "done",
+      statusVersion: 1,
       priority: "high",
-      assigneeAgentId: agentId,
+      assigneeAgentId: blockerAgentId,
       responsibleUserId: "responsible-user",
       completedAt,
       createdAt: new Date(cutoff.getTime() - 3_000),
@@ -424,7 +455,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       {
         id: completionRunId,
         companyId,
-        agentId,
+        agentId: blockerAgentId,
         nativeIssueId: blockerIssueId,
         status: "succeeded",
         responsibleUserId: "responsible-user",
@@ -436,7 +467,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       {
         id: unboundSucceededRunId,
         companyId,
-        agentId,
+        agentId: blockerAgentId,
         nativeIssueId: blockerIssueId,
         status: "succeeded",
         responsibleUserId: "responsible-user",
@@ -449,14 +480,34 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await db.insert(activityLog).values({
       companyId,
       actorType: "agent",
-      actorId: agentId,
-      agentId,
+      actorId: blockerAgentId,
+      agentId: blockerAgentId,
       runId: completionRunId,
       action: "issue.updated",
       entityType: "issue",
       entityId: blockerIssueId,
-      details: { status: "done" },
+      details: {
+        status: "done",
+        changes: { status: { from: "in_progress", to: "done" } },
+        _previous: { status: "in_progress" },
+      },
       createdAt: completedAt,
+    });
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      runId: unboundSucceededRunId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: blockerIssueId,
+      details: {
+        status: "done",
+        changes: { status: { from: "done", to: "done" } },
+        _previous: { status: "done" },
+      },
+      createdAt: new Date(completedAt.getTime() + 1),
     });
     await armWorktreeRunExecution(cutoff);
     const blockerStateFingerprint = buildIssueBlockerStateFingerprint([blockerState]);
@@ -467,36 +518,35 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       },
     });
 
-    const wakeDependency = (
-      causalCompletionRunId: string | null,
-    ) => heartbeat.wakeup(agentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: "issue_blockers_resolved",
-      payload: {
-        issueId: dependentIssueId,
-        resolvedBlockerIssueId: blockerIssueId,
-        blockerIssueIds: [blockerIssueId],
-        ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
-      },
-      contextSnapshot: {
-        issueId: dependentIssueId,
-        taskId: dependentIssueId,
-        projectId: forgedProjectId,
-        wakeReason: "issue_blockers_resolved",
-        resolvedBlockerIssueId: blockerIssueId,
-        ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
-      },
-      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
-        dependentIssueId,
-        blockerIssueIds: [blockerIssueId],
-        blockerStates: [blockerState],
-        blockedTransitionAt,
-      }),
-      blockerStateFingerprint,
-      requestedByActorType: "system",
-      requestedByActorId: "dependency-reconciliation",
-    });
+    const wakeDependency = (causalCompletionRunId: string | null) =>
+      heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_blockers_resolved",
+        payload: {
+          issueId: dependentIssueId,
+          resolvedBlockerIssueId: blockerIssueId,
+          blockerIssueIds: [blockerIssueId],
+          ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
+        },
+        contextSnapshot: {
+          issueId: dependentIssueId,
+          taskId: dependentIssueId,
+          projectId: forgedProjectId,
+          wakeReason: "issue_blockers_resolved",
+          resolvedBlockerIssueId: blockerIssueId,
+          ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
+        },
+        idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+          dependentIssueId,
+          blockerIssueIds: [blockerIssueId],
+          blockerStates: [blockerState],
+          blockedTransitionAt,
+        }),
+        blockerStateFingerprint,
+        requestedByActorType: "system",
+        requestedByActorId: "dependency-reconciliation",
+      });
 
     await expect(wakeDependency(completionRunId)).resolves.toBeNull();
     await db.insert(activityLog).values({
@@ -518,6 +568,23 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await expect(wakeDependency(null)).resolves.toBeNull();
     await expect(wakeDependency(randomUUID())).resolves.toBeNull();
     await expect(wakeDependency(unboundSucceededRunId)).resolves.toBeNull();
+    await db.update(issueRelations).set({
+      resolutionEvidence: {
+        blockerIssueId: randomUUID(),
+        status: "done",
+        statusVersion: 1,
+        completedAt: completedAt.toISOString(),
+      },
+    }).where(eq(issueRelations.issueId, blockerIssueId));
+    await expect(wakeDependency(completionRunId)).resolves.toBeNull();
+    await db.update(issueRelations).set({
+      resolutionEvidence: {
+        blockerIssueId,
+        status: "done",
+        statusVersion: 1,
+        completedAt: completedAt.toISOString(),
+      },
+    }).where(eq(issueRelations.issueId, blockerIssueId));
     const targetRunsBeforeAuthorizedWake = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(heartbeatRuns)
@@ -531,7 +598,9 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     expect(successor?.contextSnapshot).toMatchObject({
       forceFreshSession: true,
       freshExecutionWorkspaceReplacesId: null,
+      preCutoffDependencyActivationAuthorized: true,
     });
+    expect(successor?.contextSnapshot?.projectId).toBeUndefined();
     await heartbeat.waitForRunExecutionDrain(successor!.id);
 
     await expect(wakeDependency(completionRunId)).resolves.toBeNull();
@@ -542,6 +611,91 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       .then((rows) => rows[0]?.count ?? 0);
     expect(targetRunCount).toBe(1);
   }, 10_000);
+
+  it("atomically replaces only the currently bound active isolated workspace", async () => {
+    const { companyId, issueId } = await insertAgentAndIssue();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const oldWorkspaceId = randomUUID();
+    const replacementWorkspaceId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Atomic replacement project",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary",
+      cwd: "/tmp/atomic-replacement",
+      isPrimary: true,
+    });
+    await db.insert(executionWorkspaces).values([
+      {
+        id: oldWorkspaceId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        sourceIssueId: issueId,
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        name: "Old",
+        status: "active",
+      },
+      {
+        id: replacementWorkspaceId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        sourceIssueId: issueId,
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        name: "Replacement",
+        status: "active",
+      },
+    ]);
+    await db.update(issues).set({
+      projectId,
+      projectWorkspaceId,
+      executionWorkspaceId: oldWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree" },
+      },
+    }).where(eq(issues.id, issueId));
+
+    const replacementInput = {
+      companyId,
+      issueId,
+      expectedWorkspaceId: oldWorkspaceId,
+      replacementWorkspaceId,
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree" },
+      },
+    };
+    await expect(
+      replaceFreshExecutionWorkspaceBindingAtomically(db, replacementInput),
+    ).resolves.toBe(true);
+    await expect(
+      replaceFreshExecutionWorkspaceBindingAtomically(db, replacementInput),
+    ).resolves.toBe(false);
+
+    const [boundIssue] = await db.select({
+      executionWorkspaceId: issues.executionWorkspaceId,
+    }).from(issues).where(eq(issues.id, issueId));
+    const [oldWorkspace] = await db.select({
+      status: executionWorkspaces.status,
+    }).from(executionWorkspaces).where(eq(executionWorkspaces.id, oldWorkspaceId));
+    const [replacementWorkspace] = await db.select({
+      status: executionWorkspaces.status,
+    }).from(executionWorkspaces).where(eq(executionWorkspaces.id, replacementWorkspaceId));
+    expect(boundIssue?.executionWorkspaceId).toBe(replacementWorkspaceId);
+    expect(oldWorkspace?.status).toBe("idle");
+    expect(replacementWorkspace?.status).toBe("active");
+  });
 
   it("creates live-plane assignment runs but fails closed without usage evidence", async () => {
     const { companyId, agentId, issueId } = await insertAgentAndIssue();

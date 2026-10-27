@@ -5920,6 +5920,109 @@ export function resolveFreshExecutionWorkspaceReplacementId(input: {
     : undefined;
 }
 
+class FreshExecutionWorkspaceReplacementGuardError extends Error {}
+
+export async function replaceFreshExecutionWorkspaceBindingAtomically(
+  db: Db,
+  input: {
+    companyId: string;
+    issueId: string;
+    expectedWorkspaceId: string;
+    replacementWorkspaceId: string;
+    executionWorkspaceSettings: unknown;
+  },
+): Promise<boolean> {
+  try {
+    return await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [lockedIssue] = await tx
+        .select({ executionWorkspaceId: issues.executionWorkspaceId })
+        .from(issues)
+        .where(and(
+          eq(issues.id, input.issueId),
+          eq(issues.companyId, input.companyId),
+        ))
+        .for("update");
+      if (lockedIssue?.executionWorkspaceId !== input.expectedWorkspaceId) {
+        throw new FreshExecutionWorkspaceReplacementGuardError();
+      }
+
+      const lockedWorkspaces = await tx
+        .select()
+        .from(executionWorkspaces)
+        .where(and(
+          eq(executionWorkspaces.companyId, input.companyId),
+          inArray(
+            executionWorkspaces.id,
+            [input.expectedWorkspaceId, input.replacementWorkspaceId].sort(),
+          ),
+        ))
+        .orderBy(asc(executionWorkspaces.id))
+        .for("update");
+      const oldWorkspace = lockedWorkspaces.find(
+        (workspace) => workspace.id === input.expectedWorkspaceId,
+      );
+      const replacementWorkspace = lockedWorkspaces.find(
+        (workspace) => workspace.id === input.replacementWorkspaceId,
+      );
+      if (
+        !oldWorkspace ||
+        !replacementWorkspace ||
+        oldWorkspace.status !== "active" ||
+        oldWorkspace.sourceIssueId !== input.issueId ||
+        replacementWorkspace.status !== "active" ||
+        replacementWorkspace.sourceIssueId !== input.issueId ||
+        replacementWorkspace.projectId !== oldWorkspace.projectId
+      ) {
+        throw new FreshExecutionWorkspaceReplacementGuardError();
+      }
+
+      const retired = await tx
+        .update(executionWorkspaces)
+        .set({ status: "idle", cleanupReason: null, updatedAt: new Date() })
+        .where(and(
+          eq(executionWorkspaces.id, oldWorkspace.id),
+          eq(executionWorkspaces.companyId, input.companyId),
+          eq(executionWorkspaces.status, "active"),
+          eq(executionWorkspaces.sourceIssueId, input.issueId),
+        ))
+        .returning({ id: executionWorkspaces.id });
+      if (retired.length !== 1) {
+        throw new FreshExecutionWorkspaceReplacementGuardError();
+      }
+
+      const rebound = await tx
+        .update(issues)
+        .set({
+          executionWorkspaceId: replacementWorkspace.id,
+          projectWorkspaceId: replacementWorkspace.projectWorkspaceId,
+          executionWorkspacePreference: "reuse_existing",
+          executionWorkspaceSettings: {
+            ...parseObject(input.executionWorkspaceSettings),
+            mode: "isolated_workspace",
+            workspaceStrategy: { type: "git_worktree" },
+          },
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(issues.id, input.issueId),
+          eq(issues.companyId, input.companyId),
+          eq(issues.executionWorkspaceId, oldWorkspace.id),
+        ))
+        .returning({ id: issues.id });
+      if (rebound.length !== 1) {
+        throw new FreshExecutionWorkspaceReplacementGuardError();
+      }
+      return true;
+    });
+  } catch (error) {
+    if (error instanceof FreshExecutionWorkspaceReplacementGuardError) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 /**
  * Projectless native runs bind their immutable envelope to the run id even
  * though no project-scoped execution-workspace row exists. Treat that value
@@ -21357,9 +21460,17 @@ export function heartbeatService(
         await instanceSettings.getExperimental();
       const isolatedWorkspacesEnabled =
         experimentalInstanceSettings.enableIsolatedWorkspaces;
+      const preCutoffDependencyActivationAuthorized =
+        context.preCutoffDependencyActivationAuthorized === true;
       const parsedIssueExecutionWorkspaceSettings =
         parseIssueExecutionWorkspaceSettings(
-          issueContext?.executionWorkspaceSettings,
+          preCutoffDependencyActivationAuthorized
+            ? {
+                ...(issueContext?.executionWorkspaceSettings ?? {}),
+                mode: "isolated_workspace",
+                workspaceStrategy: { type: "git_worktree" },
+              }
+            : issueContext?.executionWorkspaceSettings,
         );
       const issueExecutionWorkspaceSettings = isolatedWorkspacesEnabled
         ? parsedIssueExecutionWorkspaceSettings
@@ -23022,21 +23133,55 @@ export function heartbeatService(
         existingExecutionWorkspace?.id === freshExecutionWorkspaceReplacementId
           ? existingExecutionWorkspace
           : reusableExistingExecutionWorkspace;
-      if (
+      const requiresAtomicFreshReplacement = Boolean(
+        issueId &&
+        freshExecutionWorkspaceReplacementId &&
         supersededExecutionWorkspace &&
         persistedExecutionWorkspace &&
-        supersededExecutionWorkspace.id !== persistedExecutionWorkspace.id &&
-        supersededExecutionWorkspace.status === "active"
+        supersededExecutionWorkspace.id !== persistedExecutionWorkspace.id,
+      );
+      if (
+        requiresAtomicFreshReplacement &&
+        issueId &&
+        freshExecutionWorkspaceReplacementId &&
+        persistedExecutionWorkspace
       ) {
-        await executionWorkspacesSvc.update(
-          supersededExecutionWorkspace.id,
+        const replaced = await replaceFreshExecutionWorkspaceBindingAtomically(
+          db,
           {
-            status: "idle",
-            cleanupReason: null,
+            companyId: agent.companyId,
+            issueId,
+            expectedWorkspaceId: freshExecutionWorkspaceReplacementId,
+            replacementWorkspaceId: persistedExecutionWorkspace.id,
+            executionWorkspaceSettings: issueExecutionWorkspaceSettings ?? {},
           },
         );
+        if (!replaced) {
+          throw new Error("fresh_execution_workspace_replacement_guard_mismatch");
+        }
+        issueExecutionWorkspaceIdForRun = persistedExecutionWorkspace.id;
+        issueProjectWorkspaceIdForRun =
+          persistedExecutionWorkspace.projectWorkspaceId ??
+          issueProjectWorkspaceIdForRun;
+        issueExecutionWorkspacePreferenceForRun = "reuse_existing";
+        issueExecutionWorkspaceModeForRun = "isolated_workspace";
+      } else {
+        if (
+          supersededExecutionWorkspace &&
+          persistedExecutionWorkspace &&
+          supersededExecutionWorkspace.id !== persistedExecutionWorkspace.id &&
+          supersededExecutionWorkspace.status === "active"
+        ) {
+          await executionWorkspacesSvc.update(
+            supersededExecutionWorkspace.id,
+            {
+              status: "idle",
+              cleanupReason: null,
+            },
+          );
+        }
+        await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
       }
-      await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
       if (persistedExecutionWorkspace) {
         context.executionWorkspaceId = persistedExecutionWorkspace.id;
         await db
@@ -27661,7 +27806,9 @@ export function heartbeatService(
 
     let projectId = readNonEmptyString(enrichedContextSnapshot.projectId);
     let worktreeCutoffContinuationAuthorized = false;
+    let preCutoffDependencyTransitionAuthorized = false;
     delete enrichedContextSnapshot.freshExecutionWorkspaceReplacesId;
+    delete enrichedContextSnapshot.preCutoffDependencyActivationAuthorized;
     if (issueId) {
       // Look up by either UUID or identifier (e.g. "ENV-13"), but always scope
       // by companyId so a row from another tenant can never be returned even
@@ -27712,6 +27859,7 @@ export function heartbeatService(
                 contextSnapshot: enrichedContextSnapshot,
               })),
         );
+        preCutoffDependencyTransitionAuthorized = dependencyTransitionAuthorized;
         worktreeCutoffContinuationAuthorized =
           productiveContinuationAuthorized || dependencyTransitionAuthorized;
         if (dependencyTransitionAuthorized) {
@@ -28461,30 +28609,60 @@ export function heartbeatService(
           if (
             worktreeExecutionCutoff &&
             issue.createdAt < worktreeExecutionCutoff &&
-            !worktreeCutoffContinuationAuthorized
+            preCutoffDependencyTransitionAuthorized
           ) {
-            await tx.insert(agentWakeupRequests).values({
-              ...durableReceiptFields,
-              companyId: agent.companyId,
-              agentId,
-              source,
-              triggerDetail,
-              reason: "heartbeat.worktree_execution_cutoff",
-              payload: {
-                ...(payload ?? {}),
-                heartbeatSkip: {
-                  reason: "worktree_execution_cutoff",
-                  cutoff: worktreeExecutionCutoff.toISOString(),
+            const resolvedBlockerIssueId = readNonEmptyString(
+              enrichedContextSnapshot.resolvedBlockerIssueId,
+            );
+            if (resolvedBlockerIssueId) {
+              await tx.execute(
+                sql`select id from issues where id = ${resolvedBlockerIssueId} and company_id = ${agent.companyId} for update`,
+              );
+            }
+            const transactionCutoffAuthorized =
+              await allowsPreCutoffDependencyTransition(
+                tx as unknown as Db,
+                {
+                  cutoff: worktreeExecutionCutoff,
+                  companyId: agent.companyId,
+                  agentId,
                   issueId: issue.id,
+                  source,
+                  triggerDetail,
+                  reason,
+                  contextSnapshot: enrichedContextSnapshot,
                 },
-              },
-              status: "skipped",
-              requestedByActorType: opts.requestedByActorType ?? null,
-              requestedByActorId: opts.requestedByActorId ?? null,
-              idempotencyKey: opts.idempotencyKey ?? null,
-              finishedAt: new Date(),
-            });
-            return { kind: "skipped" as const };
+              );
+            if (transactionCutoffAuthorized) {
+              enrichedContextSnapshot.forceFreshSession = true;
+              enrichedContextSnapshot.freshExecutionWorkspaceReplacesId =
+                issue.executionWorkspaceId ?? null;
+              enrichedContextSnapshot.preCutoffDependencyActivationAuthorized =
+                true;
+            } else {
+              await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields,
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason: "heartbeat.worktree_execution_cutoff",
+                payload: {
+                  ...(payload ?? {}),
+                  heartbeatSkip: {
+                    reason: "worktree_execution_cutoff",
+                    cutoff: worktreeExecutionCutoff.toISOString(),
+                    issueId: issue.id,
+                  },
+                },
+                status: "skipped",
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+                finishedAt: new Date(),
+              });
+              return { kind: "skipped" as const };
+            }
           }
 
           const cancelStaleScheduledRetry = async (

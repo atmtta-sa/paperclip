@@ -5399,6 +5399,45 @@ export function recoveryService(
         : "issue_graph_liveness_reconciliation";
     const useCursor = !opts?.blockerIssueId;
 
+    const resolveCausalCompletionRunId = async (blockerIssueId: string) => {
+      if (
+        opts?.source === "workspace.finalize" &&
+        opts.blockerIssueId === blockerIssueId &&
+        opts.runId
+      ) {
+        return opts.runId;
+      }
+      return db
+        .select({ runId: activityLog.runId })
+        .from(activityLog)
+        .innerJoin(
+          heartbeatRuns,
+          and(
+            eq(heartbeatRuns.id, activityLog.runId),
+            eq(heartbeatRuns.companyId, activityLog.companyId),
+          ),
+        )
+        .where(
+          and(
+            eq(activityLog.entityType, "issue"),
+            eq(activityLog.entityId, blockerIssueId),
+            eq(activityLog.action, "issue.updated"),
+            eq(heartbeatRuns.status, "succeeded"),
+            or(
+              eq(heartbeatRuns.nativeIssueId, blockerIssueId),
+              sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${blockerIssueId}`,
+              sql`${heartbeatRuns.contextSnapshot} ->> 'taskId' = ${blockerIssueId}`,
+            ),
+            sql`${activityLog.details} ->> 'status' = 'done'`,
+            sql`${activityLog.details} #>> '{changes,status,to}' = 'done'`,
+            sql`coalesce(${activityLog.details} #>> '{changes,status,from}', ${activityLog.details} #>> '{_previous,status}') <> 'done'`,
+          ),
+        )
+        .orderBy(desc(activityLog.createdAt))
+        .limit(1)
+        .then((rows) => rows[0]?.runId ?? null);
+    };
+
     const queryCandidates = (afterIssueId: string | null) => {
       const filters = [
         eq(issues.status, "blocked"),
@@ -5518,7 +5557,11 @@ export function recoveryService(
         if (!agentId) continue;
 
         const readiness = readinessMap.get(candidate.id);
-        const resolvedBlockerIssueId = readiness?.blockerIssueIds[0] ?? null;
+        const resolvedBlockerIssueId =
+          opts?.blockerIssueId &&
+          readiness?.blockerIssueIds.includes(opts.blockerIssueId)
+            ? opts.blockerIssueId
+            : (readiness?.blockerIssueIds[0] ?? null);
         if (
           !readiness ||
           !readiness.isDependencyReady ||
@@ -5528,6 +5571,8 @@ export function recoveryService(
           result.notReadySkipped += 1;
           continue;
         }
+        const causalCompletionRunId =
+          await resolveCausalCompletionRunId(resolvedBlockerIssueId);
 
         // Level-triggered dedup: key on the full blocker set (the current ready
         // state), not on any single resolved edge. An older completed per-edge
@@ -5590,7 +5635,7 @@ export function recoveryService(
               issueId: candidate.id,
               resolvedBlockerIssueId,
               blockerIssueIds: readiness.blockerIssueIds,
-              ...(opts?.runId ? { causalCompletionRunId: opts.runId } : {}),
+              ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
               backstop: payloadBackstop,
             },
             idempotencyKey,
@@ -5604,7 +5649,7 @@ export function recoveryService(
               source,
               resolvedBlockerIssueId,
               blockerIssueIds: readiness.blockerIssueIds,
-              ...(opts?.runId ? { causalCompletionRunId: opts.runId } : {}),
+              ...(causalCompletionRunId ? { causalCompletionRunId } : {}),
             },
           });
           if (!wake) {

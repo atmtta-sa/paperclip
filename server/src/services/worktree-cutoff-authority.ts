@@ -1,4 +1,4 @@
-import { and, eq, gte, isNotNull, sql } from "drizzle-orm";
+import { and, eq, gte, gt, isNotNull, sql } from "drizzle-orm";
 import {
   activityLog,
   heartbeatRuns,
@@ -58,38 +58,59 @@ export async function allowsPreCutoffDependencyTransition(
         eq(issues.id, params.issueId),
         eq(issues.companyId, params.companyId),
       )).then((rows) => rows[0] ?? null),
-      db.select({ status: issues.status, projectId: issues.projectId })
+      db.select({
+        status: issues.status,
+        statusVersion: issues.statusVersion,
+        completedAt: issues.completedAt,
+        projectId: issues.projectId,
+      })
         .from(issues).where(and(
           eq(issues.id, blockerIssueId),
           eq(issues.companyId, params.companyId),
         )).then((rows) => rows[0] ?? null),
       db.select({
+        agentId: heartbeatRuns.agentId,
         nativeIssueId: heartbeatRuns.nativeIssueId,
         contextSnapshot: heartbeatRuns.contextSnapshot,
       }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.id, completionRunId),
         eq(heartbeatRuns.companyId, params.companyId),
-        eq(heartbeatRuns.agentId, params.agentId),
         eq(heartbeatRuns.status, "succeeded"),
         gte(heartbeatRuns.createdAt, params.cutoff),
       )).then((rows) => rows[0] ?? null),
-      db.select({ id: activityLog.id }).from(activityLog).where(and(
+      db.select({
+        id: activityLog.id,
+        agentId: activityLog.agentId,
+      }).from(activityLog).where(and(
         eq(activityLog.companyId, params.companyId),
         eq(activityLog.runId, completionRunId),
-        eq(activityLog.agentId, params.agentId),
+        isNotNull(activityLog.agentId),
         eq(activityLog.action, "issue.updated"),
         eq(activityLog.entityType, "issue"),
         eq(activityLog.entityId, blockerIssueId),
         sql`${activityLog.details} ->> 'status' = 'done'`,
+        sql`${activityLog.details} #>> '{changes,status,to}' = 'done'`,
+        sql`coalesce(${activityLog.details} #>> '{changes,status,from}', ${activityLog.details} #>> '{_previous,status}') is not null`,
+        sql`coalesce(${activityLog.details} #>> '{changes,status,from}', ${activityLog.details} #>> '{_previous,status}') <> 'done'`,
         gte(activityLog.createdAt, params.cutoff),
       )).limit(1).then((rows) => rows[0] ?? null),
-      db.select({ id: issueRelations.id })
+      db.select({
+        id: issueRelations.id,
+        blockerKind: issueRelations.blockerKind,
+        requiredEvidenceVersion: issueRelations.requiredEvidenceVersion,
+        evidenceRevision: issueRelations.evidenceRevision,
+        resolutionEvidence: issueRelations.resolutionEvidence,
+        resolvedAt: issueRelations.resolvedAt,
+      })
         .from(issueRelations).where(and(
           eq(issueRelations.companyId, params.companyId),
           eq(issueRelations.issueId, blockerIssueId),
           eq(issueRelations.relatedIssueId, params.issueId),
           eq(issueRelations.type, "blocks"),
+          eq(issueRelations.blockerKind, "issue_dependency"),
+          eq(issueRelations.requiredEvidenceVersion, "issue_done_v1"),
           eq(issueRelations.resolutionState, "resolved"),
+          gt(issueRelations.evidenceRevision, 0),
           isNotNull(issueRelations.resolutionEvidence),
         )).then((rows) => rows[0] ?? null),
       db.select({ id: activityLog.id }).from(activityLog).where(and(
@@ -112,6 +133,12 @@ export async function allowsPreCutoffDependencyTransition(
     targetWorkspaceSettings.workspaceStrategy,
   );
   const completionContext = parseObject(completionRun.contextSnapshot);
+  const relationEvidence = parseObject(relation.resolutionEvidence);
+  const relationCompletedAt = readNonEmptyString(relationEvidence.completedAt);
+  const relationCompletedAtMs = relationCompletedAt
+    ? Date.parse(relationCompletedAt)
+    : Number.NaN;
+  const blockerCompletedAtMs = blocker.completedAt?.getTime() ?? Number.NaN;
   const completionIssueMatches =
     completionRun.nativeIssueId === blockerIssueId ||
     readNonEmptyString(completionContext.issueId) === blockerIssueId ||
@@ -119,7 +146,14 @@ export async function allowsPreCutoffDependencyTransition(
   return (
     target.status === "blocked" &&
     target.assigneeAgentId === params.agentId &&
+    completionRun.agentId === finalization.agentId &&
     blocker.status === "done" &&
+    readNonEmptyString(relationEvidence.blockerIssueId) === blockerIssueId &&
+    relationEvidence.status === "done" &&
+    Number(relationEvidence.statusVersion) === blocker.statusVersion &&
+    Number.isFinite(relationCompletedAtMs) &&
+    relationCompletedAtMs === blockerCompletedAtMs &&
+    relation.resolvedAt?.getTime() === blockerCompletedAtMs &&
     target.projectId === blocker.projectId &&
     (target.executionWorkspacePreference === "isolated_workspace" ||
       target.executionWorkspacePreference === "reuse_existing") &&
