@@ -14339,6 +14339,7 @@ export function issueRoutes(
           blockerIssueIds: string[];
           blockerStates: Parameters<typeof buildIssueBlockerStateFingerprint>[0];
           blockedTransitionAt?: Date | string | null;
+          causalCompletionRunId?: string | null;
           source: string;
           mutation: string;
         }) => {
@@ -14375,6 +14376,9 @@ export function issueRoutes(
               issueId: input.dependentIssueId,
               resolvedBlockerIssueId: input.resolvedBlockerIssueId,
               blockerIssueIds: input.blockerIssueIds,
+              ...(input.causalCompletionRunId
+                ? { causalCompletionRunId: input.causalCompletionRunId }
+                : {}),
               mutation: input.mutation,
             },
             idempotencyKey,
@@ -14388,6 +14392,9 @@ export function issueRoutes(
               source: input.source,
               resolvedBlockerIssueId: input.resolvedBlockerIssueId,
               blockerIssueIds: input.blockerIssueIds,
+              ...(input.causalCompletionRunId
+                ? { causalCompletionRunId: input.causalCompletionRunId }
+                : {}),
             },
           });
         };
@@ -14590,6 +14597,7 @@ export function issueRoutes(
               blockerIssueIds: dependent.blockerIssueIds,
               blockerStates: dependent.blockerStates,
               blockedTransitionAt: dependent.blockedTransitionAt,
+              causalCompletionRunId: actor.runId,
               source: "issue.blockers_resolved",
               mutation: "blocker_done",
             });
