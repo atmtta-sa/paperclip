@@ -647,6 +647,33 @@ function createFakeAdmissionHelpers(
 }
 
 describe("admitWakeBehindIssueExecution", () => {
+  it("proceeds with an independently mentioned non-assignee without mutating the execution queue", async () => {
+    const writer = createFakeAdmissionWriter();
+    const reader = createFakeAdmissionReader({
+      isSameExecutionAgent: vi.fn(async () => false),
+    });
+    const helpers = createFakeAdmissionHelpers();
+    const admit = createAdmitWakeBehindIssueExecution({ reader, writer, helpers });
+
+    const result = await admit(
+      SCOPE,
+      admissionInput({
+        contextSnapshot: {
+          issueId: "issue-1",
+          wakeReason: "issue_comment_mentioned",
+          wakeCommentId: "comment-1",
+        },
+        wakeCommentId: "comment-1",
+      }),
+    );
+
+    expect(result).toEqual({ kind: "proceed" });
+    expect(writer.coalesceIntoActiveExecutionRun).not.toHaveBeenCalled();
+    expect(reader.findExistingDeferredWake).not.toHaveBeenCalled();
+    expect(writer.mergeIntoExistingDeferredWake).not.toHaveBeenCalled();
+    expect(writer.insertNewDeferredWake).not.toHaveBeenCalled();
+  });
+
   it.each(["running", "queued"])(
     "keeps a dedicated durable continuation separate from a %s execution and an existing deferred wake",
     async (status) => {

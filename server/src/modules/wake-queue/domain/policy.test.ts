@@ -538,6 +538,23 @@ describe("decideWakeAdmission", () => {
       expected: { kind: "defer" },
     },
     {
+      name: "proceed: an independently mentioned non-assignee may review alongside the execution owner",
+      facts: {
+        ...baseWakeAdmissionFacts,
+        isSameExecutionAgent: false,
+        allowIndependentNonAssigneeWake: true,
+      },
+      expected: { kind: "proceed" },
+    },
+    {
+      name: "defer: an independent-wake flag never bypasses the same execution agent boundary",
+      facts: {
+        ...baseWakeAdmissionFacts,
+        allowIndependentNonAssigneeWake: true,
+      },
+      expected: { kind: "coalesce" },
+    },
+    {
       name: "proceed: the zombie-run filter leaves no live coalesce target",
       facts: { ...baseWakeAdmissionFacts, availableActiveExecutionRunPresent: false },
       expected: { kind: "proceed" },

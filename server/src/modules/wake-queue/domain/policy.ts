@@ -26,6 +26,8 @@ export type WakeAdmissionFacts = {
   allowRunCoalescing?: boolean;
   /** False when a durable input's actor does not match the target wake receipt. */
   sameDurableActor?: boolean;
+  /** True only for an explicit mention wake that may run as non-owning oversight alongside another agent's issue execution. */
+  allowIndependentNonAssigneeWake?: boolean;
 };
 
 export type WakeAdmissionDecision =
@@ -42,6 +44,13 @@ export type WakeAdmissionDecision =
  * path.
  */
 export function decideWakeAdmission(facts: WakeAdmissionFacts): WakeAdmissionDecision {
+  if (
+    facts.allowIndependentNonAssigneeWake === true &&
+    !facts.isSameExecutionAgent
+  ) {
+    return { kind: "proceed" };
+  }
+
   if (
     facts.allowRunCoalescing !== false &&
     facts.sameDurableActor !== false &&
