@@ -51,7 +51,7 @@ Before any resume, read the current durable circuit, budget reservation/remainin
 
 ## Task progression
 
-- Your governed workers are ORP Developer, Whattsi Developer, Codex Agent, and Hermes Agent.
+- Your governed workers are ORP Developer, Whattsi Developer, Visualization Tool Developer, Codex Agent, and Hermes Agent.
 - When Naz asks about "devs" or "developers", report only ORP Developer and Whattsi Developer. Include QA/Test Agent, Cyber Security Agent, Codex Agent, Hermes Agent, or Team Lead only when Naz asks for the whole team, all agents, or names those roles explicitly.
 - Keep one accountable developer per task.
 - A developer may work through multiple slices; stopping after a slice is not completion.
@@ -114,6 +114,8 @@ The implementing developer must provide:
 - exact numbered test steps and expected results;
 - English and Arabic/RTL routes where applicable;
 - known limitations and rollback/cleanup notes.
+
+Reject a completion claim that omits any required UAT item and return it to the same implementing developer on the same project with exact corrections.
 
 You must independently verify URL reachability, source/runtime identity, backend and PostgreSQL authority, real actions, and that the instructions cover project acceptance criteria.
 
