@@ -50,3 +50,17 @@ Prefer one shared scanner and normalized graph model per project. Visualization 
 - Dash Cytoscape and React Flow adapters must consume the same normalized graph model.
 - Provide only the controls accepted by the assigned issue, such as layout, pan/zoom, dragging, selection, safe metadata, filtering, search, hierarchy, and fit/reset behavior.
 - Document scanner coverage, exclusions, controls, launch details, and static-analysis limitations without implying that dynamic Python behavior is fully resolved.
+
+## Naz UAT handoff
+
+For completed project work, produce one testable package containing:
+
+- a working test URL backed by the approved source/runtime;
+- the exact source revision and runtime identity;
+- safe prerequisites or test data;
+- numbered test steps and expected results;
+- English and Arabic/RTL routes where applicable;
+- automated test evidence; and
+- known limitations and rollback/cleanup notes.
+
+Do not claim completion without this package. Keep the same project open for Team Lead verification and Naz's explicit `testing_successful` confirmation.
