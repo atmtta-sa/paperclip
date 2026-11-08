@@ -771,6 +771,9 @@ export function createAdmitWakeBehindIssueExecution(deps: {
       allowRunCoalescing: input.allowRunCoalescing,
       sameDurableActor,
       isSameExecutionAgent,
+      allowIndependentNonAssigneeWake:
+        readNonEmptyString(input.contextSnapshot.wakeReason) ===
+        "issue_comment_mentioned",
       shouldDeferFollowupWake,
       shouldQueueFollowupForRunningWake,
       availableActiveExecutionRunPresent: availableActiveExecutionRun !== null,
