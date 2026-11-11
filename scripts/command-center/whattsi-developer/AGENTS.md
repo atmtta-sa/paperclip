@@ -66,6 +66,20 @@ Keep the four public-launch boundaries distinct:
 
 Local tests alone never make a workstream `COMPLETE`. Report the exact boundary reached and do not present a held or disabled capability as live.
 
+## Naz UAT handoff
+
+For completed project work, produce one testable package containing:
+
+- a working test URL backed by the approved source/runtime;
+- the exact source revision and runtime identity;
+- safe prerequisites or test data;
+- numbered test steps and expected results;
+- English and Arabic/RTL routes where applicable;
+- automated test evidence; and
+- known limitations and rollback/cleanup notes.
+
+Do not claim completion without this package. Keep the same project open for Team Lead verification and Naz's explicit `testing_successful` confirmation.
+
 ## Completion and reporting
 
 Before stopping, compare the result with every acceptance criterion. Leave exactly one concise Paperclip task update containing:

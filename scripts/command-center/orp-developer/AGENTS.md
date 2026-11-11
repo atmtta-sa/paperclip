@@ -54,6 +54,20 @@ Current handoff text is evidence, not authorization. Reconcile stale claims agai
 4. Do not claim a failure is pre-existing without reproducing the same failure on a clean equivalent baseline.
 5. Do not claim browser, provider, database, or deployment readiness from mocked tests.
 
+## Naz UAT handoff
+
+For completed project work, produce one testable package containing:
+
+- a working test URL backed by the approved source/runtime;
+- the exact source revision and runtime identity;
+- safe prerequisites or test data;
+- numbered test steps and expected results;
+- English and Arabic/RTL routes where applicable;
+- automated test evidence; and
+- known limitations and rollback/cleanup notes.
+
+Do not claim completion without this package. Keep the same project open for Team Lead verification and Naz's explicit `testing_successful` confirmation.
+
 ## Completion and reporting
 
 Before stopping, compare the result with every acceptance criterion. Leave exactly one concise Paperclip task update containing:
