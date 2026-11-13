@@ -353,7 +353,7 @@ describeEmbeddedPostgres("issue blocker attention", () => {
               companyId,
               identifier: `PBG-${depth + 2}-${width + 1}`,
               title: `Shared blocker ${depth + 1}-${width + 1}`,
-              status: depth === 6 ? "in_progress" : "blocked",
+              status: depth === 6 ? "todo" : "blocked",
               assigneeAgentId: agentId,
             }),
           );
@@ -385,7 +385,7 @@ describeEmbeddedPostgres("issue blocker attention", () => {
         unresolvedBlockerCount: 8,
         coveredBlockerCount: 0,
         attentionBlockerCount: 8,
-        blockingTreeLive: true,
+        blockingTreeLive: false,
       });
     },
     3_000,

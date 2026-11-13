@@ -4313,9 +4313,12 @@ async function listIssueBlockerAttentionMap(
     };
   };
 
-  const pathHasLiveWork = (nodeId: string, seen: Set<string>): boolean => {
+  const pathsHaveLiveWork = (
+    nodeIds: string[],
+    seen: Set<string>,
+  ): boolean => {
     const visited = new Set(seen);
-    const pending = [nodeId];
+    const pending = [...nodeIds];
 
     while (pending.length > 0) {
       const currentId = pending.pop();
@@ -4458,8 +4461,9 @@ async function listIssueBlockerAttentionMap(
           stalledEntry?.result.sampleStalledBlockerIdentifier ??
           sampleStalledFromChain ??
           null,
-        blockingTreeLive: topLevelEdges.some((edge) =>
-          pathHasLiveWork(edge.blockerIssueId, new Set([root.id])),
+        blockingTreeLive: pathsHaveLiveWork(
+          topLevelEdges.map((edge) => edge.blockerIssueId),
+          new Set([root.id]),
         ),
         directBlockerIssueId: sampleEntry?.edge.blockerIssueId ?? null,
         terminalBlockerIssueId,
