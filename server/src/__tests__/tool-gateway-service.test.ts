@@ -492,6 +492,42 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect(settled.status).toBe("expired");
   });
 
+  it("reconciles approved requests from terminal invocations without replaying them", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values({ companyId: company.id, name: "Ask first", policyType: "require_approval", selectors: { toolName: "mcp-remote-fixture:update_note" } });
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const requests = [];
+
+    for (const [noteId, status] of [["completed", "succeeded"], ["failed", "failed"]] as const) {
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [request] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.status, "pending"));
+      await commitToolActionReview(db, { companyId: company.id, actionRequestId: request.id, decision: "approved", actor: { userId: "reviewer" } });
+      await db.update(toolInvocations).set({
+        status,
+        ...(status === "failed" ? { errorCode: "historical_failure", errorMessage: "Historical invocation failed" } : {}),
+        completedAt: new Date(),
+      }).where(eq(toolInvocations.id, request.invocationId));
+      requests.push(request);
+    }
+
+    const replay = vi.spyOn(gateway, "approveActionRequest");
+    expect(await gateway.sweepActionReviews()).toEqual({ scanned: 2 });
+    expect(replay).not.toHaveBeenCalled();
+
+    const settledRequests = await db.select().from(toolActionRequests);
+    const settledRequestsById = new Map(settledRequests.map((request) => [request.id, request]));
+    expect(settledRequestsById.get(requests[0].id)?.status).toBe("executed");
+    expect(settledRequestsById.get(requests[1].id)?.status).toBe("failed");
+    const interactions = await db.select().from(issueThreadInteractions);
+    const interactionsById = new Map(interactions.map((interaction) => [interaction.id, interaction]));
+    expect((interactionsById.get(requests[0].interactionId!)?.result as any)?.toolAction).toMatchObject({ status: "executed" });
+    expect((interactionsById.get(requests[1].interactionId!)?.result as any)?.toolAction).toMatchObject({
+      status: "failed",
+      errorCode: "historical_failure",
+    });
+  });
+
   it("settles expired reviews and interrupted execution without replaying an uncertain external action", async () => {
     const { company, agent, issue, run } = await createRunFixture(db);
     await db.insert(toolPolicies).values({ companyId: company.id, name: "Ask first", policyType: "require_approval", selectors: { toolName: "mcp-remote-fixture:update_note" } });
