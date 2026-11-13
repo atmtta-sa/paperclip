@@ -9122,8 +9122,12 @@ export function createToolGatewayService(
       let scanned = 0;
       for (;;) {
         const rows = await db
-          .select()
+          .select({ request: toolActionRequests, invocation: toolInvocations })
           .from(toolActionRequests)
+          .innerJoin(
+            toolInvocations,
+            eq(toolInvocations.id, toolActionRequests.invocationId),
+          )
           .where(
             and(
               or(
@@ -9142,8 +9146,32 @@ export function createToolGatewayService(
           )
           .orderBy(asc(toolActionRequests.id))
           .limit(100);
-        for (const row of rows) {
+        for (const { request: row, invocation } of rows) {
           if (row.status === "approved") {
+            if (["succeeded", "failed"].includes(invocation.status)) {
+              const status = invocation.status === "succeeded" ? "executed" : "failed";
+              const [changed] = await db
+                .update(toolActionRequests)
+                .set({ status, resolvedAt: now, updatedAt: now })
+                .where(
+                  and(
+                    eq(toolActionRequests.id, row.id),
+                    eq(toolActionRequests.status, "approved"),
+                    eq(toolActionRequests.updatedAt, row.updatedAt),
+                  ),
+                )
+                .returning({ id: toolActionRequests.id });
+              if (changed) {
+                await reflectToolActionInteractionLifecycle({
+                  actionRequestId: changed.id,
+                  status,
+                  errorCode: invocation.errorCode,
+                  errorMessage: invocation.errorMessage,
+                  resultSummary: invocation.resultSummary?.summary,
+                });
+              }
+              continue;
+            }
             await this.approveActionRequest({
               companyId: row.companyId,
               actionRequestId: row.id,
@@ -9196,7 +9224,7 @@ export function createToolGatewayService(
         }
         scanned += rows.length;
         if (rows.length < 100) break;
-        cursor = rows[rows.length - 1].id;
+        cursor = rows[rows.length - 1].request.id;
       }
       return { scanned };
     },
