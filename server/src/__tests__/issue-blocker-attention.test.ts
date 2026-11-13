@@ -333,6 +333,64 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     });
   });
 
+  it(
+    "bounds live-work traversal across a wide shared blocker DAG",
+    async () => {
+      const { companyId, agentId } = await createCompany("PBG");
+      const rootId = await insertIssue({
+        companyId,
+        identifier: "PBG-1",
+        title: "Root",
+        status: "blocked",
+      });
+      const layers: string[][] = [];
+
+      for (let depth = 0; depth < 7; depth += 1) {
+        const layer: string[] = [];
+        for (let width = 0; width < 8; width += 1) {
+          layer.push(
+            await insertIssue({
+              companyId,
+              identifier: `PBG-${depth + 2}-${width + 1}`,
+              title: `Shared blocker ${depth + 1}-${width + 1}`,
+              status: depth === 6 ? "in_progress" : "blocked",
+              assigneeAgentId: agentId,
+            }),
+          );
+        }
+        layers.push(layer);
+      }
+
+      for (const blockerIssueId of layers[0] ?? []) {
+        await block({ companyId, blockerIssueId, blockedIssueId: rootId });
+      }
+      for (let depth = 1; depth < layers.length; depth += 1) {
+        for (const blockedIssueId of layers[depth - 1] ?? []) {
+          for (const blockerIssueId of layers[depth] ?? []) {
+            await block({ companyId, blockerIssueId, blockedIssueId });
+          }
+        }
+      }
+
+      const listStartedAt = performance.now();
+      const root = (await svc.list(companyId, { status: "blocked" })).find(
+        (issue) => issue.id === rootId,
+      );
+      const listDurationMs = performance.now() - listStartedAt;
+
+      expect(listDurationMs).toBeLessThan(1_000);
+      expect(root?.blockerAttention).toMatchObject({
+        state: "needs_attention",
+        reason: "attention_required",
+        unresolvedBlockerCount: 8,
+        coveredBlockerCount: 0,
+        attentionBlockerCount: 8,
+        blockingTreeLive: true,
+      });
+    },
+    3_000,
+  );
+
   it("does not let another company's active run cover the blocker", async () => {
     const { companyId, agentId } = await createCompany("PBS");
     const other = await createCompany("PBT");

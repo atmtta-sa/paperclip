@@ -4314,28 +4314,36 @@ async function listIssueBlockerAttentionMap(
   };
 
   const pathHasLiveWork = (nodeId: string, seen: Set<string>): boolean => {
-    if (seen.has(nodeId)) return false;
-    const node = nodesById.get(nodeId);
-    if (!node || node.companyId !== companyId) return false;
-    if (
-      node.status === "in_progress" ||
-      activeIssueIds.has(node.id) ||
-      explicitWaitingIssueIds.has(node.id) ||
-      Boolean(node.assigneeUserId)
-    )
-      return true;
+    const visited = new Set(seen);
+    const pending = [nodeId];
 
-    const nextSeen = new Set(seen);
-    nextSeen.add(nodeId);
-    return (edgesByIssueId.get(node.id) ?? []).some((edge) => {
-      const blocker = nodesById.get(edge.blockerIssueId);
+    while (pending.length > 0) {
+      const currentId = pending.pop();
+      if (!currentId || visited.has(currentId)) continue;
+      visited.add(currentId);
+
+      const node = nodesById.get(currentId);
+      if (!node || node.companyId !== companyId) continue;
       if (
-        blocker?.status === "done" &&
-        !pendingFinalizeBlockerIssueIds.has(edge.blockerIssueId)
+        node.status === "in_progress" ||
+        activeIssueIds.has(node.id) ||
+        explicitWaitingIssueIds.has(node.id) ||
+        Boolean(node.assigneeUserId)
       )
-        return false;
-      return pathHasLiveWork(edge.blockerIssueId, nextSeen);
-    });
+        return true;
+
+      for (const edge of edgesByIssueId.get(node.id) ?? []) {
+        const blocker = nodesById.get(edge.blockerIssueId);
+        if (
+          blocker?.status === "done" &&
+          !pendingFinalizeBlockerIssueIds.has(edge.blockerIssueId)
+        )
+          continue;
+        if (!visited.has(edge.blockerIssueId)) pending.push(edge.blockerIssueId);
+      }
+    }
+
+    return false;
   };
 
   const issueIdForSample = (sample: string | null | undefined) => {
