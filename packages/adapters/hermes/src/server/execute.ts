@@ -76,6 +76,11 @@ import {
   type HermesBillingRoutePolicy,
 } from "./durable-call-evidence.js";
 import { readDurableHermesPretransportEvidence } from "./pretransport-evidence.js";
+import {
+  parseContextTelemetry,
+  resolveEffectiveRequestPolicy,
+  type HermesContextTelemetry,
+} from "./context-telemetry.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -501,6 +506,7 @@ type HermesRunResult = {
   cost_source?: string | null;
   cost_unavailable_reason?: string | null;
   execution_checkpoint?: unknown;
+  context_telemetry?: HermesContextTelemetry;
   progress?: {
     provider_responses_since_baseline: number;
     max_provider_responses_without_durable_progress: number;
@@ -597,6 +603,8 @@ function validQuietResult(value: Record<string, unknown>): boolean {
         typeof progress.workspace_changed !== "boolean" ||
         !validNonnegative(progress.verification_commands)) return false;
   }
+  if (value.context_telemetry !== undefined &&
+      !parseContextTelemetry(value.context_telemetry)) return false;
   return value.estimated_cost_usd == null || validNonnegative(value.estimated_cost_usd, false);
 }
 
@@ -865,6 +873,7 @@ export async function execute(
     model,
     Boolean(ctx.autonomousBudgetEnvelope),
   );
+  const effectiveRequestPolicy = resolveEffectiveRequestPolicy(config);
 
   // ── Load agent instructions file (Paperclip instruction bundles) ──────
   // Paperclip can materialize managed instructions into instructionsFilePath;
@@ -971,6 +980,9 @@ export async function execute(
   }
   if (billingRoutePolicy) {
     env.HERMES_BILLING_ROUTE_POLICY_JSON = JSON.stringify(billingRoutePolicy);
+  }
+  if (effectiveRequestPolicy) {
+    env.HERMES_EFFECTIVE_REQUEST_POLICY_JSON = JSON.stringify(effectiveRequestPolicy);
   }
   const managedProgressPolicy = resolveManagedProgressPolicy(
     config,
@@ -1114,6 +1126,19 @@ export async function execute(
   } else if (runResult?.version === 2 && runResult.failed === true) {
     executionResult.errorMessage = "Hermes reported a failed run";
   }
+  if (effectiveRequestPolicy?.required) {
+    const contextTelemetry = runResult?.context_telemetry;
+    const policyFailure = contextTelemetry?.verdict === "denied"
+      ? contextTelemetry.reason || "effective_request_policy_denied"
+      : contextTelemetry
+        ? null
+        : "effective_request_telemetry_missing";
+    if (policyFailure) {
+      executionResult.errorCode = policyFailure;
+      executionResult.errorMessage = policyFailure;
+      executionResult.retryHint = "policy_blocked";
+    }
+  }
 
   // Stdout is display-only: its numbers can be task text or a progress banner.
   // Each spawned process reports its own counters, including on session resume.
@@ -1225,6 +1250,9 @@ export async function execute(
     ...(durableCallEvidence ? { durableCallEvidence } : {}),
     ...(pretransportEvidence ? { pretransportEvidence } : {}),
     ...(budgetSufficiency ? { budgetSufficiency } : {}),
+    ...(runResult?.context_telemetry
+      ? { contextTelemetry: runResult.context_telemetry }
+      : {}),
     ...(runResult?.version === 2 ? {
       provider: runResult.provider ?? null,
       billingType: codexSubscriptionTelemetryComplete

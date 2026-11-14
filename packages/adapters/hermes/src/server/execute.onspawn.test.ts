@@ -113,6 +113,52 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function contextTelemetryFixture() {
+  return {
+    schema: "hermes.context_telemetry.v1",
+    request_count: 1,
+    verdict: "allowed" as "allowed" | "denied",
+    reason: null as string | null,
+    requests: [{
+      schema: "hermes.effective_request_manifest.v1",
+      transport: "chat_completions",
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+      measurements: {
+        request_bytes: 123,
+        system_bytes: 20,
+        messages_bytes: 40,
+        tools_bytes: 2,
+        message_count: 1,
+        tool_count: 0,
+      },
+      hashes: {
+        request_sha256: "a".repeat(64),
+        system_sha256: "b".repeat(64),
+        messages_sha256: "c".repeat(64),
+        tools_sha256: "d".repeat(64),
+      },
+      duplicate_blocks: [],
+      policy_sha256: "e".repeat(64),
+      verdict: "allowed" as "allowed" | "denied",
+      reason: null as string | null,
+    }],
+  };
+}
+
+function effectiveRequestPolicyFixture() {
+  return {
+    required: true,
+    maxRequestBytes: 120_000,
+    maxSystemBytes: 30_000,
+    maxMessagesBytes: 80_000,
+    maxToolsBytes: 20_000,
+    maxToolCount: 12,
+    maxExactDuplicateBlocks: 0,
+    minDuplicateBlockBytes: 512,
+  };
+}
+
 describe("hermes-local adapter onSpawn forwarding", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -276,6 +322,122 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       memoryEnabled: false,
       userProfileEnabled: false,
     });
+  });
+
+  it("injects the configured effective-request policy before launch", async () => {
+    const effectiveRequestPolicy = effectiveRequestPolicyFixture();
+    const { ctx } = makeCtx({ effectiveRequestPolicy });
+
+    await execute(ctx as any);
+
+    const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
+    const env = (call[3] as { env: Record<string, string> }).env;
+    expect(JSON.parse(env.HERMES_EFFECTIVE_REQUEST_POLICY_JSON)).toEqual(
+      effectiveRequestPolicy,
+    );
+  });
+
+  it("projects validated content-free context telemetry into resultJson", async () => {
+    const contextTelemetry = contextTelemetryFixture();
+    vi.mocked(fs.readFile).mockResolvedValueOnce(JSON.stringify({
+      version: 2,
+      failed: false,
+      partial: false,
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+      endpoint_class: "openrouter_api",
+      provider_request_ids: [],
+      api_calls: 0,
+      successful_provider_responses: 0,
+      usage_telemetry_complete: false,
+      context_telemetry: contextTelemetry,
+    }));
+    const { ctx } = makeCtx({
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+    });
+
+    const result = await execute(ctx as any);
+
+    expect(result.resultJson?.contextTelemetry).toEqual(contextTelemetry);
+    expect(JSON.stringify(result.resultJson)).not.toContain("private task body");
+  });
+
+  it("rejects context telemetry that contains raw request content", async () => {
+    const contextTelemetry = contextTelemetryFixture();
+    (contextTelemetry.requests[0] as Record<string, unknown>).request = {
+      messages: [{ role: "user", content: "private task body" }],
+    };
+    vi.mocked(fs.readFile).mockResolvedValueOnce(JSON.stringify({
+      version: 2,
+      failed: false,
+      partial: false,
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+      endpoint_class: "openrouter_api",
+      provider_request_ids: [],
+      api_calls: 0,
+      successful_provider_responses: 0,
+      usage_telemetry_complete: false,
+      context_telemetry: contextTelemetry,
+    }));
+    const { ctx } = makeCtx({
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+      effectiveRequestPolicy: effectiveRequestPolicyFixture(),
+    });
+
+    const result = await execute(ctx as any);
+
+    expect(result.resultJson?.contextTelemetry).toBeUndefined();
+    expect(result.errorCode).toBe("effective_request_telemetry_missing");
+    expect(result.retryHint).toBe("policy_blocked");
+    expect(JSON.stringify(result.resultJson)).not.toContain("private task body");
+  });
+
+  it("fails closed when required context telemetry is missing", async () => {
+    const { ctx } = makeCtx({
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+      effectiveRequestPolicy: effectiveRequestPolicyFixture(),
+    });
+
+    const result = await execute(ctx as any);
+
+    expect(result.errorCode).toBe("effective_request_telemetry_missing");
+    expect(result.retryHint).toBe("policy_blocked");
+  });
+
+  it("surfaces a denied context manifest as a policy-blocked run", async () => {
+    const contextTelemetry = contextTelemetryFixture();
+    contextTelemetry.verdict = "denied";
+    contextTelemetry.reason = "effective_request_request_bytes_exceeded";
+    contextTelemetry.requests[0].verdict = "denied";
+    contextTelemetry.requests[0].reason = "effective_request_request_bytes_exceeded";
+    vi.mocked(fs.readFile).mockResolvedValueOnce(JSON.stringify({
+      version: 2,
+      failed: true,
+      partial: false,
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+      endpoint_class: "openrouter_api",
+      provider_request_ids: [],
+      api_calls: 0,
+      successful_provider_responses: 0,
+      usage_telemetry_complete: false,
+      context_telemetry: contextTelemetry,
+    }));
+    const { ctx } = makeCtx({
+      provider: "openrouter",
+      model: "moonshotai/kimi-k3",
+      effectiveRequestPolicy: effectiveRequestPolicyFixture(),
+    });
+
+    const result = await execute(ctx as any);
+
+    expect(result.resultJson?.contextTelemetry).toEqual(contextTelemetry);
+    expect(result.errorCode).toBe("effective_request_request_bytes_exceeded");
+    expect(result.retryHint).toBe("policy_blocked");
   });
 
   it("passes an explicit implementation progress policy only to bounded managed runs", async () => {
