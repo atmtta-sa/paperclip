@@ -363,6 +363,38 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(JSON.stringify(result.resultJson)).not.toContain("private task body");
   });
 
+  it("preserves validated context telemetry when unrelated quiet metadata is invalid", async () => {
+    const contextTelemetry = contextTelemetryFixture();
+    contextTelemetry.verdict = "denied";
+    contextTelemetry.reason = "effective_request_request_bytes_exceeded";
+    contextTelemetry.requests[0].verdict = "denied";
+    contextTelemetry.requests[0].reason = "effective_request_request_bytes_exceeded";
+    vi.mocked(fs.readFile).mockResolvedValueOnce(JSON.stringify({
+      version: 2,
+      failed: true,
+      partial: true,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      endpoint_class: "codex_app_server",
+      provider_request_ids: ["response-without-success-count"],
+      api_calls: 0,
+      successful_provider_responses: 0,
+      usage_telemetry_complete: false,
+      context_telemetry: contextTelemetry,
+    }));
+    const { ctx } = makeCtx({
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      effectiveRequestPolicy: effectiveRequestPolicyFixture(),
+    });
+
+    const result = await execute(ctx as any);
+
+    expect(result.resultJson?.contextTelemetry).toEqual(contextTelemetry);
+    expect(result.errorCode).toBe("effective_request_request_bytes_exceeded");
+    expect(result.retryHint).toBe("policy_blocked");
+  });
+
   it("rejects context telemetry that contains raw request content", async () => {
     const contextTelemetry = contextTelemetryFixture();
     (contextTelemetry.requests[0] as Record<string, unknown>).request = {

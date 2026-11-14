@@ -611,7 +611,18 @@ function validQuietResult(value: Record<string, unknown>): boolean {
 async function readHermesRunResult(resultPath: string): Promise<HermesRunResult | null> {
   try {
     const parsed = JSON.parse(await fs.readFile(resultPath, "utf-8")) as Record<string, unknown>;
-    return validQuietResult(parsed) ? (parsed as HermesRunResult) : null;
+    if (validQuietResult(parsed)) return parsed as HermesRunResult;
+    const contextTelemetry = parsed.version === 2
+      ? parseContextTelemetry(parsed.context_telemetry)
+      : undefined;
+    return contextTelemetry
+      ? {
+          version: 2,
+          failed: true,
+          partial: true,
+          context_telemetry: contextTelemetry,
+        }
+      : null;
   } catch {
     return null;
   } finally {
