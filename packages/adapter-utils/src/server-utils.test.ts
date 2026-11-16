@@ -3087,6 +3087,37 @@ describe("selectPaperclipTaskMarkdown", () => {
     ).toBe(compactMarkdown);
   });
 
+  it("uses only the bounded capsule on fresh session rollovers", () => {
+    const rollover = {
+      ...wake("session_rollover_required"),
+      issue: {
+        ...wake("session_rollover_required").issue,
+        description: "DUPLICATED FULL TASK DESCRIPTION",
+      },
+      executionContinuation: {
+        version: 1,
+        objective: "Implement the focused landing-page test now.",
+        coverage: { kind: "bounded_task_capsule" },
+        taskStateCapsule: {
+          nextAction: "Create tests/test_public_landing_page.py and run it for RED.",
+        },
+      },
+    };
+    const context = {
+      paperclipTaskMarkdown: fullMarkdown,
+      paperclipTaskMarkdownCompact: compactMarkdown,
+      paperclipWake: rollover,
+    };
+
+    expect(selectPaperclipTaskMarkdown(context)).toBe("");
+    const prompt = renderPaperclipWakePrompt(rollover);
+    expect(prompt).toContain("Implement the focused landing-page test now.");
+    expect(prompt).toContain(
+      "Create tests/test_public_landing_page.py and run it for RED.",
+    );
+    expect(prompt).not.toContain("DUPLICATED FULL TASK DESCRIPTION");
+  });
+
   it("falls back to the full markdown when no compact variant exists", () => {
     expect(
       selectPaperclipTaskMarkdown(
