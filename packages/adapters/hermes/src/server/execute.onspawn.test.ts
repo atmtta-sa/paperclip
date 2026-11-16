@@ -707,7 +707,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     await execute(ctx as any);
     const call = vi.mocked(serverUtils.runChildProcess).mock.lastCall!;
     const args = call[2] as string[];
-    expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "8"]);
+    expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--max-turns") + 2)).toEqual(["--max-turns", "12"]);
     expect((call[3] as { timeoutSec: number }).timeoutSec).toBe(900);
     const env = (call[3] as { env: Record<string, string> }).env;
     expect(env.TERMINAL_MAX_FOREGROUND_TIMEOUT).toBe("780");
@@ -716,6 +716,7 @@ describe("hermes-local adapter onSpawn forwarding", () => {
 
   it.each([
     ["admitted request count", 50, 4, 4],
+    ["configured limit above the legacy cap", 20, 20, 20],
     ["admitted request count with omitted configuration", null, 4, 4],
     ["lower configured turn limit", 3, 4, 3],
     ["non-autonomous configured limit", 50, null, 50],

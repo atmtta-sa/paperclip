@@ -789,7 +789,6 @@ export async function execute(
   const maxTurns = ctx.autonomousBudgetEnvelope
     ? Math.min(
         configuredMaxTurns && configuredMaxTurns > 0 ? configuredMaxTurns : 8,
-        8,
         ctx.autonomousBudgetEnvelope.requestCount,
       )
     : configuredMaxTurns;
