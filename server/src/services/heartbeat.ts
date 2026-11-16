@@ -27860,8 +27860,13 @@ export function heartbeatService(
               })),
         );
         preCutoffDependencyTransitionAuthorized = dependencyTransitionAuthorized;
+        // Reconciled execution is fully revalidated under the issue lock before
+        // a run is created. Let that candidate reach the durable validation
+        // without pretending it is an automatic retry in the predecessor chain.
         worktreeCutoffContinuationAuthorized =
-          productiveContinuationAuthorized || dependencyTransitionAuthorized;
+          executionReconciliationWake ||
+          productiveContinuationAuthorized ||
+          dependencyTransitionAuthorized;
         if (dependencyTransitionAuthorized) {
           enrichedContextSnapshot.forceFreshSession = true;
           enrichedContextSnapshot.freshExecutionWorkspaceReplacesId =
@@ -28455,7 +28460,7 @@ export function heartbeatService(
               ) ||
               !readNonEmptyString(decision.outcomeEvidence) ||
               enrichedContextSnapshot.previousRunId !== sourceRunId ||
-              enrichedContextSnapshot.retryOfRunId !== sourceRunId ||
+              readNonEmptyString(enrichedContextSnapshot.retryOfRunId) !== null ||
               !["pending", "delivered"].includes(
                 String(action.evidence.continuationDelivery),
               )
@@ -29588,9 +29593,6 @@ export function heartbeatService(
               sessionIdBefore: explicitContinuation ? null : sessionBefore,
               continuationAttempt,
               stateFingerprintBefore,
-              ...(reconciledSourceRunId
-                ? { retryOfRunId: reconciledSourceRunId }
-                : {}),
             })
             .returning()
             .then((rows) => rows[0]);

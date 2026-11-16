@@ -1934,7 +1934,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
-  it("reconciles a lost wake acknowledgement after the exact successor has already finished", async () => {
+  it("delivers reconciled work as a fresh budget root while preserving continuity evidence", async () => {
     const { action, heartbeat, companyId, previousRunId } =
       await seedReconciledDelivery();
     let successorId: string | undefined;
@@ -1942,7 +1942,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       const run = await heartbeat.wakeup(...args);
       expect(run).not.toBeNull();
       successorId = run!.id;
-      expect(run!.retryOfRunId).toBe(previousRunId);
+      expect(run!.retryOfRunId).toBeNull();
+      expect(run!.contextSnapshot).toMatchObject({ previousRunId });
       throw new Error("fixture lost post-commit wake acknowledgement");
     });
     expect(successorId).toBeDefined();
@@ -1972,7 +1973,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       );
     expect(successor).toMatchObject({
       status: "succeeded",
-      retryOfRunId: previousRunId,
+      retryOfRunId: null,
+      contextSnapshot: { previousRunId },
     });
     const [receipt] = await db
       .select()

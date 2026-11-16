@@ -255,7 +255,6 @@ export async function deliverReconciledExecutions(
           taskId: task.id,
           recoveryActionId: action.id,
           previousRunId: decision.runId,
-          retryOfRunId: decision.runId,
           forceFreshSession: true,
           wakeReason: "issue_recovery_action_restored",
           source: "execution.reconciled",
@@ -263,18 +262,6 @@ export async function deliverReconciledExecutions(
       });
       if (run)
         await db.transaction(async (tx) => {
-          await tx
-            .update(heartbeatRuns)
-            .set({ retryOfRunId: decision.runId })
-            .where(
-              and(
-                eq(heartbeatRuns.companyId, action.companyId),
-                eq(heartbeatRuns.id, run.id),
-                eq(heartbeatRuns.agentId, action.returnOwnerAgentId!),
-                sql`${heartbeatRuns.contextSnapshot}->>'recoveryActionId' = ${action.id}`,
-                sql`${heartbeatRuns.contextSnapshot}->>'previousRunId' = ${decision.runId}`,
-              ),
-            );
           await tx
             .update(issueRecoveryActions)
             .set({
