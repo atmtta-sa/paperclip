@@ -14,6 +14,7 @@ const {
   createBetterAuthInstanceMock,
   createDbMock,
   detectPortMock,
+  deliverReconciledExecutionsMock,
   deriveAuthTrustedOriginsMock,
   environmentCustomImagesServiceMock,
   environmentCustomImagesServiceFactoryMock,
@@ -46,12 +47,14 @@ const {
     })),
   }) as never);
   const detectPortMock = vi.fn(async ({ port }: { port: number; hostname: string }) => port);
+  const deliverReconciledExecutionsMock = vi.fn(async () => undefined);
   const deriveAuthTrustedOriginsMock = vi.fn(() => []);
   const resolveHeartbeatSchedulingSuppressionMock = vi.fn(() => ({
     suppressed: false,
     reason: null,
   }));
   const heartbeatServiceMock = {
+    wakeup: vi.fn(async () => null),
     resolveSchedulingSuppression: resolveHeartbeatSchedulingSuppressionMock,
     recoverNativeRunsAfterRestart: vi.fn(async () => ({
       restartKind: "hard",
@@ -140,6 +143,7 @@ const {
     createBetterAuthInstanceMock,
     createDbMock,
     detectPortMock,
+    deliverReconciledExecutionsMock,
     deriveAuthTrustedOriginsMock,
     environmentCustomImagesServiceMock,
     environmentCustomImagesServiceFactoryMock,
@@ -237,6 +241,11 @@ vi.mock("../services/native-runtime/native-session-executor.js", () => ({
 // exercised by the dedicated DB-backed recovery suites.
 vi.mock("../services/native-runtime/native-safe-replacement.js", () => ({
   reconcileSafeNativeReplacements: vi.fn(async () => ({ scanned: 0, scheduled: 0 })),
+}));
+
+vi.mock("../services/execution-recovery-resolution.js", () => ({
+  deliverReconciledExecutions: deliverReconciledExecutionsMock,
+  settleUnrecoverableExecutions: vi.fn(async () => undefined),
 }));
 
 vi.mock("../config.js", () => ({
@@ -658,6 +667,35 @@ describe("startServer feedback export wiring", () => {
       expect(externalObjectsServiceMock.refreshDueObjectsForActiveCompanies).toHaveBeenCalledTimes(1);
       expect(routineServiceMock.tickScheduledTriggers).not.toHaveBeenCalled();
       expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).not.toHaveBeenCalled();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("delivers reconciled executions when heartbeat scheduling is disabled", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: false }));
+    let executionControlTick: (() => void) | undefined;
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((
+      callback: () => void,
+      interval: number,
+    ) => {
+      if (interval === EXECUTION_RECONCILIATION_INTERVAL_MS) executionControlTick = callback;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval);
+
+    try {
+      await startServer();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(heartbeatServiceFactoryMock).toHaveBeenCalledTimes(1);
+      expect(deliverReconciledExecutionsMock).toHaveBeenCalledExactlyOnceWith(
+        createDbMock.mock.results[0]?.value,
+        heartbeatServiceMock.wakeup,
+      );
+
+      executionControlTick?.();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(deliverReconciledExecutionsMock).toHaveBeenCalledTimes(2);
     } finally {
       setIntervalSpy.mockRestore();
     }

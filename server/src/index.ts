@@ -1151,11 +1151,13 @@ async function startServerWithDatabaseTeardown(
       await Promise.allSettled([...heartbeatSchedulerInFlight]);
     }
   };
+  const executionControlHeartbeat =
+    heartbeat ?? heartbeatService(db as any, { pluginWorkerManager });
   const executionControlSweepsInFlight = new Set<string>();
   const executionControlSweeps = [
     ["finalization", () => reconcileAbandonedExecutionControl(db)],
     ["replacement", () => heartbeat ? reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession: run => verifyStoppedNativeSessionForReplacement(db, run) }) : undefined],
-    ["reconciliation_delivery", () => heartbeat ? deliverReconciledExecutions(db, heartbeat.wakeup) : undefined],
+    ["reconciliation_delivery", () => deliverReconciledExecutions(db, executionControlHeartbeat.wakeup)],
     ["status_delivery", () => deliverExecutionStatuses(db)],
     ["automatic_disposition", () => settleUnrecoverableExecutions(db)],
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
@@ -1219,8 +1221,7 @@ async function startServerWithDatabaseTeardown(
   // so a just-failed lease does not draw a retry on every tick. The startup
   // sweep passes zero, so a restart retries a stranded orphan at once.
   const ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS = 5 * 60 * 1000;
-  const environmentLeaseCleanupHeartbeat =
-    heartbeat ?? heartbeatService(db as any, { pluginWorkerManager });
+  const environmentLeaseCleanupHeartbeat = executionControlHeartbeat;
   const connectionDeliveries = connectionIntentDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
   const questionResponseDeliveries = questionResponseDeliveryService(db as any, {
     heartbeat: environmentLeaseCleanupHeartbeat,
