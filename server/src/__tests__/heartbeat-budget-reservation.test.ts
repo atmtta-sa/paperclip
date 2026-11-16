@@ -169,7 +169,7 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
     })).rejects.toThrow();
   });
 
-  it("does not reset or self-raise a subscription request ceiling on a successor", async () => {
+  it("clamps a subscription successor to the remaining root-chain request capacity", async () => {
     const scope = await createCostBudgetFixture(500);
     const rootRunId = randomUUID();
     const billingPolicy = {
@@ -178,15 +178,47 @@ describeEmbeddedPostgres("autonomous budget reservations", () => {
       policyDigest: "b".repeat(64),
       billingMode: "subscription_included" as const,
       credentialPrincipalId: "managed-account:codex-uat",
-      maxRootChainProviderRequests: 5,
+      maxRootChainProviderRequests: 20,
     };
     expect(await reserveAutonomousBudget(db, {
       ...scope, runId: rootRunId, billingPolicy,
-      requested: { requestCount: 4, inputTokens: 100, outputTokens: 20, runtimeMs: 100 },
+      requested: { requestCount: 20, inputTokens: 100, outputTokens: 20, runtimeMs: 100 },
     })).toMatchObject({ admitted: true });
+    await reconcileAutonomousBudget(db, {
+      ...scope,
+      runId: rootRunId,
+      providerActivityOccurred: true,
+      providerRequestId: "response-root",
+      billingMode: "subscription_included",
+      actual: { requestCount: 12, inputTokens: 100, outputTokens: 20, runtimeMs: null },
+      settlementEvidence: {
+        source: "hermes_sqlite_transport_owner",
+        contractVersion: 3,
+        runId: rootRunId,
+        digestSha256: "a".repeat(64),
+        costBasis: "subscription_included",
+        runtimeBasis: null,
+        runtimeApplicability: "unavailable_by_route",
+        billingMode: "subscription_included",
+        routePolicyId: billingPolicy.policyId,
+        routePolicyVersion: billingPolicy.policyVersion,
+        routePolicyDigest: billingPolicy.policyDigest,
+        credentialPrincipalId: billingPolicy.credentialPrincipalId,
+        rootChainRequestLimit: billingPolicy.maxRootChainProviderRequests,
+        tokenAccountingBasis: "provider_reported_tokens_v1",
+      },
+    });
+    const successor = await reserveAutonomousBudget(db, {
+      ...scope, runId: randomUUID(), previousRunId: rootRunId, billingPolicy,
+      requested: { requestCount: 20, inputTokens: 10, outputTokens: 5, runtimeMs: 10 },
+    });
+    expect(successor).toMatchObject({
+      admitted: true,
+      envelope: { requestCount: 8 },
+    });
     await expect(reserveAutonomousBudget(db, {
       ...scope, runId: randomUUID(), previousRunId: rootRunId, billingPolicy,
-      requested: { requestCount: 2, inputTokens: 10, outputTokens: 5, runtimeMs: 10 },
+      requested: { requestCount: 1, inputTokens: 10, outputTokens: 5, runtimeMs: 10 },
     })).rejects.toThrow("autonomous_budget_root_chain_request_limit_exceeded");
     await expect(reserveAutonomousBudget(db, {
       ...scope, runId: randomUUID(), previousRunId: rootRunId,

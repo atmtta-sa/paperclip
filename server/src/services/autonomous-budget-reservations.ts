@@ -182,8 +182,13 @@ export function projectRootChainRequestCapacity(
     (total, row) => total + recordedMetric(row, "request_count"),
     0,
   );
+  const remainingRootChainRequests = Math.max(
+    0,
+    maxRootChainProviderRequests - committedRootChainRequests,
+  );
   return {
     committedRootChainRequests,
+    remainingRootChainRequests,
     eligible:
       committedRootChainRequests + requestedRequestCount <=
       maxRootChainProviderRequests,
@@ -376,10 +381,12 @@ export async function reserveAutonomousBudget(
         });
       return circuitPermit.admitted ? null : circuitPermit;
     };
-    const { policies, requested } = await lockAutonomousBudgetCandidateEnvelope(
+    const candidate = await lockAutonomousBudgetCandidateEnvelope(
       tx as unknown as Db,
       input,
     );
+    const { policies } = candidate;
+    let requested = candidate.requested;
 
     const existing = await tx
       .select({
@@ -506,7 +513,16 @@ export async function reserveAutonomousBudget(
         )
       : null;
     if (rootChainCapacity && !rootChainCapacity.eligible) {
-      throw new Error("autonomous_budget_root_chain_request_limit_exceeded");
+      if (
+        !input.previousRunId ||
+        rootChainCapacity.remainingRootChainRequests === 0
+      ) {
+        throw new Error("autonomous_budget_root_chain_request_limit_exceeded");
+      }
+      requested = {
+        ...requested,
+        requestCount: rootChainCapacity.remainingRootChainRequests,
+      };
     }
 
     const now = new Date();
